@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Automated debug-mode screenshot rebuild helper for AndroidAQL.
+Automated debug-mode screenshot rebuild helper for AirSlice.
 
 Safely backs up existing app data (SQLite database, ring buffer, shared prefs) and
 rotation settings on a connected Android device/emulator, runs deterministic debug
@@ -216,6 +216,7 @@ def send_screenshot_preset(adb: str, serial: str, preset: str, wait_sec: float) 
             "shell",
             "am",
             "start",
+            "--activity-clear-top",
             "--activity-single-top",
             "-a",
             DEV_COMMAND_ACTION,
@@ -247,11 +248,11 @@ def capture_webp(adb: str, serial: str, ffmpeg: str, tmp_dir: Path, out_path: Pa
             "-c:v",
             "libwebp",
             "-lossless",
-            "0",
+            "1",
             "-compression_level",
             "6",
             "-q:v",
-            "85",
+            "100",
             str(out_path),
         ]
     )
@@ -268,7 +269,7 @@ def verify_dimensions(paths: list[Path]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Regenerate AndroidAQL WebP screenshots cleanly via debug DEV_COMMAND presets."
+        description="Regenerate AirSlice WebP screenshots cleanly via debug DEV_COMMAND presets."
     )
     parser.add_argument("--serial", help="Target adb device serial (optional when only 1 device connected)")
     parser.add_argument(
@@ -304,8 +305,9 @@ def main() -> int:
     captured_paths: list[Path] = []
 
     try:
-        # Ensure device screen is awake & portrait
+        # Ensure device screen is awake, dismiss any lingering system dialogs, & lock portrait
         run_cmd([*adb_base(adb, serial), "shell", "input", "keyevent", "KEYCODE_WAKEUP"], check=False)
+        run_cmd([*adb_base(adb, serial), "shell", "input", "keyevent", "KEYCODE_BACK"], check=False)
         set_rotation(adb, serial, "0", "0")
         time.sleep(1.0)
 
@@ -317,6 +319,13 @@ def main() -> int:
                 real_path = screenshots_dir / "real_trip_overview.webp"
                 capture_webp(adb, serial, ffmpeg, tmp_dir, real_path)
                 captured_paths.append(real_path)
+
+            clear_demo_databases_and_files(adb, serial)
+
+            send_screenshot_preset(adb, serial, "demo_now_dashboard", wait_sec=2.5)
+            p_now = screenshots_dir / "now_dashboard.webp"
+            capture_webp(adb, serial, ffmpeg, tmp_dir, p_now)
+            captured_paths.append(p_now)
 
             clear_demo_databases_and_files(adb, serial)
 
@@ -335,6 +344,7 @@ def main() -> int:
             capture_webp(adb, serial, ffmpeg, tmp_dir, p_modal)
             captured_paths.append(p_modal)
 
+            run_cmd([*adb_base(adb, serial), "shell", "am", "force-stop", PACKAGE_ID])
             set_rotation(adb, serial, "0", "1")
             time.sleep(2.0)
             send_screenshot_preset(adb, serial, "demo_landscape_edit", wait_sec=2.5)

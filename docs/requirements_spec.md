@@ -4,7 +4,7 @@
 An Android application designed to collect, analyze, and export environmental data ($\text{CO}_2$, PM2.5, PM10, Temperature, Humidity) from a **Qingping Air Monitor Lite (`CGDN1`)** with first-class support for **portability and advocacy**:
 1. **Home vs. Field Context Awareness:** Automatically distinguish between stationary monitoring at known "Home" locations (via known Wi-Fi APs) and portable excursions (transit + destinations).
 2. **Retrospective Session Slicing:** Allow users to divide and adjust excursion timelines *after the fact* into distinct segments (e.g., *Bus Ride Out*, *Waiting Room*, *Exam Room*, *Cab Ride Back*) by inspecting synchronized air quality and movement speed/accuracy charts.
-3. **Advocacy-Grade Retention & Privacy by Default:** Retain full-resolution telemetry during a review window and indefinitely for flagged/pinned excursions (e.g., to share air quality evidence for healthcare/facility advocacy), while automatically rolling up unflagged/stationary data over time and discarding GPS coordinates by default.
+3. **Advocacy-Grade Retention & Privacy by Default:** Retain full-resolution telemetry during a 14-day rolling review window and indefinitely for flagged/pinned excursions (e.g., to share air quality evidence for healthcare/facility advocacy), while automatically overwriting unflagged data after 14 days and immediately discarding raw GPS coordinates.
 
 ---
 
@@ -42,7 +42,7 @@ To handle real-world RF occlusion (e.g., monitor muffled inside a backpack on th
 | :--- | :--- | :--- | :--- |
 | **`Idle_OutOfRange`** | No BLE advertisement within `T_gps_pause` (from Stationary) or `T_excursion_close` (from Excursion). | Low-power hardware-filtered BLE scan (`0xFDCD` + device MAC) only. | **GPS Off.** Zero data logged. |
 | **`Stationary_KnownAP`** | `CGDN1` BLE packet seen within `T_gps_pause` **AND** a configured "Known Place" Wi-Fi AP (matched by BSSID or SSID) is connected/visible. | BLE advertisement parser (`qingping.py` `0x0E` payload). | **GPS Off.** Samples tagged with `known_place_id` (e.g., *"Home"*, *"Partner's Apt"*). |
-| **`Field_Excursion_Active`** | `CGDN1` BLE packet seen within `T_gps_pause` **AND** no Known Place Wi-Fi AP is visible. | BLE advertisement parser + `FusedLocationProviderClient` + `GpsMovementFilter`. | **Scalar Movement by Default:** Logs filtered `speed_mps`, `delta_distance_m`, and `horizontal_accuracy_m`. Raw `lat`/`lon` discarded in-memory unless opt-in enabled. |
+| **`Field_Excursion_Active`** | `CGDN1` BLE packet seen within `T_gps_pause` **AND** no Known Place Wi-Fi AP is visible. | BLE advertisement parser + `FusedLocationProviderClient` + `GpsMovementFilter`. | **Scalar Movement Only:** Logs filtered `speed_mps`, `delta_distance_m`, and `horizontal_accuracy_m`. Raw `lat`/`lon` immediately discarded in-memory. |
 | **`Field_Excursion_SignalPaused`** | In an active Excursion, but no `CGDN1` BLE packet seen for `> T_gps_pause` (and `< T_excursion_close`). | Low-power BLE scan waiting for monitor to reappear. | **GPS Paused.** Parent `EXCURSION` stays open so returning to the bag resumes the same trip seamlessly. |
 
 ### 2.3 Uncertainty-Gated Cumulative Anchor Filter (`GpsMovementFilter`)
@@ -60,18 +60,15 @@ To prevent stationary GPS jitter (e.g., while sitting in a waiting room) from lo
 
 ## 3. Storage Architecture & Data Model
 
-### 3.1 Hybrid Storage Strategy: RRD/Whisper Binary Ring Buffers + SQLite Metadata
+### 3.1 Hybrid Storage Strategy: Binary Ring Buffers + SQLite Metadata
 Using SQLite for continuous 10–15 second time-series ingestion (`~8,640 rows/day`) introduces unnecessary B-tree fragmentation, WAL write amplification, and periodic `DELETE`/`VACUUM` maintenance jobs. Instead, the storage layer separates **fixed-size circular time-series storage** from **relational metadata**:
 
-1. **Constant-Size Circular Time-Series Store (Whisper / RRD4J / Custom Binary Ring Buffer):**
-   * Pre-allocated binary file(s) per `MONITOR_DEVICE` using fixed-width binary slots accessed via `FileChannel` / `RandomAccessFile` (either via pure-JVM **`RRD4J`** or a lightweight custom Whisper-style multi-archive ring buffer).
-   * **Inline Rollup on Write:** Consolidation (`MEAN`, `MIN`, `MAX`, `COUNT`) into lower-resolution archives happens in $O(1)$ as high-resolution slots advance—no background SQLite compaction or pruning jobs required.
+1. **Constant-Size Circular Time-Series Store (`.aqlring` Binary Ring Buffer):**
+   * Pre-allocated binary file per `MONITOR_DEVICE` using fixed-width 32-byte binary slots accessed via `FileChannel` / `RandomAccessFile`.
+   * **Inline Slot Update on Write:** Consolidation (`MEAN`, `MIN`, `MAX`, `COUNT`) into each 15-second bucket happens in $O(1)$ in-place—no background SQLite compaction or pruning jobs required.
    * **Predictable, Constant Disk Footprint:**
-     * *Archive 0 (Full-Res, 15s step, 14-day retention):* $80,640\text{ slots} \times 28\text{ bytes} \approx \mathbf{2.25\text{ MB}}$
-     * *Archive 1 (Medium-Res, 5m step, 90-day retention):* $25,920\text{ slots} \times 28\text{ bytes} \approx \mathbf{0.72\text{ MB}}$
-     * *Archive 2 (Long-Term, 1h step, 2-year retention):* $17,520\text{ slots} \times 28\text{ bytes} \approx \mathbf{0.49\text{ MB}}$
-     * *Movement Ring Buffer (15s step, 14-day retention):* $80,640\text{ slots} \times 16\text{ bytes} \approx \mathbf{1.29\text{ MB}}$
-     * **Total Constant Footprint per Monitor:** **$< 5\text{ MB}$** on disk forever.
+     * *Archive 0 (High-Res, 15s step, 14-day retention):* $80,640\text{ slots} \times 32\text{ bytes} + 96\text{ bytes header/descriptor} = \mathbf{2,580,576\text{ bytes}}\ (\approx \mathbf{2.58\text{ MB}})$
+     * **Total Constant Footprint per Monitor:** **$\approx 2.58\text{ MB}$** on disk forever.
 2. **Pinned Excursion Archive ("Freeze on Pin"):**
    * During the 14-day full-resolution window (Archive 0), retrospective session slicing reads directly from the ring buffer.
    * When a user flags an `EXCURSION` for indefinite retention (`is_pinned = true`), the raw Archive 0 sensor and movement slots covering `[excursion.start_ts, excursion.end_ts]` are copied into a dedicated immutable **Pinned Excursion Store** (either a per-excursion binary/CSV/SQLite archive table), allowing the ring buffer to keep wrapping around indefinitely without losing advocacy data.
@@ -183,7 +180,7 @@ erDiagram
 
 ---
 
-## 4. Tiered Retention & Rollup Policy (Fixed-Size Multi-Archive Ring)
+## 4. Retention Policy (Fixed-Size 14-Day Ring & Trip Pinning)
 
 ### 4.1 Protection Rules (Trip-Level Pinning & Start/End Trimming)
 * **14-Day Archive 0 Grace Window:** Because Archive 0 holds 14 days of raw 15-second slots in a fixed circular buffer, all auto-recorded excursions and stationary readings automatically retain full fidelity for 14 days without user action. Auto-recorded trips are **not** kept beyond 14 days unless explicitly pinned (`EXCURSION.is_pinned = true`).
@@ -191,17 +188,15 @@ erDiagram
   1. **Whole-Trip Retention:** Toggling `EXCURSION.is_pinned = true` (from the trip header pill `⏳ 14d • 📌 Pin`, **Manage Trip**, or the ongoing notification `"Bookmark Trip"` action) freezes the trip's raw Archive 0 data into `PINNED_SLICE_DATA` (`AQLP`). Manually carved trips from **`14d Window`** are automatically pinned (`is_pinned = true`) on creation, and renaming an unpinned auto-recorded trip pre-selects pinning. Unpinning a trip whose raw data has already rolled out of the 14-day ring buffer warns and deletes through the same confirmation flow as trip deletion.
   2. **Boundary Trimming Instead of Per-Slice Pinning:** Rather than pinning individual segments, unwanted leading or trailing spans (such as dead time at Home or a post-outing buffer) can be dropped cleanly via **`🗑️ Drop #1`** / **`🗑️ Drop #N`**, which updates `[excursion.start_ts, excursion.end_ts]` and re-extracts `PINNED_SLICE_DATA` if pinned so only the desired excursion span is kept.
 
-### 4.2 Default Multi-Archive Ring Specification
-Each `MONITOR_DEVICE` ring buffer file is pre-allocated with three consolidation archives (preserving `mean`, `min`, and `max` across rollups):
+### 4.2 Default 14-Day Ring Specification
+Each `MONITOR_DEVICE` ring buffer file is pre-allocated with a single high-resolution archive (preserving `mean`, `min`, and `max` within each 15-second bucket):
 
 | Archive Tier | Step Size | Retention Horizon | Slot Count | Purpose |
 | :--- | :--- | :--- | :--- | :--- |
 | **Archive 0 (High-Res)** | **15 sec** | **14 days** | `80,640` | Full-resolution window for retrospective excursion slicing and recent home monitoring. |
-| **Archive 1 (Medium-Res)** | **5 min** (`300s`) | **90 days** | `25,920` | Medium-term trends with preserved `min`/`max` peaks. |
-| **Archive 2 (Long-Term)** | **1 hour** (`3600s`) | **2 years** | `17,520` | Multi-year seasonal/baseline comparison at fixed $< 0.5\text{ MB}$ size. |
 
 ### 4.3 Gap Handling (Advance-and-Clear)
-When the monitor is powered off or out of range, time advances across ring buffer slots (`slot_index = (timestamp_sec / step_sec) % slot_count`). On every write, if `current_slot_ts > last_written_slot_ts + step_sec`, all intermediate skipped slots are zeroed (`sample_count = 0`) before writing the new slot so stale data from a prior 14-day cycle is never read back as current. Higher-tier rollups (5m / 1h) compute `mean`/`min`/`max` across slots with `sample_count >= 1` and record the actual `sample_count`.
+When the monitor is powered off or out of range, time advances across ring buffer slots (`slot_index = (timestamp_sec / step_sec) % slot_count`). On every write, if `current_slot_ts > last_written_slot_ts + step_sec`, all intermediate skipped slots are zeroed (`sample_count = 0`) before writing the new slot so stale data from a prior 14-day cycle is never read back as current.
 
 ---
 
@@ -357,7 +352,7 @@ flowchart TD
 
 ## 9. Required Documentation Deliverables
 Alongside the application code, the repository must include:
-1. **`docs/binary_storage_format.md`:** Full byte-level specification of the custom fixed-size multi-archive ring buffer file format, header magic/versioning, slot struct layout, inline consolidation math, and pinned-excursion extraction format (enabling external Python/Rust/CLI tools to read `.rrd`/ring files or CSV exports directly).
+1. **`docs/binary_storage_format.md`:** Full byte-level specification of the custom fixed-size 14-day ring buffer file format, header magic/versioning, slot struct layout, inline consolidation math, and pinned-excursion extraction format (enabling external Python/Rust/CLI tools to read `.aqlring` files or CSV exports directly).
 2. **`docs/csv_export_schema.md`:** Formal contract for the self-contained CSV export columns so external PDF/advocacy report generators can target a stable schema.
 
 ---
@@ -401,5 +396,5 @@ Because the physical `CGDN1` hardware arrives today, **Milestone 1** is scoped t
 3. **BLE-Gated State Machine & Saved Wi-Fi Detector:**
    * Foreground service implementing `Idle_OutOfRange` ↔ `Stationary_KnownAP` ↔ `Field_Excursion_Active` ↔ `Field_Excursion_SignalPaused`.
    * One-tap **"Save Current Wi-Fi Place"** + live `ConnectivityManager.NetworkCallback(FLAG_INCLUDE_LOCATION_INFO)` transition logging + BLE-gated `FusedLocationProviderClient` scalar movement capture (`speed_mps`, `delta_distance_m`, `horizontal_accuracy_m`).
-4. **Binary Multi-Archive Ring Buffer + CSV Exporter + Format Docs:**
-   * Working `FileChannel`-backed fixed-size ring buffer (Archives 0/1/2 + Movement ring), one-tap CSV export for inspecting today's hardware test runs, and [`docs/binary_storage_format.md`](binary_storage_format.md) + [`docs/csv_export_schema.md`](csv_export_schema.md).
+4. **Binary 14-Day Ring Buffer + CSV Exporter + Format Docs:**
+   * Working `FileChannel`-backed fixed-size 14-day ring buffer (`15s` step, `80,640` slots), one-tap CSV export for inspecting today's hardware test runs, and [`docs/binary_storage_format.md`](binary_storage_format.md) + [`docs/csv_export_schema.md`](csv_export_schema.md).

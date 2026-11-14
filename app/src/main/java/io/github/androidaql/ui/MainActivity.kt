@@ -39,6 +39,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import io.github.androidaql.R
 import io.github.androidaql.engine.ExcursionStateMachine
 import io.github.androidaql.engine.StepMovementEstimator
 import io.github.androidaql.export.CsvExporter
@@ -76,6 +77,7 @@ class MainActivity : AppCompatActivity() {
 
     private var pendingScreenshotPreset: String? = null
     private var activeSegmentModalDialog: AlertDialog? = null
+    private var activeDisclosureDialog: AlertDialog? = null
 
     private lateinit var topHeaderBar: LinearLayout
     private lateinit var bottomNavBar: LinearLayout
@@ -241,6 +243,8 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         activeSegmentModalDialog?.dismiss()
         activeSegmentModalDialog = null
+        activeDisclosureDialog?.dismiss()
+        activeDisclosureDialog = null
         if (isBound) {
             collectorService?.removeListener(serviceListener)
             unbindService(serviceConnection)
@@ -256,7 +260,14 @@ class MainActivity : AppCompatActivity() {
             sourceIntent.getStringExtra("screenshot_preset")
                 ?.trim()
                 ?.takeIf { it.isNotEmpty() }
-                ?.let { pendingScreenshotPreset = it }
+                ?.let { preset ->
+                    pendingScreenshotPreset = preset
+                    setMovementDisclosureChoice(acceptedLocationAndActivity = false)
+                    getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
+                        .edit()
+                        .putBoolean("screenshot_automation_active", true)
+                        .apply()
+                }
         }
     }
 
@@ -270,6 +281,8 @@ class MainActivity : AppCompatActivity() {
         pendingScreenshotPreset = null
         activeSegmentModalDialog?.dismiss()
         activeSegmentModalDialog = null
+        activeDisclosureDialog?.dismiss()
+        activeDisclosureDialog = null
 
         fun prepareDemoExcursion(reseed: Boolean): Long {
             if (svc.metadataDb.getKnownPlaces().isEmpty()) {
@@ -377,6 +390,21 @@ class MainActivity : AppCompatActivity() {
                 updateEditModeUi()
                 (tabContainers.getOrNull(1) as? ScrollView)?.apply { post { scrollTo(0, 0) } }
             }
+            "demo_now_dashboard" -> {
+                setDeveloperModeEnabled(false)
+                setDemoDataEnabled(false)
+                TemperatureUnitFormatter.setPreference(this, TempUnitPreference.FAHRENHEIT)
+                svc.seedDemoNowDashboard()
+                switchTab(0)
+                renderLiveSnapshot(svc.buildSnapshot())
+                refreshLiveRecentGraph()
+                val slots = liveRecentHistoryView.slots
+                if (slots.isNotEmpty()) {
+                    liveRecentHistoryView.cursorEpochSec = slots[slots.size / 2].bucketEpochSec
+                    liveRecentHistoryView.invalidate()
+                }
+                (tabContainers.getOrNull(0) as? ScrollView)?.apply { post { scrollTo(0, 0) } }
+            }
         }
     }
 
@@ -457,6 +485,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestRuntimePermissionsIfNeeded(forcePrompt: Boolean = false) {
+        val screenshotActive = getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
+            .getBoolean("screenshot_automation_active", false)
+        if (!forcePrompt && (pendingScreenshotPreset != null || screenshotActive)) return
         val allPerms = listOf(
             Manifest.permission.BLUETOOTH_SCAN,
             Manifest.permission.BLUETOOTH_CONNECT,
@@ -514,10 +545,10 @@ class MainActivity : AppCompatActivity() {
         onDeclineLocation: (() -> Unit)? = null
     ) {
         val message = buildString {
-            append("AndroidAQL accesses location, Wi-Fi, and physical activity step data on-device for Trip Mode and Saved Places, even in the background or with the screen off:\n\n")
-            append("• Saved Wi-Fi Places: Reads your Wi-Fi SSID (Location permission required) to keep GPS and step sensing off indoors.\n\n")
-            append("• Trip Movement (GPS + Steps): Outside Saved Places while your monitor is nearby, records scalar speed (m/s) using GPS and hardware step cadence (covering walking when GPS is weak, off, or slower to lock).\n\n")
-            append("• 100% Local & Private: Raw GPS coordinates and step counts are never saved to disk or sent to any server; data leaves your phone only when you explicitly share a CSV or diagnostic log.")
+            append("AirSlice accesses location, Wi-Fi, and physical activity step data on-device for Trip Mode and Saved Places (including in the background or with the screen off), and immediately discards almost all of it—keeping only movement speed (m/s) and GPS accuracy (m):\n\n")
+            append("• Saved Wi-Fi Places: Checks whether your connected Wi-Fi matches a Saved Place (Location permission required) so GPS and step sensing stay off at saved locations like your home or office, where movement tracking isn't needed.\n\n")
+            append("• Trip Movement (GPS + Steps): Outside Saved Places while your monitor is nearby, converts GPS fixes and hardware step cadence into scalar speed (m/s) and accuracy (m) in memory, immediately discarding raw coordinates and step counts.\n\n")
+            append("• 100% Local & Private: Raw GPS coordinates, unconfigured Wi-Fi names, and step counts are never saved to disk or sent to any server; recorded summaries leave your phone only when you explicitly share a CSV or diagnostic log.")
         }
 
         val builder = AlertDialog.Builder(this)
@@ -531,7 +562,8 @@ class MainActivity : AppCompatActivity() {
         } else {
             builder.setPositiveButton("Close", null)
         }
-        builder.show()
+        activeDisclosureDialog?.dismiss()
+        activeDisclosureDialog = builder.show()
     }
 
     private fun buildRootLayout(): View {
@@ -565,7 +597,7 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(Color.parseColor("#0F172A"))
         }
         val titleView = TextView(this).apply {
-            text = "AndroidAQL"
+            text = getString(R.string.app_name)
             setTextColor(Color.parseColor("#F8FAFC"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
             setTypeface(typeface, Typeface.BOLD)
@@ -2765,7 +2797,7 @@ class MainActivity : AppCompatActivity() {
         val tailContent = logFile.readLines().takeLast(200).joinToString("\n")
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
             type = "application/json"
-            putExtra(Intent.EXTRA_SUBJECT, "AndroidAQL Hardware Bring-Up Trace (JSONL)")
+            putExtra(Intent.EXTRA_SUBJECT, "AirSlice Hardware Bring-Up Trace (JSONL)")
             putExtra(Intent.EXTRA_TEXT, tailContent)
         }
         startActivity(Intent.createChooser(shareIntent, "Share HW Trace JSONL"))

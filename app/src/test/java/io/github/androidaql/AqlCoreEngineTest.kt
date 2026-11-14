@@ -157,11 +157,9 @@ class AqlCoreEngineTest {
         val tmpDir = Files.createTempDirectory("aqlring_test").toFile()
         try {
             val ringFile = File(tmpDir, "device_1.aqlring")
-            // Use compact test archives to verify full wrap-around and consolidation quickly
+            // Use compact test archive to verify full wrap-around and consolidation quickly
             val specs = listOf(
-                AqlRingBufferStore.ArchiveSpec(stepSec = 15, slotCount = 64),
-                AqlRingBufferStore.ArchiveSpec(stepSec = 300, slotCount = 32),
-                AqlRingBufferStore.ArchiveSpec(stepSec = 3600, slotCount = 16)
+                AqlRingBufferStore.ArchiveSpec(stepSec = 15, slotCount = 64)
             )
             AqlRingBufferStore(ringFile, deviceId = 1L, archiveSpecs = specs).use { store ->
                 // Write two samples into the same 15s bucket (ts = 1500 and 1505)
@@ -196,7 +194,7 @@ class AqlCoreEngineTest {
                     )
                 )
 
-                // Write a sample in the next 15s bucket (ts = 1515), still in the same 300s Archive 1 bucket (1500)
+                // Write a sample in the next 15s bucket (ts = 1515)
                 store.writeSample(
                     AqlRingBufferStore.RawSampleInput(
                         timestampEpochSec = 1515L,
@@ -221,14 +219,6 @@ class AqlCoreEngineTest {
                 assertEquals(1000, arch0Slots[0].co2PpmMax)
                 assertEquals(15.0f, arch0Slots[0].pm25Mean, 0.1f)
                 assertEquals(20, arch0Slots[0].pm25Max)
-
-                // Archive 1 (300s step) should have consolidated all 3 samples into bucket 1500
-                val arch1Slots = store.queryRange(1, 1500L, 1500L)
-                assertEquals(1, arch1Slots.size)
-                assertEquals(3, arch1Slots[0].sampleCount)
-                assertEquals(1000, arch1Slots[0].co2PpmMean)
-                assertEquals(800, arch1Slots[0].co2PpmMin)
-                assertEquals(1200, arch1Slots[0].co2PpmMax)
 
                 // Verify Pinned Blob extraction and decoding
                 val pinnedBlob = store.extractPinnedBlob(1500L, 1515L)
@@ -256,6 +246,58 @@ class AqlCoreEngineTest {
                 )
                 assertTrue(store.queryRange(0, 1500L, 1530L).isEmpty())
                 assertEquals(1, store.queryRange(0, 4995L, 5010L).size)
+            }
+
+            // Verify in-place migration from legacy 3-archive layout to single 14-day archive
+            val legacyFile = File(tmpDir, "legacy_3arch.aqlring")
+            val legacySpecs = listOf(
+                AqlRingBufferStore.ArchiveSpec(stepSec = 15, slotCount = 64),
+                AqlRingBufferStore.ArchiveSpec(stepSec = 300, slotCount = 32),
+                AqlRingBufferStore.ArchiveSpec(stepSec = 3600, slotCount = 16)
+            )
+            AqlRingBufferStore(legacyFile, deviceId = 1L, archiveSpecs = legacySpecs).use { legacyStore ->
+                legacyStore.writeSample(
+                    AqlRingBufferStore.RawSampleInput(
+                        timestampEpochSec = 1500L,
+                        knownPlaceId = 0,
+                        co2Ppm = 840,
+                        pm25Ugm3 = 11,
+                        pm10Ugm3 = 16,
+                        tempC = 21.5f,
+                        humidityPct = 44.0f
+                    )
+                )
+                legacyStore.writeSample(
+                    AqlRingBufferStore.RawSampleInput(
+                        timestampEpochSec = 1530L,
+                        knownPlaceId = 1,
+                        co2Ppm = 620,
+                        pm25Ugm3 = 4,
+                        pm10Ugm3 = 6,
+                        tempC = 20.5f,
+                        humidityPct = 41.0f
+                    )
+                )
+            }
+            val expectedMigratedSize = (
+                AqlRingBufferStore.HEADER_SIZE +
+                    AqlRingBufferStore.ARCHIVE_DESC_SIZE +
+                    64 * AqlRingBufferStore.SLOT_SIZE_BYTES
+                ).toLong()
+            assertTrue(legacyFile.length() > expectedMigratedSize)
+
+            AqlRingBufferStore(legacyFile, deviceId = 1L, archiveSpecs = specs).use { migratedStore ->
+                assertEquals(expectedMigratedSize, legacyFile.length())
+                assertEquals(
+                    AqlRingBufferStore.HEADER_SIZE + AqlRingBufferStore.ARCHIVE_DESC_SIZE,
+                    migratedStore.getArchiveDescriptor(0).dataOffsetBytes
+                )
+                val migratedSlots = migratedStore.queryRange(startEpochSec = 1500L, endEpochSec = 1530L)
+                assertEquals(2, migratedSlots.size)
+                assertEquals(1500L, migratedSlots[0].bucketEpochSec)
+                assertEquals(840, migratedSlots[0].co2PpmMean)
+                assertEquals(1530L, migratedSlots[1].bucketEpochSec)
+                assertEquals(620, migratedSlots[1].co2PpmMean)
             }
         } finally {
             tmpDir.deleteRecursively()
@@ -964,9 +1006,7 @@ class AqlCoreEngineTest {
         try {
             val ringFile = File(tmpDir, "wrap_test.aqlring")
             val specs = listOf(
-                AqlRingBufferStore.ArchiveSpec(stepSec = 15, slotCount = 64),
-                AqlRingBufferStore.ArchiveSpec(stepSec = 300, slotCount = 32),
-                AqlRingBufferStore.ArchiveSpec(stepSec = 3600, slotCount = 16)
+                AqlRingBufferStore.ArchiveSpec(stepSec = 15, slotCount = 64)
             )
             AqlRingBufferStore(ringFile, deviceId = 1L, archiveSpecs = specs).use { store ->
                 assertEquals(960L, store.getArchiveWindowSec(0))
@@ -997,10 +1037,6 @@ class AqlCoreEngineTest {
                     assertEquals(expectedTs, arch0[k].bucketEpochSec)
                     assertEquals(500 + (86 + k) * 5, arch0[k].co2PpmMean)
                 }
-
-                // Archive 1 (300s) covers 1500 .. 3600 (8 buckets)
-                val arch1 = store.queryRange(1, 1500L, 3735L)
-                assertEquals(listOf(1500L, 1800L, 2100L, 2400L, 2700L, 3000L, 3300L, 3600L), arch1.map { it.bucketEpochSec })
 
                 // Historical write at ts = 1500 maps to the same modulo-64 index as ts = 3420 (i = 128, co2 = 1140)
                 store.writeSample(

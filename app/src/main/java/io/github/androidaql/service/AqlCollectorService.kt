@@ -2573,6 +2573,33 @@ class AqlCollectorService : Service() {
         notifyListeners()
     }
 
+    private fun buildSyntheticCgdn1Frame(
+        co2Ppm: Int,
+        pm25Ugm3: Int,
+        pm10Ugm3: Int,
+        tempX10: Int,
+        humX10: Int,
+        batteryPct: Int,
+        rssiDbm: Int,
+        timestampMs: Long = System.currentTimeMillis()
+    ): QingpingBleParser.DecodedQingpingFrame? {
+        val payload = java.nio.ByteBuffer.allocate(27).order(java.nio.ByteOrder.LITTLE_ENDIAN).apply {
+            put(0x08.toByte())
+            put(0x0E.toByte()) // CGDN1 Air Monitor Lite
+            put(byteArrayOf(0xCD.toByte(), 0xAB.toByte(), 0x12, 0x34, 0x2D, 0x58))
+            put(0x01.toByte()); put(0x04.toByte()); putShort(tempX10.toShort()); putShort(humX10.toShort())
+            put(0x12.toByte()); put(0x04.toByte()); putShort(pm25Ugm3.toShort()); putShort(pm10Ugm3.toShort())
+            put(0x13.toByte()); put(0x02.toByte()); putShort(co2Ppm.toShort())
+            put(0x02.toByte()); put(0x01.toByte()); put(batteryPct.toByte())
+        }.array()
+
+        return QingpingBleParser.parseServiceData(
+            payload,
+            timestampMs = timestampMs,
+            rssiDbm = rssiDbm
+        )
+    }
+
     private fun emitSyntheticDemoFrame() {
         demoTickCounter++
         val co2 = 680 + ((demoTickCounter * 37) % 620)
@@ -2582,20 +2609,69 @@ class AqlCollectorService : Service() {
         val humX10 = 405 + (demoTickCounter % 35)
         val bat = 88
 
-        val payload = java.nio.ByteBuffer.allocate(27).order(java.nio.ByteOrder.LITTLE_ENDIAN).apply {
-            put(0x08.toByte())
-            put(0x0E.toByte()) // CGDN1 Air Monitor Lite
-            put(byteArrayOf(0xCD.toByte(), 0xAB.toByte(), 0x12, 0x34, 0x2D, 0x58))
-            put(0x01.toByte()); put(0x04.toByte()); putShort(tempX10.toShort()); putShort(humX10.toShort())
-            put(0x12.toByte()); put(0x04.toByte()); putShort(pm25.toShort()); putShort(pm10.toShort())
-            put(0x13.toByte()); put(0x02.toByte()); putShort(co2.toShort())
-            put(0x02.toByte()); put(0x01.toByte()); put(bat.toByte())
-        }.array()
-
-        val decoded = QingpingBleParser.parseServiceData(
-            payload,
-            timestampMs = System.currentTimeMillis(),
+        val decoded = buildSyntheticCgdn1Frame(
+            co2Ppm = co2,
+            pm25Ugm3 = pm25,
+            pm10Ugm3 = pm10,
+            tempX10 = tempX10,
+            humX10 = humX10,
+            batteryPct = bat,
             rssiDbm = -58 - (demoTickCounter % 7)
+        ) ?: return
+        handleDecodedFrame(decoded)
+    }
+
+    /**
+     * Populates a deterministic, privacy-safe live "Now" dashboard state at Saved Place "Home"
+     * (`ChicagoHome-5G`) with 15 minutes of calm indoor telemetry for screenshot automation.
+     */
+    fun seedDemoNowDashboard() {
+        for (exc in metadataDb.getExcursions()) {
+            detachActiveExcursionIfMatching(exc.id)
+            metadataDb.deleteExcursion(exc.id)
+        }
+        val places = metadataDb.getKnownPlaces()
+        val homePlace = places.firstOrNull { it.label == "Home" }
+            ?: places.firstOrNull()
+            ?: metadataDb.createKnownPlaceWithWifi("Home", "ChicagoHome-5G", "AA:BB:CC:11:22:33")
+        if (rawWifiSsid.isNullOrBlank()) {
+            rawWifiSsid = "ChicagoHome-5G"
+        }
+        setFakeWifiSsidOverride("ChicagoHome-5G")
+        setManualKnownPlaceOverride(homePlace.id)
+
+        val nowMs = System.currentTimeMillis()
+        val nowSec = (nowMs / 1000L / 15L) * 15L
+        val startSec = nowSec - 15L * 60L
+        for (i in 0 until 60) {
+            val ts = startSec + i * 15L
+            val co2 = 652 + ((i * 3) % 15)
+            ringStore.writeSample(
+                AqlRingBufferStore.RawSampleInput(
+                    timestampEpochSec = ts,
+                    knownPlaceId = homePlace.id,
+                    co2Ppm = co2,
+                    pm25Ugm3 = 0,
+                    pm10Ugm3 = 0,
+                    tempC = 22.3f,
+                    humidityPct = 51.3f,
+                    batteryPct = 100,
+                    rssiDbm = -54,
+                    speedMps = null,
+                    gpsAccuracyM = null
+                )
+            )
+        }
+
+        val decoded = buildSyntheticCgdn1Frame(
+            co2Ppm = 664,
+            pm25Ugm3 = 0,
+            pm10Ugm3 = 0,
+            tempX10 = 223,
+            humX10 = 513,
+            batteryPct = 100,
+            rssiDbm = -54,
+            timestampMs = nowMs
         ) ?: return
         handleDecodedFrame(decoded)
     }

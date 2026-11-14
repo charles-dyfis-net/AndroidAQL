@@ -1,10 +1,10 @@
 # Binary Ring-Buffer Storage Format Specification (`.aqlring`)
 
 ## 1. Overview & Design Goals
-`AndroidAQL` stores continuous environmental and scalar movement time-series data in a constant-size, multi-archive circular binary file (`.aqlring`), inspired by RRDtool and Graphite Whisper.
+`AirSlice` stores continuous environmental and scalar movement time-series data in a constant-size, circular binary file (`.aqlring`), inspired by RRDtool and Graphite Whisper.
 
-* **Strictly Bounded Disk Footprint:** Each monitored device is allocated a single `.aqlring` file of **3,970,720 bytes (~3.79 MB)**.
-* **$O(1)$ Inline Consolidation & Gap Clearing:** Writing a sample updates Archive 0 (15s), Archive 1 (5m), and Archive 2 (1h) in-place via `java.nio.channels.FileChannel` without background compaction or SQLite WAL/VACUUM overhead.
+* **Strictly Bounded Disk Footprint:** Each monitored device is allocated a single `.aqlring` file of **2,580,576 bytes (~2.58 MB)** covering a 14-day rolling window at 15-second resolution.
+* **$O(1)$ Inline Consolidation & Gap Clearing:** Writing a sample updates Archive 0 (15s) in-place via `java.nio.channels.FileChannel` without background compaction or SQLite WAL/VACUUM overhead.
 * **Endianness:** All multi-byte integers are stored in **Little-Endian** (`ByteOrder.LITTLE_ENDIAN`) format.
 
 ---
@@ -14,10 +14,8 @@
 | Byte Offset Range | Size (Bytes) | Section |
 | :--- | :--- | :--- |
 | `0 .. 63` | `64` | **File Header** (`AQLRING1` magic, version, device metadata) |
-| `64 .. 159` | `96` (`3 × 32`) | **Archive Descriptor Table** (3 archives × 32 bytes) |
-| `160 .. 2,580,639` | `2,580,480` | **Archive 0 Slots:** `80,640` slots × `32` bytes (`15s` step, `14d` retention) |
-| `2,580,640 .. 3,410,079` | `829,440` | **Archive 1 Slots:** `25,920` slots × `32` bytes (`300s` / `5m` step, `90d` retention) |
-| `3,410,080 .. 3,970,719` | `560,640` | **Archive 2 Slots:** `17,520` slots × `32` bytes (`3600s` / `1h` step, `730d` retention) |
+| `64 .. 95` | `32` (`1 × 32`) | **Archive Descriptor Table** (1 archive × 32 bytes) |
+| `96 .. 2,580,575` | `2,580,480` | **Archive 0 Slots:** `80,640` slots × `32` bytes (`15s` step, `14d` retention) |
 
 ---
 
@@ -28,7 +26,7 @@
 | :--- | :--- | :--- | :--- |
 | `0..7` | `char[8]` | `magic` | ASCII `"AQLRING1"` (`0x41 0x51 0x4C 0x52 0x49 0x4E 0x47 0x31`) |
 | `8..11` | `uint32` | `version` | Format version (`1`) |
-| `12..15` | `uint32` | `archive_count` | Number of archives (`3`) |
+| `12..15` | `uint32` | `archive_count` | Number of archives (`1`) |
 | `16..23` | `int64` | `device_id` | Internal monitor device ID |
 | `24..31` | `int64` | `created_epoch_ms` | File creation timestamp (UTC epoch milliseconds) |
 | `32..63` | `uint8[32]` | `reserved` | Zero-filled reserved bytes |
@@ -36,10 +34,10 @@
 ### 3.2 Archive Descriptor (`32` bytes per archive, starting at offset `64`)
 | Relative Offset | Type | Field Name | Description |
 | :--- | :--- | :--- | :--- |
-| `+0..3` | `uint32` | `step_sec` | Bucket width in seconds (`15`, `300`, `3600`) |
-| `+4..7` | `uint32` | `slot_count` | Number of slots in ring (`80640`, `25920`, `17520`) |
+| `+0..3` | `uint32` | `step_sec` | Bucket width in seconds (`15`) |
+| `+4..7` | `uint32` | `slot_count` | Number of slots in ring (`80640`) |
 | `+8..11` | `uint32` | `slot_size_bytes` | Bytes per slot (`32`) |
-| `+12..15` | `uint32` | `data_offset_bytes` | Absolute byte offset in file where Slot `0` begins |
+| `+12..15` | `uint32` | `data_offset_bytes` | Absolute byte offset in file where Slot `0` begins (`96`) |
 | `+16..23` | `int64` | `last_bucket_sec` | Aligned epoch seconds of most recently written slot (`-1` if never written) |
 | `+24..31` | `int64` | `reserved` | Zero-filled reserved bytes |
 
@@ -75,7 +73,7 @@ For a given timestamp `ts_sec` (in UTC epoch seconds) and archive parameters `(s
 
 ## 5. Write, Consolidation & Gap-Clearing Algorithm
 
-When a sample arrives at `ts_sec`, the writer updates each archive $i \in \{0, 1, 2\}$ independently:
+When a sample arrives at `ts_sec`, the writer updates Archive 0 (`step_sec = 15`, `slot_count = 80,640`):
 1. Compute `bucket_sec = (ts_sec / step_sec) * step_sec`.
 2. **Advance-and-Clear Skipped Slots:**
    * If `last_bucket_sec >= 0` and `bucket_sec > last_bucket_sec`:

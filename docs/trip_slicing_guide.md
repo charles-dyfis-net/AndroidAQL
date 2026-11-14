@@ -1,6 +1,6 @@
 # How Trips, Segments, and Splits Work
 
-A recorded trip in `AndroidAQL` starts as a single continuous timeline from when recording begins until it ends. **Slicing** lets you divide that timeline into consecutive legs—called **Segments**—so you can label places (like a bus ride vs. a waiting room) and inspect air-quality and speed metrics for each interval on its own.
+A recorded trip in `AirSlice` starts as a single continuous timeline from when recording begins until it ends. **Slicing** lets you divide that timeline into consecutive legs—called **Segments**—so you can label places (like a bus ride vs. a waiting room) and inspect air-quality and speed metrics for each interval on its own.
 
 ---
 
@@ -27,7 +27,7 @@ Trip Start (4:59 PM)     ⇔ 1|2 (5:17 PM)      ⇔ 2|3               ⇔ 3|4   
 
 **Trips** opens in **View Mode** by default, hiding edit handles so you can scrub freely without accidentally shifting a boundary.
 
-![AndroidAQL Trips tab in View Mode showing 3 synchronized panes, color-coded Segment Strip, and segment cards](screenshots/trips_view_mode.webp)
+![AirSlice Trips tab in View Mode showing 3 synchronized panes, color-coded Segment Strip, and segment cards](screenshots/trips_view_mode.webp)
 
 * **Three synchronized panes** share one horizontal timeline:
   * **Pane 1 — Air Quality:** `CO₂ (ppm, blue) & PM2.5 (purple) • Dashed = Dropout (> 45s)`
@@ -42,7 +42,7 @@ Trip Start (4:59 PM)     ⇔ 1|2 (5:17 PM)      ⇔ 2|3               ⇔ 3|4   
 
 Tap **`✏️ Edit Trip`** in the top bar (it turns orange as **`👁️ Done Editing`**) to reveal divider handles and the boundary toolbar.
 
-![AndroidAQL Trips tab in Edit Mode showing ⇔ divider handles, single-row split/nudge bar, and contextual helper hint](screenshots/trips_edit_mode.webp)
+![AirSlice Trips tab in Edit Mode showing ⇔ divider handles, single-row split/nudge bar, and contextual helper hint](screenshots/trips_edit_mode.webp)
 
 * **Splitting a segment (`✂️ Split`):**
   1. Tap or drag anywhere inside a segment to place the dashed cursor where your environment changed (for example, stepping off a bus or walking into a clinic room).

@@ -1,7 +1,7 @@
 # CSV Export Schema Specification (`csv_export_schema.md`)
 
 ## 1. Purpose
-The CSV export produced by `AndroidAQL` is designed to be **self-contained** so that external analysis scripts, charting workflows, or PDF advocacy report generators can reconstruct an exported segment's full 15-second time series (`1` row per sample slot in chronological order), air quality stats, and movement/GPS confidence bands from a single attached `.csv` file (`📤 Export CSV` on any segment card) without requiring access to the phone's SQLite or `.aqlring` files.
+The CSV export produced by `AirSlice` is designed to be **self-contained** so that external analysis scripts, charting workflows, or PDF advocacy report generators can reconstruct an exported segment's full 15-second time series (`1` row per sample slot in chronological order), air quality stats, and movement/GPS confidence bands from a single attached `.csv` file (`📤 Export CSV` on any segment card) without requiring access to the phone's SQLite or `.aqlring` files.
 
 ## 2. File Format Conventions
 * **Encoding:** UTF-8 (no BOM)
@@ -16,7 +16,7 @@ The CSV export produced by `AndroidAQL` is designed to be **self-contained** so 
 | :- | :--- | :--- | :--- | :--- |
 | 1 | `timestamp_iso8601` | `string` | `2026-11-11T14:22:15-06:00` | Local ISO-8601 timestamp with timezone offset |
 | 2 | `timestamp_epoch_sec` | `uint32` | `1794428535` | Aligned slot UTC epoch timestamp in seconds |
-| 3 | `resolution_sec` | `uint32` | `15` | Bucket width in seconds (`15`, `300`, or `3600`) |
+| 3 | `resolution_sec` | `uint32` | `15` | Bucket width in seconds (`15`) |
 | 4 | `sample_count` | `uint16` | `3` | Number of BLE frames merged in this bucket |
 | 5 | `device_mac` | `string` | `58:2D:34:12:AB:CD` | Monitor hardware identifier |
 | 6 | `device_nickname` | `string` | `Travel CGDN1` | User-assigned monitor name |

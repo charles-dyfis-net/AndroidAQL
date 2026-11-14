@@ -18,9 +18,7 @@ import java.nio.file.Files
 class MetadataDatabaseRotationTest {
 
     private fun compactSpecs() = listOf(
-        AqlRingBufferStore.ArchiveSpec(stepSec = 15, slotCount = 64),
-        AqlRingBufferStore.ArchiveSpec(stepSec = 300, slotCount = 32),
-        AqlRingBufferStore.ArchiveSpec(stepSec = 3600, slotCount = 16)
+        AqlRingBufferStore.ArchiveSpec(stepSec = 15, slotCount = 64)
     )
 
     private fun writeRingSample(

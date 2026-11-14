@@ -10,15 +10,13 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Constant-size, multi-archive circular binary time-series store (`.aqlring`),
+ * Constant-size circular binary time-series store (`.aqlring`),
  * implementing the byte-level layout specified in `docs/binary_storage_format.md`.
  *
  * - File Header: 64 bytes (`AQLRING1`)
- * - Archive Descriptors: 3 * 32 = 96 bytes
+ * - Archive Descriptor: 1 * 32 = 32 bytes
  * - Archive 0 (High-Res): 15s step, 80,640 slots (14 days)
- * - Archive 1 (Medium-Res): 300s step, 25,920 slots (90 days)
- * - Archive 2 (Long-Term): 3600s step, 17,520 slots (2 years)
- * - Total Constant Size: 3,970,720 bytes (~3.79 MB)
+ * - Total Constant Size: 2,580,576 bytes (~2.58 MB)
  */
 class AqlRingBufferStore(
     val file: File,
@@ -123,11 +121,9 @@ class AqlRingBufferStore(
     }
 
     private fun verifyAndLoadHeader(): Boolean {
-        val headerBuf = ByteBuffer.allocate(HEADER_SIZE + archiveSpecs.size * ARCHIVE_DESC_SIZE)
+        val headerBuf = ByteBuffer.allocate(HEADER_SIZE)
             .order(ByteOrder.LITTLE_ENDIAN)
-        channel.position(0)
-        val read = channel.read(headerBuf)
-        if (read < headerBuf.capacity()) return false
+        if (!readFullyAt(0L, headerBuf)) return false
         headerBuf.flip()
 
         val magicBytes = ByteArray(8)
@@ -136,17 +132,26 @@ class AqlRingBufferStore(
 
         val version = headerBuf.int
         val archiveCount = headerBuf.int
-        if (version != FORMAT_VERSION || archiveCount != archiveSpecs.size) return false
+        if (version != FORMAT_VERSION) return false
 
-        headerBuf.position(HEADER_SIZE)
+        if (archiveCount > archiveSpecs.size && archiveSpecs.size == 1) {
+            return migrateMultiArchiveToSingleArchive()
+        }
+        if (archiveCount != archiveSpecs.size) return false
+
+        val descBuf = ByteBuffer.allocate(archiveCount * ARCHIVE_DESC_SIZE)
+            .order(ByteOrder.LITTLE_ENDIAN)
+        if (!readFullyAt(HEADER_SIZE.toLong(), descBuf)) return false
+        descBuf.flip()
+
         descriptors.clear()
         for (i in 0 until archiveCount) {
-            val stepSec = headerBuf.int
-            val slotCount = headerBuf.int
-            val slotSizeBytes = headerBuf.int
-            val dataOffsetBytes = headerBuf.int
-            val lastBucketSec = headerBuf.long
-            headerBuf.long // reserved
+            val stepSec = descBuf.int
+            val slotCount = descBuf.int
+            val slotSizeBytes = descBuf.int
+            val dataOffsetBytes = descBuf.int
+            val lastBucketSec = descBuf.long
+            descBuf.long // reserved
             if (stepSec != archiveSpecs[i].stepSec ||
                 slotCount != archiveSpecs[i].slotCount ||
                 slotSizeBytes != SLOT_SIZE_BYTES
@@ -165,6 +170,103 @@ class AqlRingBufferStore(
             )
         }
         return true
+    }
+
+    /**
+     * Migrates an existing multi-archive `AQLRING1` file in-place to a single-archive
+     * file when Archive 0 matches `archiveSpecs[0]`, preserving all 14-day data and
+     * truncating the unused lower-resolution rollup regions.
+     */
+    private fun migrateMultiArchiveToSingleArchive(): Boolean {
+        val descBuf = ByteBuffer.allocate(ARCHIVE_DESC_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+        if (!readFullyAt(HEADER_SIZE.toLong(), descBuf)) return false
+        descBuf.flip()
+
+        val stepSec = descBuf.int
+        val slotCount = descBuf.int
+        val slotSizeBytes = descBuf.int
+        val oldDataOffsetBytes = descBuf.int
+        val lastBucketSec = descBuf.long
+        descBuf.long // reserved
+
+        val spec = archiveSpecs[0]
+        if (stepSec != spec.stepSec ||
+            slotCount != spec.slotCount ||
+            slotSizeBytes != SLOT_SIZE_BYTES
+        ) {
+            return false
+        }
+
+        val newDataOffsetBytes = HEADER_SIZE + ARCHIVE_DESC_SIZE
+        val dataBytes = slotCount.toLong() * SLOT_SIZE_BYTES.toLong()
+        if (oldDataOffsetBytes < newDataOffsetBytes ||
+            raf.length() < oldDataOffsetBytes.toLong() + dataBytes
+        ) {
+            return false
+        }
+
+        if (oldDataOffsetBytes > newDataOffsetBytes) {
+            val chunkSize = min(65536L, dataBytes).toInt()
+            val copyBuf = ByteBuffer.allocate(chunkSize)
+            var copied = 0L
+            while (copied < dataBytes) {
+                val toCopy = min(chunkSize.toLong(), dataBytes - copied).toInt()
+                copyBuf.clear()
+                copyBuf.limit(toCopy)
+                if (!readFullyAt(oldDataOffsetBytes.toLong() + copied, copyBuf)) return false
+                copyBuf.flip()
+                writeFullyAt(newDataOffsetBytes.toLong() + copied, copyBuf)
+                copied += toCopy
+            }
+        }
+
+        val countBuf = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(1)
+        countBuf.flip()
+        writeFullyAt(12L, countBuf)
+
+        val newDescBuf = ByteBuffer.allocate(ARCHIVE_DESC_SIZE).order(ByteOrder.LITTLE_ENDIAN).apply {
+            putInt(stepSec)
+            putInt(slotCount)
+            putInt(slotSizeBytes)
+            putInt(newDataOffsetBytes)
+            putLong(lastBucketSec)
+            putLong(0L)
+            flip()
+        }
+        writeFullyAt(HEADER_SIZE.toLong(), newDescBuf)
+
+        raf.setLength(newDataOffsetBytes.toLong() + dataBytes)
+        channel.force(true)
+
+        descriptors.clear()
+        descriptors.add(
+            ArchiveDescriptor(
+                index = 0,
+                stepSec = stepSec,
+                slotCount = slotCount,
+                slotSizeBytes = slotSizeBytes,
+                dataOffsetBytes = newDataOffsetBytes,
+                lastBucketSec = lastBucketSec
+            )
+        )
+        return true
+    }
+
+    private fun readFullyAt(offset: Long, buf: ByteBuffer): Boolean {
+        var pos = offset
+        while (buf.hasRemaining()) {
+            val n = channel.read(buf, pos)
+            if (n <= 0) return false
+            pos += n
+        }
+        return true
+    }
+
+    private fun writeFullyAt(offset: Long, buf: ByteBuffer) {
+        var pos = offset
+        while (buf.hasRemaining()) {
+            pos += channel.write(buf, pos)
+        }
     }
 
     private fun initializeNewFile() {
@@ -360,7 +462,7 @@ class AqlRingBufferStore(
 
     @Synchronized
     fun queryRange(
-        archiveIndex: Int,
+        archiveIndex: Int = 0,
         startEpochSec: Long,
         endEpochSec: Long
     ): List<RingSlotRecord> {
@@ -509,9 +611,7 @@ class AqlRingBufferStore(
         const val SENTINEL_UINT16 = 0xFFFF
 
         val DEFAULT_ARCHIVES = listOf(
-            ArchiveSpec(stepSec = 15, slotCount = 80_640),   // 14 days @ 15s
-            ArchiveSpec(stepSec = 300, slotCount = 25_920),  // 90 days @ 5m
-            ArchiveSpec(stepSec = 3600, slotCount = 17_520)  // 2 years @ 1h
+            ArchiveSpec(stepSec = 15, slotCount = 80_640) // 14 days @ 15s
         )
 
         fun encodeSlotToBuffer(buf: ByteBuffer, record: RingSlotRecord) {

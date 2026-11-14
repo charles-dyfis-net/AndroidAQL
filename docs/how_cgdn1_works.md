@@ -1,6 +1,6 @@
-# How Your `CGDN1` Monitor Works with `AndroidAQL`
+# How Your `CGDN1` Monitor Works with `AirSlice`
 
-This guide explains what is happening inside a **Qingping Air Monitor Lite (`CGDN1`)**, why its Bluetooth behavior out of the box can be surprising, and how **`AndroidAQL`** works with the monitor to give you continuous mobile air-quality recording without Wi-Fi, cloud accounts, or OLED screen burn-in.
+This guide explains what is happening inside a **Qingping Air Monitor Lite (`CGDN1`)**, why its Bluetooth behavior out of the box can be surprising, and how **`AirSlice`** works with the monitor to give you continuous mobile air-quality recording without Wi-Fi, cloud accounts, or OLED screen burn-in.
 
 > **Looking for byte-level protocol details?** If you are a developer looking for GATT UUIDs, hex opcodes, frame headers, or hardware trace logs, see **[Physical Hardware Observations (`CGDN1`)](hardware_observations.md)**.
 
@@ -46,18 +46,18 @@ Once the monitor considers initial setup finished, it switches into **Normal Mod
 
 ---
 
-## 3. How `AndroidAQL` Completes Setup Offline in ~5 Seconds
+## 3. How `AirSlice` Completes Setup Offline in ~5 Seconds
 
 Normally, moving a `CGDN1` out of Setup Mode and into Normal Mode requires installing the proprietary **Qingping+** (or Xiaomi Home) app, signing into an account, and giving the monitor credentials for a live 2.4 GHz Wi-Fi network.
 
 However, the `CGDN1`'s stock firmware does **not** actually require a working Wi-Fi connection to leave Setup Mode—it transitions into Normal Mode as soon as an authenticated Bluetooth client syncs its clock and configures a reporting server address.
 
-In its default mode, **`AndroidAQL`** takes advantage of that behavior transparently:
+In its default mode, **`AirSlice`** takes advantage of that behavior transparently:
 
 1. **If Your Monitor Is Already in Normal Mode (or Running ESPHome):**
-   `AndroidAQL` never disturbs it. The app operates **100% passively** (`BLE: Provisioned 0x88 (Passive)` or `BLE: BTHome v2 (Passive)`), listening to live broadcasts with zero Bluetooth connections and zero OLED interruptions.
+   `AirSlice` never disturbs it. The app operates **100% passively** (`BLE: Provisioned 0x88 (Passive)` or `BLE: BTHome v2 (Passive)`), listening to live broadcasts with zero Bluetooth connections and zero OLED interruptions.
 2. **If Your Monitor Is in Wi-Fi Setup Mode** *(either because it is brand new after a 7-second touch-bar hold, or because a previous setup was cleared)*:
-   `AndroidAQL` automatically connects over Bluetooth for **~5 seconds**, authenticates with the monitor, syncs its real-time clock, and sends a harmless local loopback server placeholder (`127.0.0.1`) with **no Wi-Fi credentials**.
+   `AirSlice` automatically connects over Bluetooth for **~5 seconds**, authenticates with the monitor, syncs its real-time clock, and sends a harmless local loopback server placeholder (`127.0.0.1`) with **no Wi-Fi credentials**.
 3. **Transition Within ~3 Seconds:**
    The monitor briefly shows its "connecting" overlay on the OLED, clears the static Wi-Fi setup icon back to the normal anti-burn-in CO₂ screen, turns off pairing beacons, and begins broadcasting continuous Normal Mode telemetry indefinitely over passive Bluetooth.
 
@@ -65,12 +65,12 @@ From that moment on, your `CGDN1` stays in Normal Mode across normal trips and h
 
 ---
 
-## 4. Understanding `AndroidAQL`'s Status Banner & Keep-Alive Settings
+## 4. Understanding `AirSlice`'s Status Banner & Keep-Alive Settings
 
-On the **Now** tab, the top status banner shows both your movement/privacy context and how `AndroidAQL` is talking to the monitor:
+On the **Now** tab, the top status banner shows both your movement/privacy context and how `AirSlice` is talking to the monitor:
 
 * **`🏠 At <Saved Place> • GPS Off`** — Your phone is connected to one of your configured Saved Wi-Fi networks, so GPS polling stays completely off (`0 mW`).
-* **`🚶 On a Trip • GPS Active`** — Your monitor is in range and you are away from Saved Wi-Fi Places, so `AndroidAQL` records GPS speed and accuracy alongside air quality.
+* **`🚶 On a Trip • GPS Active`** — Your monitor is in range and you are away from Saved Wi-Fi Places, so `AirSlice` records GPS speed and accuracy alongside air quality.
 * **`📡 Monitor Out of Range • GPS Off`** — The monitor hasn't been heard recently (either turned off, asleep, or left behind), so GPS turns back off.
 
 ### Fallback & Diagnostic Keep-Alive Options (`⚙️ Settings`)
@@ -80,18 +80,18 @@ Under **⚙️ Settings → Monitor Keep-Alive Mode (>30m Unplugged)**, legacy d
 * **`Always Guaranteed Keep-Alive • 24m Reset` (`0509_24M_1101`):** Sends clock syncs every 3.5 minutes plus a pairing-window reset every 24 minutes so an unprovisioned monitor stays awake indefinitely (at the cost of placing the static Wi-Fi setup icon on the OLED every 24 minutes unless dismissed with a touch-bar tap).
 * **`Passive Listener Only` (`NONE_PASSIVE`):** Never initiates Bluetooth GATT connections at all.
 
-With a monitor that has completed `AndroidAQL`'s 5-second offline setup (or runs ESPHome), `AndroidAQL` stays automatically in passive listening mode even if a fallback keep-alive mode was previously selected.
+With a monitor that has completed `AirSlice`'s 5-second offline setup (or runs ESPHome), `AirSlice` stays automatically in passive listening mode even if a fallback keep-alive mode was previously selected.
 
 ---
 
 ## 5. Configuring Wi-Fi Without the First-Party App (`--wifi-ssid`) & Custom Firmware (`ESPHome` / `BTHome v2`)
 
 ### Out-of-the-Box Passive Support for Custom Firmware (`BTHome v2`)
-If your monitor runs custom firmware such as **ESPHome** broadcasting **BTHome v2**, `AndroidAQL` automatically detects and decodes Temperature, Humidity, CO₂, PM2.5, PM10, Pressure, Illuminance, and Battery % passively (`BLE: BTHome v2 (Passive)`).
+If your monitor runs custom firmware such as **ESPHome** broadcasting **BTHome v2**, `AirSlice` automatically detects and decodes Temperature, Humidity, CO₂, PM2.5, PM10, Pressure, Illuminance, and Battery % passively (`BLE: BTHome v2 (Passive)`).
 
-**Important for ESPHome configs (`esp32_ble_tracker` / `bluetooth_proxy`):** ESPHome's built-in `esp32_ble_tracker` and `bluetooth_proxy` components only configure the ESP32 as a BLE **scanner/client**—they do **not** broadcast the monitor's own onboard sensors over BLE by default. Without adding passive BLE advertising, `AndroidAQL` will stop receiving new readings as soon as the `CGDN1` boots into ESPHome.
+**Important for ESPHome configs (`esp32_ble_tracker` / `bluetooth_proxy`):** ESPHome's built-in `esp32_ble_tracker` and `bluetooth_proxy` components only configure the ESP32 as a BLE **scanner/client**—they do **not** broadcast the monitor's own onboard sensors over BLE by default. Without adding passive BLE advertising, `AirSlice` will stop receiving new readings as soon as the `CGDN1` boots into ESPHome.
 
-`AndroidAQL` scans for unencrypted **BTHome v2** service data on UUID **`0xFCD2`** (`device_info = 0x40`, ascending object IDs):
+`AirSlice` scans for unencrypted **BTHome v2** service data on UUID **`0xFCD2`** (`device_info = 0x40`, ascending object IDs):
 
 | BTHome Object ID | Metric | Encoding | Scale |
 | :--- | :--- | :--- | :--- |
@@ -102,10 +102,10 @@ If your monitor runs custom firmware such as **ESPHome** broadcasting **BTHome v
 | `0x0E` | PM10 | `uint16` LE (2 bytes) | `1 µg/m³` |
 | `0x12` | CO₂ | `uint16` LE (2 bytes) | `1 ppm` (`0` skipped as warmup) |
 
-To reproduce our hardware-tested ESPHome setup directly, check out the **`dev` branch** of [`charles-dyfis-net/esphome-qingping-cgdn1`](https://github.com/charles-dyfis-net/esphome-qingping-cgdn1/tree/dev) (forked from [`nemethhh/esphome-qingping-cgdn1`](https://github.com/nemethhh/esphome-qingping-cgdn1)) and compile with `-s portable true -s bthome true` to build a configuration tuned for `AndroidAQL` (rather than stationary Home Assistant / ESPHome server use):
+To reproduce our hardware-tested ESPHome setup directly, check out the **`dev` branch** of [`charles-dyfis-net/esphome-qingping-cgdn1`](https://github.com/charles-dyfis-net/esphome-qingping-cgdn1/tree/dev) (forked from [`nemethhh/esphome-qingping-cgdn1`](https://github.com/nemethhh/esphome-qingping-cgdn1)) and compile with `-s portable true -s bthome true` to build a configuration tuned for `AirSlice` (rather than stationary Home Assistant / ESPHome server use):
 
 ```bash
-# Permanent build tuned for AndroidAQL (add `-s trial_mode true` for a reversible test build first):
+# Permanent build tuned for AirSlice (add `-s trial_mode true` for a reversible test build first):
 esphome -s portable true -s bthome true compile cgdn1.yaml
 ```
 
@@ -195,7 +195,7 @@ For normal portable air-quality logging, you do **not** need Wi-Fi at all. Howev
 printf '%s\n' 'your-2.4ghz-password' | python3 ./scripts/analyze-hw-trace --wifi-ssid "Your-2.4GHz-SSID" --wifi-password-stdin
 ```
 
-(Omit `--wifi-password-stdin` to be prompted interactively without putting the password in shell history.) Over a single ~40-second Bluetooth session, `AndroidAQL` authenticates, reads the Wi-Fi MAC, runs the required 2.4 GHz AP scan, submits credentials (handling colons and semicolons cleanly while redacting the password from trace logs), waits for `02 01 01` Wi-Fi association confirmation, and commits local loopback MQTT provisioning so the monitor remains in Normal Mode (`0x88`) with live Wi-Fi connectivity. Wait ~45 seconds and inspect the result with `python3 ./scripts/analyze-hw-trace --pull`.
+(Omit `--wifi-password-stdin` to be prompted interactively without putting the password in shell history.) Over a single ~40-second Bluetooth session, `AirSlice` authenticates, reads the Wi-Fi MAC, runs the required 2.4 GHz AP scan, submits credentials (handling colons and semicolons cleanly while redacting the password from trace logs), waits for `02 01 01` Wi-Fi association confirmation, and commits local loopback MQTT provisioning so the monitor remains in Normal Mode (`0x88`) with live Wi-Fi connectivity. Wait ~45 seconds and inspect the result with `python3 ./scripts/analyze-hw-trace --pull`.
 
 ### Pair B HTTP Firmware Upgrade Hook (`--ota-url`)
 
@@ -206,8 +206,8 @@ If you use the `--ota-url <http://...>` hook with compatible CRC-trailed firmwar
 * **Stock Firmware Only (One-Way Migration Trigger):** The Pair B `cmd 0x03` BLE upgrade command is part of Qingping's stock firmware GATT server (`22210000-...`). Once the device boots into **ESPHome**, stock BLE GATT commands are no longer supported—use **ESPHome's own OTA update tools** (`esphome run` / web OTA) for all subsequent updates.
 * **Plain `http://` `200 OK` URL Required (No `https://` and No `301`/`302` Redirects):** Stock `4.8.5`'s HTTP OTA downloader uses a raw read loop that does **not** follow HTTP redirects (`301`/`302` -> downloads the redirect HTML body -> fails CRC check with `02 03 FA`) and omits a configured root CA bundle for TLS—verified on live hardware, giving `cmd 0x03` an `https://` URL causes the `CGDN1` to crash and reboot back into stock `4.8.5` ~2.2 seconds later without emitting any `02 03` reply. Host the `.crc.bin` file on a direct plain `http://` endpoint returning `200 OK` with `Content-Length`.
 * **External USB-C Power Required:** Keep the `CGDN1` plugged into reliable external USB-C power throughout the upgrade.
-* **Live Wi-Fi Connection Required (`0x88` Mode):** The monitor must already be online in provisioned Normal Mode (`0x88`) on Wi-Fi so it can fetch the HTTP URL (`AndroidAQL` refuses `--ota-url` otherwise unless `--force-ota` is passed).
-* **Progress, Flash-Erase Delay & Reboot:** `cmd 0x03` emits `02 03 <pct>` at `1%`, every `5%`, and `100%` (`0x64`)—verified end-to-end flashing ESPHome in **~76 seconds** (`02 03 01` .. `02 03 5F` .. `02 03 64`)—or signed negative error codes (`0xFA`..`0xFF`, e.g., `0xFA` = CRC/flash error). Because the initial flash erase (`esp_ota_begin`) happens before the `1%` reply, `AndroidAQL` waits up to **60 seconds** between replies. Expect the monitor to reboot and drop BLE on completion, and do not assume prior `0x88` or MQTT settings survive.
+* **Live Wi-Fi Connection Required (`0x88` Mode):** The monitor must already be online in provisioned Normal Mode (`0x88`) on Wi-Fi so it can fetch the HTTP URL (`AirSlice` refuses `--ota-url` otherwise unless `--force-ota` is passed).
+* **Progress, Flash-Erase Delay & Reboot:** `cmd 0x03` emits `02 03 <pct>` at `1%`, every `5%`, and `100%` (`0x64`)—verified end-to-end flashing ESPHome in **~76 seconds** (`02 03 01` .. `02 03 5F` .. `02 03 64`)—or signed negative error codes (`0xFA`..`0xFF`, e.g., `0xFA` = CRC/flash error). Because the initial flash erase (`esp_ota_begin`) happens before the `1%` reply, `AirSlice` waits up to **60 seconds** between replies. Expect the monitor to reboot and drop BLE on completion, and do not assume prior `0x88` or MQTT settings survive.
 
 ---
 
