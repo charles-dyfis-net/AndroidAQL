@@ -165,6 +165,12 @@ class MainActivity : AppCompatActivity() {
         bindService(Intent(this, AqlCollectorService::class.java), serviceConnection, Context.BIND_AUTO_CREATE)
     }
 
+    override fun onResume() {
+        super.onResume()
+        collectorService?.startBleScan()
+        collectorService?.refreshWifiAndPlaceState()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         if (intent.action == AqlCollectorService.ACTION_DEV_COMMAND &&

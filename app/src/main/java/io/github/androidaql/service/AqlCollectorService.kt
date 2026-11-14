@@ -677,6 +677,13 @@ class AqlCollectorService : Service() {
     }
 
     fun refreshWifiAndPlaceState() {
+        if (currentWifiSsid.isNullOrBlank() &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            unregisterWifiCallback()
+            registerWifiCallback()
+        }
         readFallbackWifiInfoIfNeeded()
         val matchedPlace = if (manualKnownPlaceOverrideId > 0) {
             metadataDb.getKnownPlaces().firstOrNull { it.id == manualKnownPlaceOverrideId }
@@ -686,6 +693,7 @@ class AqlCollectorService : Service() {
         val nowSec = System.currentTimeMillis() / 1000L
         val transition = stateMachine.onWifiContextChanged(nowSec, matchedPlace?.id ?: 0)
         applyStateTransition(transition, nowSec)
+        updateOngoingForegroundNotification()
         notifyListeners()
     }
 
