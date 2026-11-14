@@ -1,6 +1,6 @@
 # AirSlice: Portable Air Log — Portable Qingping Air Monitor Lite (`CGDN1`) Companion
 
-**`AirSlice: Portable Air Log`** (**`AirSlice`**) is an Android application (**Android 13+ / API 33+**) that turns a **Qingping Air Monitor Lite (`CGDN1`)** into a pocketable, cloud-free, field-portable environmental recorder and retrospective trip slicer for **CO₂, PM2.5, PM10, Temperature, and Relative Humidity**.
+**`AirSlice: Portable Air Log`** (**`AirSlice`**) is an Android application (**Android 13+ / API 33+**) that turns a **Qingping Air Monitor Lite (`CGDN1`)** into a cloud-free, field-portable environmental recorder and retrospective trip slicer for **CO₂, PM2.5, PM10, Temperature, and Relative Humidity**.
 
 | Live **Now** Dashboard (`BTHome v2` Passive BLE) | **Trips** — 3-Pane Synchronized Telemetry Timeline |
 | :---: | :---: |
