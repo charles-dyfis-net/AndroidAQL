@@ -1,0 +1,503 @@
+#!/usr/bin/env python3
+"""
+Forensic analyzer and remote experiment controller for AndroidAQL's
+`files/hw_bringup_trace.jsonl` hardware bring-up trace.
+
+Examples:
+  # Pull live trace (including .prev rotation if present) from connected phone and summarize:
+  ./scripts/analyze-hw-trace --pull
+
+  # Filter analysis to a specific configuration epoch or keep-alive strategy:
+  ./scripts/analyze-hw-trace --pull --strategy 0509_ONLY
+  ./scripts/analyze-hw-trace --pull --epoch 3
+
+  # Analyze an existing local trace file:
+  ./scripts/analyze-hw-trace /tmp/hw_trace.jsonl
+
+  # Switch keep-alive strategy or log an observation marker on the live device without rebuilding:
+  ./scripts/analyze-hw-trace --set-strategy 0509_ONLY --set-interval 210 --poke-now
+  ./scripts/analyze-hw-trace --note "Monitor OLED: Normal CO2 anti-burn-in UI"
+"""
+
+import argparse
+import datetime
+import getpass
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+
+PACKAGE_NAME = "net.dyfis.androidaql"
+ACTIVITY_COMPONENT = "net.dyfis.androidaql/io.github.androidaql.ui.MainActivity"
+ACTION_DEV_COMMAND = "net.dyfis.androidaql.DEV_COMMAND"
+
+
+def find_adb(explicit_adb: Optional[str] = None) -> str:
+    if explicit_adb:
+        return explicit_adb
+    in_path = shutil.which("adb")
+    if in_path:
+        return in_path
+    mac_sdk = Path.home() / "Library" / "Android" / "sdk" / "platform-tools" / "adb"
+    if mac_sdk.exists():
+        return str(mac_sdk)
+    linux_sdk = Path.home() / "Android" / "Sdk" / "platform-tools" / "adb"
+    if linux_sdk.exists():
+        return str(linux_sdk)
+    raise FileNotFoundError("Could not find `adb` in PATH or ~/Library/Android/sdk/platform-tools/adb")
+
+
+def fmt_ts(ts_ms: int) -> str:
+    dt = datetime.datetime.fromtimestamp(ts_ms / 1000.0)
+    return dt.strftime("%Y-%m-%d %H:%M:%S.") + f"{ts_ms % 1000:03d}"
+
+
+def fmt_time_short(ts_ms: int) -> str:
+    dt = datetime.datetime.fromtimestamp(ts_ms / 1000.0)
+    return dt.strftime("%H:%M:%S.") + f"{ts_ms % 1000:03d}"
+
+
+def extract_fe95_cnt_from_raw(raw_hex: str) -> Optional[int]:
+    idx = raw_hex.upper().find("1695FE")
+    if idx >= 0 and len(raw_hex) >= idx + 16:
+        try:
+            return int(raw_hex[idx + 14 : idx + 16], 16)
+        except ValueError:
+            return None
+    return None
+
+
+def pull_trace_lines(adb_bin: str, serial: Optional[str], save_to: Optional[Path]) -> List[str]:
+    base_cmd = [adb_bin]
+    if serial:
+        base_cmd.extend(["-s", serial])
+
+    lines: List[str] = []
+    for remote_rel in ("files/hw_bringup_trace.jsonl.prev", "files/hw_bringup_trace.jsonl"):
+        cmd = base_cmd + ["exec-out", "run-as", PACKAGE_NAME, "cat", remote_rel]
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if proc.returncode == 0 and proc.stdout:
+            for line in proc.stdout.splitlines():
+                line = line.strip()
+                if line.startswith("{"):
+                    lines.append(line)
+
+    if save_to and lines:
+        save_to.parent.mkdir(parents=True, exist_ok=True)
+        save_to.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(f"[+] Saved {len(lines)} trace lines to {save_to}")
+    return lines
+
+
+def send_dev_command(
+    adb_bin: str,
+    serial: Optional[str],
+    strategy: Optional[str],
+    interval_sec: Optional[int],
+    dedup_fdcd: Optional[bool],
+    poke_now: bool,
+    note: Optional[str],
+    gatt_script: Optional[str] = None,
+    wifi_ssid: Optional[str] = None,
+    wifi_password: Optional[str] = None,
+    ota_url: Optional[str] = None,
+    force_ota: bool = False,
+) -> None:
+    remote_args = [
+        "am",
+        "start",
+        "-n",
+        ACTIVITY_COMPONENT,
+        "--activity-single-top",
+        "-a",
+        ACTION_DEV_COMMAND,
+    ]
+    if strategy:
+        remote_args.extend(["--es", "strategy", strategy])
+    if interval_sec is not None:
+        remote_args.extend(["--ei", "interval_sec", str(interval_sec)])
+    if dedup_fdcd is not None:
+        remote_args.extend(["--ez", "dedup_fdcd", "true" if dedup_fdcd else "false"])
+    if poke_now:
+        remote_args.extend(["--ez", "poke_now", "true"])
+    if note:
+        remote_args.extend(["--es", "note", note])
+    if gatt_script:
+        remote_args.extend(["--es", "gatt_script", gatt_script])
+    if wifi_ssid is not None:
+        remote_args.extend(["--es", "wifi_ssid", wifi_ssid])
+        remote_args.extend(["--es", "wifi_password", wifi_password or ""])
+    if ota_url:
+        remote_args.extend(["--es", "ota_url", ota_url])
+    if force_ota:
+        remote_args.extend(["--ez", "force_ota", "true"])
+
+    # Quote every argument for Android's /system/bin/sh so &, ?, ;, and spaces stay intact.
+    remote_cmd = " ".join(shlex.quote(arg) for arg in remote_args)
+    cmd = [adb_bin]
+    if serial:
+        cmd.extend(["-s", serial])
+    cmd.extend(["shell", remote_cmd])
+
+    subprocess.run(cmd, check=True)
+    print("[+] Sent DEV_COMMAND intent to AqlCollectorService.")
+
+
+def analyze_events(
+    raw_lines: List[str],
+    filter_epoch: Optional[int] = None,
+    filter_strategy: Optional[str] = None,
+    gap_threshold_sec: float = 10.0,
+) -> None:
+    events: List[Dict[str, Any]] = []
+    cur_epoch = 0
+    cur_strategy = "LEGACY"
+    cur_interval = 0
+
+    for line in raw_lines:
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        ev_type = obj.get("event", "")
+        if "cfg_epoch" in obj:
+            cur_epoch = int(obj["cfg_epoch"])
+        if "strategy" in obj:
+            cur_strategy = str(obj["strategy"])
+        if "interval_sec" in obj:
+            cur_interval = int(obj["interval_sec"])
+
+        obj["_epoch"] = cur_epoch
+        obj["_strategy"] = cur_strategy
+        obj["_interval"] = cur_interval
+
+        if filter_epoch is not None and obj["_epoch"] != filter_epoch:
+            continue
+        if filter_strategy is not None and obj["_strategy"].upper() != filter_strategy.upper():
+            continue
+        events.append(obj)
+
+    if not events:
+        print("No matching events found in trace.")
+        return
+
+    first_ts = events[0]["ts_ms"]
+    last_ts = events[-1]["ts_ms"]
+    span_min = (last_ts - first_ts) / 60000.0
+    print("=" * 96)
+    print(f"TRACE WINDOW: {fmt_ts(first_ts)} -> {fmt_ts(last_ts)} ({span_min:.1f} min, {len(events)} JSONL lines)")
+    print("=" * 96)
+
+    # 1. Config Epochs, Starts & User Notes
+    print("\n1. CONFIGURATION EPOCHS, SERVICE STARTS & OBSERVATION MARKERS")
+    print("-" * 96)
+    for e in events:
+        ev = e.get("event")
+        ts = fmt_time_short(e["ts_ms"])
+        if ev in ("SERVICE_START", "DEV_CONFIG_STATE", "DEV_CONFIG_CHANGED"):
+            print(
+                f"  [{ts}] {ev:<19} epoch={e.get('_epoch')} strategy={e.get('_strategy')} "
+                f"int={e.get('_interval')}s dedup={e.get('dedup_fdcd')} bond1101={e.get('bond_1101_armed')} "
+                f"reason={e.get('reason', '-')}"
+            )
+        elif ev == "DEV_USER_NOTE":
+            print(f"  [{ts}] 📝 DEV_USER_NOTE      epoch={e.get('_epoch')} ({e.get('_strategy')}): {e.get('note')}")
+        elif ev == "DEV_MANUAL_POKE":
+            print(f"  [{ts}] ⚡ DEV_MANUAL_POKE    epoch={e.get('_epoch')} ({e.get('_strategy')}) mac={e.get('mac')}")
+        elif ev == "DEV_OTA_QUEUED":
+            print(
+                f"  [{ts}] 📦 DEV_OTA_QUEUED     epoch={e.get('_epoch')} len={e.get('utf8_len')}B "
+                f"force={e.get('force_ota')} url={e.get('url')}"
+            )
+        elif ev == "DEV_OTA_REFUSED":
+            print(
+                f"  [{ts}] 🚫 DEV_OTA_REFUSED    epoch={e.get('_epoch')} reason={e.get('reason')} "
+                f"last_ctrl={e.get('last_frame_ctrl', '-')} age={e.get('last_frame_age_sec', '-')}s "
+                f"len={e.get('utf8_len', '-')}"
+            )
+        elif ev == "DEV_OTA_STATUS":
+            detail = f" detail={e.get('error_detail')}" if e.get("error_detail") else ""
+            print(
+                f"  [{ts}] 🔄 DEV_OTA_STATUS     sess=#{e.get('session_id', '?')} state={e.get('state')} "
+                f"pct={e.get('progress_pct', '-')} raw={e.get('raw_hex', e.get('error', '-'))}{detail}"
+            )
+        elif ev == "DEV_WIFI_CONFIG_QUEUED":
+            print(
+                f"  [{ts}] 📶 DEV_WIFI_QUEUED    epoch={e.get('_epoch')} ssid={e.get('ssid')!r} "
+                f"pwd_len={e.get('password_len', 0)}"
+            )
+        elif ev == "DEV_WIFI_CONFIG_REFUSED":
+            print(
+                f"  [{ts}] 🚫 DEV_WIFI_REFUSED   epoch={e.get('_epoch')} ssid={e.get('ssid')!r} "
+                f"reason={e.get('reason')}"
+            )
+        elif ev == "DEV_WIFI_CONFIG_STATUS":
+            ok = "CONNECTED_OK" if e.get("connected") else "FAILED"
+            print(
+                f"  [{ts}] 📶 DEV_WIFI_STATUS    sess=#{e.get('session_id', '?')} status={ok} "
+                f"raw={e.get('raw_hex', '-')}"
+            )
+        elif ev == "DEV_GATT_SCRIPT_ERROR":
+            print(
+                f"  [{ts}] ❌ DEV_GATT_SCRIPT_ERR sess=#{e.get('session_id', '?')} is_ota={e.get('is_ota')} "
+                f"error={e.get('error')}"
+            )
+
+    # 2. GATT Sessions (supports both new GATT_SESSION_SUMMARY and legacy per-event traces)
+    print("\n2. GATT KEEP-ALIVE SESSIONS")
+    print("-" * 96)
+    summaries = [e for e in events if e.get("event") == "GATT_SESSION_SUMMARY"]
+    if summaries:
+        for s in summaries:
+            ts = fmt_time_short(s["ts_ms"])
+            dur_s = s.get("duration_ms", 0) / 1000.0
+            print(
+                f"  [{ts}] Session #{s.get('session_id', '?'):<3} epoch={s.get('cfg_epoch')} "
+                f"strat={s.get('strategy'):<13} mac={s.get('mac')} dur={dur_s:4.1f}s "
+                f"conn_ok={s.get('connected_ok')} disc_status={s.get('disconnect_status')} "
+                f"writes=[{s.get('writes', '')}] notifies=[{s.get('notifies', '')}] reads={s.get('reads_cnt', 0)}"
+            )
+    else:
+        # Legacy reconstruction for traces recorded prior to GATT_SESSION_SUMMARY
+        cur_sess: Optional[Dict[str, Any]] = None
+        for e in events:
+            ev = e.get("event")
+            if ev == "GATT_CONNECTION_STATE" and e.get("new_state") == 2:
+                cur_sess = {
+                    "start_ts": e["ts_ms"],
+                    "mac": e.get("mac"),
+                    "writes": [],
+                    "notifies": [],
+                    "reads": 0,
+                }
+            elif ev == "GATT_CHAR_WRITE" and cur_sess is not None:
+                cur_sess["writes"].append(f"{e.get('step')}:{str(e.get('payload_hex', ''))[:8]}")
+            elif ev == "GATT_CHAR_NOTIFY" and cur_sess is not None:
+                raw = str(e.get("raw_hex", ""))
+                if not raw.startswith("1307"):
+                    cur_sess["notifies"].append(raw)
+            elif ev == "GATT_CHAR_READ" and cur_sess is not None:
+                cur_sess["reads"] += 1
+            elif ev == "GATT_CONNECTION_STATE" and e.get("new_state") == 0:
+                if cur_sess is not None:
+                    dur_s = (e["ts_ms"] - cur_sess["start_ts"]) / 1000.0
+                    print(
+                        f"  [{fmt_time_short(cur_sess['start_ts'])}] Legacy GATT mac={cur_sess['mac']} "
+                        f"dur={dur_s:4.1f}s status={e.get('status')} writes={cur_sess['writes']} "
+                        f"notifies={cur_sess['notifies']} reads={cur_sess['reads']}"
+                    )
+                    cur_sess = None
+                else:
+                    print(
+                        f"  [{fmt_time_short(e['ts_ms'])}] ❌ GATT Connect Failed mac={e.get('mac')} status={e.get('status')}"
+                    )
+
+    # 3. Resets, Warmup Zero CO2, and Shutdown Zero Frames
+    print("\n3. RADIO RESETS (FrameCnt -> 0), NDIR WARMUP (CO2=0) & SHUTDOWN FRAMES")
+    print("-" * 96)
+    prev_fe95_cnt: Dict[str, int] = {}
+    reset_count = 0
+    for e in events:
+        ev = e.get("event")
+        ts = fmt_time_short(e["ts_ms"])
+        if ev == "BLE_FE95_FRAME_CNT_RESET":
+            prev_c = int(e.get("prev_cnt", 0))
+            if 5 <= prev_c <= 245:
+                reset_count += 1
+                print(
+                    f"  [{ts}] 🔄 FE95_FRAME_CNT_RESET mac={e.get('mac')} "
+                    f"{prev_c} -> {e.get('new_cnt')} (epoch={e.get('_epoch')}, strat={e.get('_strategy')})"
+                )
+        elif ev == "BLE_ADV_NON_FDCD":
+            mac = e.get("mac", "")
+            cnt = e.get("fe95_cnt")
+            if cnt is None:
+                cnt = extract_fe95_cnt_from_raw(e.get("raw_hex", ""))
+            if cnt is not None:
+                prev = prev_fe95_cnt.get(mac)
+                prev_fe95_cnt[mac] = int(cnt)
+                if prev is not None and 5 <= prev <= 245 and int(cnt) <= 3:
+                    reset_count += 1
+                    print(
+                        f"  [{ts}] 🔄 FE95_CNT_RESET (inferred) mac={mac} {prev} -> {cnt} "
+                        f"(epoch={e.get('_epoch')}, strat={e.get('_strategy')})"
+                    )
+        elif ev == "BLE_WARMUP_ZERO_CO2":
+            print(
+                f"  [{ts}] ⚠️  BLE_WARMUP_ZERO_CO2  mac={e.get('mac')} ctrl={e.get('frame_ctrl_hex')} "
+                f"T={e.get('temp_c')}C RH={e.get('humidity_pct')}% raw={e.get('raw_hex')}"
+            )
+        elif ev == "BLE_ADV_FDCD" and str(e.get("raw_hex", "")).endswith("13020000"):
+            print(
+                f"  [{ts}] ⚠️  FDCD_RAW_ZERO_CO2    mac={e.get('mac')} ctrl={e.get('frame_ctrl_hex')} "
+                f"merged_co2={e.get('co2_ppm')} raw={e.get('raw_hex')}"
+            )
+        elif ev == "BLE_ADV_FDCD_SHUTDOWN_ZERO":
+            print(
+                f"  [{ts}] 🛑 SHUTDOWN_ZERO_FRAME  mac={e.get('mac')} ctrl={e.get('frame_ctrl_hex')} "
+                f"raw={e.get('raw_hex')} (epoch={e.get('_epoch')}, strat={e.get('_strategy')})"
+            )
+    if reset_count == 0:
+        print("  (Zero FE95 FrameCnt resets detected in this window)")
+
+    # 4. Telemetry Gaps >= gap_threshold_sec
+    print(f"\n4. TELEMETRY BROADCAST GAPS (>= {gap_threshold_sec:.0f}s)")
+    print("-" * 96)
+    prev_fdcd: Optional[Dict[str, Any]] = None
+    gap_count = 0
+    for e in events:
+        if e.get("event") in ("BLE_ADV_FDCD", "BLE_ADV_FDCD_SHUTDOWN_ZERO"):
+            if prev_fdcd is not None:
+                dt_sec = (e["ts_ms"] - prev_fdcd["ts_ms"]) / 1000.0
+                if dt_sec >= gap_threshold_sec:
+                    gap_count += 1
+                    print(
+                        f"  Gap #{gap_count:<2}: {fmt_time_short(prev_fdcd['ts_ms'])} -> {fmt_time_short(e['ts_ms'])} "
+                        f"({dt_sec:6.1f}s / {dt_sec/60.0:4.1f}m) | "
+                        f"ctrl: {prev_fdcd.get('frame_ctrl_hex')} -> {e.get('frame_ctrl_hex')} | "
+                        f"epoch={e.get('_epoch')} ({e.get('_strategy')})"
+                    )
+            prev_fdcd = e
+    if gap_count == 0:
+        print(f"  (Zero telemetry gaps >= {gap_threshold_sec:.0f}s — continuous broadcast maintained!)")
+    print("=" * 96)
+
+
+def main() -> None:
+    default_save = Path(__file__).resolve().parent.parent / "tmp" / "hw_bringup_trace_merged.jsonl"
+    parser = argparse.ArgumentParser(description="Analyze AndroidAQL hardware bring-up JSONL traces.")
+    parser.add_argument("trace_file", nargs="?", help="Path to local hw_bringup_trace.jsonl file")
+    parser.add_argument("--pull", action="store_true", help="Pull trace from connected Android device via adb run-as")
+    parser.add_argument("--save", type=Path, default=default_save, help="Where to save pulled trace (default: tmp/hw_bringup_trace_merged.jsonl)")
+    parser.add_argument("--serial", "-s", help="Optional adb device serial")
+    parser.add_argument("--adb", help="Path to adb binary")
+    parser.add_argument("--epoch", type=int, help="Filter analysis to a specific cfg_epoch")
+    parser.add_argument("--strategy", help="Filter analysis to a specific keep-alive strategy (e.g. 0509_ONLY)")
+    parser.add_argument("--gap-sec", type=float, default=10.0, help="Minimum gap in seconds to report (default: 10s)")
+
+    # Remote control flags
+    parser.add_argument(
+        "--set-strategy",
+        choices=[
+            "AUTO_OFFLINE_SETUP",
+            "AUTO_EXCURSION_1101",
+            "0509_24M_1101",
+            "0509_ONLY",
+            "NONE_PASSIVE",
+        ],
+        help="Switch keep-alive strategy on live device",
+    )
+    parser.add_argument("--set-interval", type=int, help="Set keep-alive interval in seconds on live device")
+    parser.add_argument("--dedup", choices=["true", "false"], help="Enable or disable 350ms FDCD frame deduplication")
+    parser.add_argument("--poke-now", action="store_true", help="Trigger an immediate keep-alive GATT poke on live device")
+    parser.add_argument("--note", help="Write a DEV_USER_NOTE observation marker into the live device trace")
+    parser.add_argument("--gatt-script", help="Queue a one-shot semicolon-separated GATT command script")
+    parser.add_argument(
+        "--wifi-ssid",
+        help="Configure CGDN1 2.4 GHz Wi-Fi SSID over BLE Pair B (plus offline 0x88 provisioning)",
+    )
+    parser.add_argument(
+        "--wifi-password",
+        help="Wi-Fi password for --wifi-ssid (prefer --wifi-password-stdin or interactive prompt to avoid shell history)",
+    )
+    parser.add_argument(
+        "--wifi-password-stdin",
+        action="store_true",
+        help="Read Wi-Fi password for --wifi-ssid from standard input",
+    )
+    parser.add_argument(
+        "--ota-url",
+        help="Trigger Pair B cmd 0x03 OTA firmware upgrade (<=254 UTF-8 bytes; use at your own risk)",
+    )
+    parser.add_argument(
+        "--force-ota",
+        action="store_true",
+        help="Bypass 0x88 online check when triggering --ota-url",
+    )
+
+    args = parser.parse_args()
+
+    if args.wifi_ssid is None and (args.wifi_password is not None or args.wifi_password_stdin):
+        print("Error: --wifi-password / --wifi-password-stdin requires --wifi-ssid.", file=sys.stderr)
+        sys.exit(2)
+
+    resolved_wifi_password: Optional[str] = None
+    if args.wifi_ssid is not None:
+        if not args.wifi_ssid.strip():
+            print("Error: --wifi-ssid must not be blank.", file=sys.stderr)
+            sys.exit(2)
+        if args.wifi_password_stdin:
+            resolved_wifi_password = sys.stdin.read().rstrip("\r\n")
+        elif args.wifi_password is not None:
+            resolved_wifi_password = args.wifi_password
+        else:
+            resolved_wifi_password = getpass.getpass(
+                f"2.4 GHz Wi-Fi password for {args.wifi_ssid!r} (leave blank if open): "
+            )
+        cred_utf8_len = len(f'"{args.wifi_ssid}","{resolved_wifi_password}"'.encode("utf-8"))
+        if cred_utf8_len > 254:
+            print(
+                f"Error: quoted SSID/password payload exceeds Pair B 254-byte UTF-8 ceiling ({cred_utf8_len} bytes).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+    if args.ota_url is not None:
+        ota_bytes = len(args.ota_url.strip().encode("utf-8"))
+        if not (1 <= ota_bytes <= 254):
+            print(
+                f"Error: --ota-url must be 1..254 UTF-8 bytes for Pair B framing (got {ota_bytes} bytes).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+    has_remote_cmd = any([
+        args.set_strategy,
+        args.set_interval is not None,
+        args.dedup is not None,
+        args.poke_now,
+        args.note,
+        args.gatt_script,
+        args.wifi_ssid is not None,
+        args.ota_url,
+    ])
+    if has_remote_cmd:
+        adb_bin = find_adb(args.adb)
+        send_dev_command(
+            adb_bin=adb_bin,
+            serial=args.serial,
+            strategy=args.set_strategy,
+            interval_sec=args.set_interval,
+            dedup_fdcd=(args.dedup == "true") if args.dedup is not None else None,
+            poke_now=args.poke_now,
+            note=args.note,
+            gatt_script=args.gatt_script,
+            wifi_ssid=args.wifi_ssid,
+            wifi_password=resolved_wifi_password,
+            ota_url=args.ota_url,
+            force_ota=args.force_ota,
+        )
+        if not args.pull and not args.trace_file:
+            return
+
+    if args.pull or not args.trace_file:
+        adb_bin = find_adb(args.adb)
+        raw_lines = pull_trace_lines(adb_bin, args.serial, args.save)
+    else:
+        raw_lines = Path(args.trace_file).read_text(encoding="utf-8").splitlines()
+
+    analyze_events(
+        raw_lines=raw_lines,
+        filter_epoch=args.epoch,
+        filter_strategy=args.strategy,
+        gap_threshold_sec=args.gap_sec,
+    )
+
+
+if __name__ == "__main__":
+    main()

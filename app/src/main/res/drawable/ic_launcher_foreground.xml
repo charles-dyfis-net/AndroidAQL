@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Outer Air Quality Gauge Arc (Safe zone 24..84) -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M31,71 A29,29 0 1,1 77,71"
+        android:strokeWidth="5.5"
+        android:strokeColor="#22C55E"
+        android:strokeLineCap="round" />
+
+    <!-- Subtle Sky Blue Breeze Wave Across Center -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M31,52 C40,44 48,44 54,50 C60,56 68,56 77,47"
+        android:strokeWidth="4.2"
+        android:strokeColor="#38BDF8"
+        android:strokeLineCap="round" />
+
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M35,61 C42,55 49,55 54,59 C59,63 66,63 73,57"
+        android:strokeWidth="3.2"
+        android:strokeColor="#7DD3FC"
+        android:strokeLineCap="round" />
+
+    <!-- Three Telemetry Particle / CO2 Molecule Nodes (O=C=O) -->
+    <path
+        android:fillColor="#F8FAFC"
+        android:pathData="M41,40m-3.6,0a3.6,3.6 0,1 1,7.2 0a3.6,3.6 0,1 1,-7.2 0" />
+    <path
+        android:fillColor="#22C55E"
+        android:pathData="M54,36m-4.6,0a4.6,4.6 0,1 1,9.2 0a4.6,4.6 0,1 1,-9.2 0" />
+    <path
+        android:fillColor="#F8FAFC"
+        android:pathData="M67,40m-3.6,0a3.6,3.6 0,1 1,7.2 0a3.6,3.6 0,1 1,-7.2 0" />
+
+    <!-- Bottom Dual-Pane Slicer / Pulse Bar Indicator -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M38,73L70,73"
+        android:strokeWidth="3.5"
+        android:strokeColor="#94A3B8"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#F59E0B"
+        android:pathData="M54,73m-3.5,0a3.5,3.5 0,1 1,7 0a3.5,3.5 0,1 1,-7 0" />
+</vector>
