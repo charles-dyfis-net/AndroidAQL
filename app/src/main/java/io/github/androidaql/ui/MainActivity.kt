@@ -2,18 +2,22 @@ package io.github.androidaql.ui
 
 import android.Manifest
 import android.app.AlertDialog
+import android.content.ClipData
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.IBinder
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -34,6 +38,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import io.github.androidaql.engine.ExcursionStateMachine
 import io.github.androidaql.engine.StepMovementEstimator
 import io.github.androidaql.export.CsvExporter
@@ -41,9 +46,9 @@ import io.github.androidaql.service.AqlCollectorService
 import io.github.androidaql.storage.AqlRingBufferStore
 import io.github.androidaql.storage.BleCollectionMode
 import io.github.androidaql.storage.ExcursionRecord
+import io.github.androidaql.storage.MetadataDatabase
 import io.github.androidaql.storage.MonitorDevice
 import io.github.androidaql.storage.SessionSliceRecord
-import io.github.androidaql.storage.SliceCategory
 import io.github.androidaql.util.TempUnitPreference
 import io.github.androidaql.util.TemperatureUnitFormatter
 import java.io.File
@@ -61,11 +66,16 @@ class MainActivity : AppCompatActivity() {
     private var isBound = false
     private var activeTabIndex = 0
     private var selectedExcursionId: Long? = null
+    private var lastSeenLatestExcursionId: Long? = null
+    private var lastObservedActiveExcursionId: Long? = null
     private var isTripEditMode: Boolean = false
 
     // Optional custom 14-day ring buffer time window (when inspecting raw ring buffer before carving a trip)
     private var customWindowStartEpochSec: Long? = null
     private var customWindowEndEpochSec: Long? = null
+
+    private var pendingScreenshotPreset: String? = null
+    private var activeSegmentModalDialog: AlertDialog? = null
 
     private lateinit var topHeaderBar: LinearLayout
     private lateinit var bottomNavBar: LinearLayout
@@ -82,14 +92,19 @@ class MainActivity : AppCompatActivity() {
     private lateinit var liveRecentHistoryView: DualPaneSlicerView
     private lateinit var wifiStatusView: TextView
     private lateinit var saveCurrentWifiBtn: Button
+    private lateinit var manualTripToggleBtn: Button
     private lateinit var demoStreamBtn: Button
 
     // Tab 2: Trips & Slicer Views
     private lateinit var tripSelectorLabel: TextView
+    private var pinTripBtn: TextView? = null
+    private var manageTripBtn: TextView? = null
     private lateinit var modeToggleBtn: Button
     private lateinit var dualPaneSlicerView: DualPaneSlicerView
     private lateinit var dividerNudgeBar: LinearLayout
+    private lateinit var cursorModeBtn: Button
     private lateinit var editHelperView: TextView
+    private var tripRetentionBanner: TextView? = null
     private var slicesContainer: LinearLayout? = null
     private var renderedSliceCards: List<Pair<SessionSliceRecord, LinearLayout>> = emptyList()
 
@@ -114,6 +129,13 @@ class MainActivity : AppCompatActivity() {
     private val serviceListener: (AqlCollectorService.LiveTelemetrySnapshot) -> Unit = { snap ->
         runOnUiThread {
             renderLiveSnapshot(snap)
+            val activeChanged = snap.activeExcursionId != lastObservedActiveExcursionId
+            lastObservedActiveExcursionId = snap.activeExcursionId
+            if (activeChanged ||
+                (activeTabIndex == 1 && snap.activeExcursionId != null && snap.activeExcursionId == selectedExcursionId)
+            ) {
+                refreshTripsTab()
+            }
         }
     }
 
@@ -123,9 +145,11 @@ class MainActivity : AppCompatActivity() {
             val svc = b.getService()
             collectorService = svc
             isBound = true
+            lastObservedActiveExcursionId = svc.buildSnapshot().activeExcursionId
             svc.addListener(serviceListener)
             refreshLiveRecentGraph()
             refreshTripsTab()
+            tryApplyPendingScreenshotPreset()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -151,6 +175,8 @@ class MainActivity : AppCompatActivity() {
             activeTabIndex = savedInstanceState.getInt("activeTabIndex", 0)
             val savedExc = savedInstanceState.getLong("selectedExcursionId", -1L)
             if (savedExc > 0L) selectedExcursionId = savedExc
+            val savedLatestExc = savedInstanceState.getLong("lastSeenLatestExcursionId", -1L)
+            if (savedLatestExc > 0L) lastSeenLatestExcursionId = savedLatestExc
             isTripEditMode = savedInstanceState.getBoolean("isTripEditMode", false)
             val cwStart = savedInstanceState.getLong("customWindowStartEpochSec", -1L)
             val cwEnd = savedInstanceState.getLong("customWindowEndEpochSec", -1L)
@@ -158,6 +184,8 @@ class MainActivity : AppCompatActivity() {
                 customWindowStartEpochSec = cwStart
                 customWindowEndEpochSec = cwEnd
             }
+        } else {
+            captureScreenshotPresetFromIntent(intent)
         }
 
         setContentView(buildRootLayout())
@@ -179,14 +207,24 @@ class MainActivity : AppCompatActivity() {
         collectorService?.startBleScan()
         collectorService?.refreshWifiAndPlaceState()
         collectorService?.refreshStepSensorRegistration()
+        refreshLiveRecentGraph()
+        refreshTripsTab()
+        tryApplyPendingScreenshotPreset()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         if (intent.action == AqlCollectorService.ACTION_DEV_COMMAND &&
             AqlCollectorService.isDevCommandAuthorized(this)
         ) {
             ContextCompat.startForegroundService(this, buildServiceStartIntent(intent))
+            captureScreenshotPresetFromIntent(intent)
+            if (::topHeaderBar.isInitialized) {
+                topHeaderBar.post { tryApplyPendingScreenshotPreset() }
+            } else {
+                tryApplyPendingScreenshotPreset()
+            }
         }
     }
 
@@ -194,12 +232,15 @@ class MainActivity : AppCompatActivity() {
         super.onSaveInstanceState(outState)
         outState.putInt("activeTabIndex", activeTabIndex)
         outState.putLong("selectedExcursionId", selectedExcursionId ?: -1L)
+        outState.putLong("lastSeenLatestExcursionId", lastSeenLatestExcursionId ?: -1L)
         outState.putBoolean("isTripEditMode", isTripEditMode)
         outState.putLong("customWindowStartEpochSec", customWindowStartEpochSec ?: -1L)
         outState.putLong("customWindowEndEpochSec", customWindowEndEpochSec ?: -1L)
     }
 
     override fun onDestroy() {
+        activeSegmentModalDialog?.dismiss()
+        activeSegmentModalDialog = null
         if (isBound) {
             collectorService?.removeListener(serviceListener)
             unbindService(serviceConnection)
@@ -208,17 +249,163 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    private fun captureScreenshotPresetFromIntent(sourceIntent: Intent?) {
+        if (sourceIntent?.action == AqlCollectorService.ACTION_DEV_COMMAND &&
+            AqlCollectorService.isDevCommandAuthorized(this)
+        ) {
+            sourceIntent.getStringExtra("screenshot_preset")
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { pendingScreenshotPreset = it }
+        }
+    }
+
+    private fun tryApplyPendingScreenshotPreset() {
+        val preset = pendingScreenshotPreset ?: return
+        val svc = collectorService ?: return
+        if (!AqlCollectorService.isDevCommandAuthorized(this)) {
+            pendingScreenshotPreset = null
+            return
+        }
+        pendingScreenshotPreset = null
+        activeSegmentModalDialog?.dismiss()
+        activeSegmentModalDialog = null
+
+        fun prepareDemoExcursion(reseed: Boolean): Long {
+            if (svc.metadataDb.getKnownPlaces().isEmpty()) {
+                svc.metadataDb.createKnownPlaceWithWifi("Home", "ChicagoHome-5G", "AA:BB:CC:11:22:33")
+            }
+            val homePlaceId = svc.metadataDb.getKnownPlaces().first().id
+            svc.setManualKnownPlaceOverride(homePlaceId)
+
+            if (reseed) {
+                for (exc in svc.metadataDb.getExcursions()) {
+                    svc.detachActiveExcursionIfMatching(exc.id)
+                    svc.metadataDb.deleteExcursion(exc.id)
+                }
+                return svc.seedDemoChicagoExcursion()
+            }
+
+            for (exc in svc.metadataDb.getExcursions()) {
+                if (!exc.title.startsWith("Demo:")) {
+                    svc.detachActiveExcursionIfMatching(exc.id)
+                    svc.metadataDb.deleteExcursion(exc.id)
+                }
+            }
+            return svc.metadataDb.getExcursions()
+                .firstOrNull { it.title.startsWith("Demo:") }
+                ?.id
+                ?: svc.seedDemoChicagoExcursion()
+        }
+
+        fun selectDemoMode(reseed: Boolean, editMode: Boolean) {
+            setDeveloperModeEnabled(false)
+            TemperatureUnitFormatter.setPreference(this, TempUnitPreference.FAHRENHEIT)
+            customWindowStartEpochSec = null
+            customWindowEndEpochSec = null
+            val demoId = prepareDemoExcursion(reseed)
+            selectedExcursionId = demoId
+            lastSeenLatestExcursionId = svc.metadataDb.getExcursions().firstOrNull()?.id ?: demoId
+            isTripEditMode = editMode
+            switchTab(1)
+        }
+
+        when (preset) {
+            "seed_demo_view" -> {
+                selectDemoMode(reseed = true, editMode = false)
+                dualPaneSlicerView.selectedDividerIndex = -1
+                val slots = dualPaneSlicerView.slots
+                if (slots.isNotEmpty()) {
+                    dualPaneSlicerView.cursorEpochSec = slots[slots.size / 3].bucketEpochSec
+                }
+                updateEditModeUi()
+                updateSliceCardHighlights(dualPaneSlicerView.cursorEpochSec)
+                dualPaneSlicerView.invalidate()
+                (tabContainers.getOrNull(1) as? ScrollView)?.apply { post { scrollTo(0, 0) } }
+            }
+            "demo_edit_divider" -> {
+                selectDemoMode(reseed = false, editMode = true)
+                val slices = dualPaneSlicerView.slices
+                val divIdx = when {
+                    slices.size >= 3 -> 1
+                    slices.size >= 2 -> 0
+                    else -> -1
+                }
+                dualPaneSlicerView.selectedDividerIndex = divIdx
+                if (divIdx in slices.indices) {
+                    dualPaneSlicerView.cursorEpochSec = slices[divIdx].endEpochSec
+                }
+                updateEditModeUi()
+                updateSliceCardHighlights(dualPaneSlicerView.cursorEpochSec)
+                dualPaneSlicerView.invalidate()
+                (tabContainers.getOrNull(1) as? ScrollView)?.apply { post { scrollTo(0, 0) } }
+            }
+            "demo_segment_modal" -> {
+                selectDemoMode(reseed = false, editMode = false)
+                dualPaneSlicerView.selectedDividerIndex = -1
+                updateEditModeUi()
+                val slices = dualPaneSlicerView.slices
+                if (slices.isNotEmpty()) {
+                    showSegmentEditModal(slices[0], slices.getOrNull(1), sliceIdx = 0)
+                }
+            }
+            "demo_landscape_edit" -> {
+                selectDemoMode(reseed = false, editMode = true)
+                val slots = dualPaneSlicerView.slots
+                dualPaneSlicerView.selectedDividerIndex = -1
+                if (slots.isNotEmpty()) {
+                    dualPaneSlicerView.cursorEpochSec = slots[slots.size / 2].bucketEpochSec
+                }
+                updateEditModeUi()
+                updateSliceCardHighlights(dualPaneSlicerView.cursorEpochSec)
+                dualPaneSlicerView.invalidate()
+            }
+            "real_trip_overview" -> {
+                svc.setManualKnownPlaceOverride(0)
+                setDeveloperModeEnabled(false)
+                customWindowStartEpochSec = null
+                customWindowEndEpochSec = null
+                val excursions = svc.metadataDb.getExcursions()
+                val realExc = excursions.firstOrNull { !it.title.startsWith("Demo:") } ?: excursions.firstOrNull()
+                if (realExc != null) {
+                    selectedExcursionId = realExc.id
+                    lastSeenLatestExcursionId = excursions.firstOrNull()?.id
+                }
+                isTripEditMode = false
+                switchTab(1)
+                dualPaneSlicerView.selectedDividerIndex = -1
+                updateEditModeUi()
+                (tabContainers.getOrNull(1) as? ScrollView)?.apply { post { scrollTo(0, 0) } }
+            }
+        }
+    }
+
     private fun isLandscape(): Boolean =
         resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     private fun isDeveloperModeEnabled(): Boolean =
         AqlCollectorService.isDeveloperModeEnabled(this)
 
+    private fun isDemoDataEnabled(): Boolean =
+        AqlCollectorService.isDemoDataEnabled(this)
+
     private fun setDeveloperModeEnabled(enabled: Boolean) {
         getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
             .edit()
             .putBoolean("developer_mode", enabled)
             .apply()
+        applyDeveloperModeVisibility()
+    }
+
+    private fun setDemoDataEnabled(enabled: Boolean) {
+        getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("demo_data_enabled", enabled)
+            .apply()
+        if (!enabled) {
+            collectorService?.stopDemoStream()
+            collectorService?.setManualKnownPlaceOverride(0)
+        }
         applyDeveloperModeVisibility()
     }
 
@@ -236,8 +423,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun applyDeveloperModeVisibility() {
         val dev = isDeveloperModeEnabled()
+        val demo = isDemoDataEnabled()
         if (::demoStreamBtn.isInitialized) {
-            demoStreamBtn.visibility = if (dev) View.VISIBLE else View.GONE
+            demoStreamBtn.visibility = if (demo) View.VISIBLE else View.GONE
         }
         if (::tabButtons.isInitialized && tabButtons.size >= 3) {
             tabButtons[0].text = if (dev) "1. Now" else "Now"
@@ -570,11 +758,32 @@ class MainActivity : AppCompatActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             setOnClickListener { promptAddCurrentWifiToSavedPlaces() }
         }
-        demoStreamBtn = Button(this).apply {
-            text = "🎭 Toggle Live 3s Demo BLE Stream (Emulator)"
+        manualTripToggleBtn = Button(this).apply {
+            text = "🚶 Start Trip Manually"
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-            visibility = if (isDeveloperModeEnabled()) View.VISIBLE else View.GONE
+            setOnClickListener {
+                val svc = collectorService ?: return@setOnClickListener
+                val snap = svc.buildSnapshot()
+                val isTripOpen = snap.activeExcursionId != null ||
+                    snap.collectorState == ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE ||
+                    snap.collectorState == ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED
+                if (isTripOpen) {
+                    svc.endManualExcursion()
+                    Toast.makeText(this@MainActivity, "⏹️ Trip ended", Toast.LENGTH_SHORT).show()
+                } else {
+                    svc.startManualExcursion()
+                    Toast.makeText(this@MainActivity, "🚶 Trip started", Toast.LENGTH_SHORT).show()
+                }
+                refreshLiveRecentGraph()
+                refreshTripsTab()
+            }
+        }
+        demoStreamBtn = Button(this).apply {
+            text = "🎭 Toggle Live 3s Demo BLE Stream (No Hardware Needed)"
+            isAllCaps = false
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            visibility = if (isDemoDataEnabled()) View.VISIBLE else View.GONE
             setOnClickListener {
                 val running = collectorService?.toggleDemoStream() ?: false
                 val msg = if (running) "Started Live Demo 0xFDCD Stream (every 3s)" else "Stopped Live Demo Stream"
@@ -583,6 +792,7 @@ class MainActivity : AppCompatActivity() {
         }
         wifiCard.addView(wifiStatusView)
         wifiCard.addView(saveCurrentWifiBtn)
+        wifiCard.addView(manualTripToggleBtn)
         wifiCard.addView(demoStreamBtn)
         col.addView(wifiCard)
 
@@ -601,6 +811,7 @@ class MainActivity : AppCompatActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, if (landscape) 13.5f else 15f)
             setTypeface(typeface, Typeface.BOLD)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener { showManageTripDialog() }
         }
 
         modeToggleBtn = Button(this).apply {
@@ -608,6 +819,7 @@ class MainActivity : AppCompatActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setOnClickListener {
                 isTripEditMode = !isTripEditMode
+                dualPaneSlicerView.selectedDividerIndex = -1
                 updateEditModeUi()
             }
         }
@@ -621,10 +833,12 @@ class MainActivity : AppCompatActivity() {
                 updateEditHelperText()
             }
             onSharedDividerMoved = { leftId, rightId, newTs ->
-                collectorService?.metadataDb?.moveSharedDivider(leftId, rightId, newTs)
+                val svc = collectorService
+                svc?.metadataDb?.moveSharedDivider(leftId, rightId, newTs, svc.ringStore)
                 refreshTripsTab()
             }
             onDividerSelected = { _ ->
+                updateEditModeUi()
                 refreshTripsTab()
             }
         }
@@ -636,10 +850,15 @@ class MainActivity : AppCompatActivity() {
             visibility = if (isTripEditMode) View.VISIBLE else View.GONE
         }
         editHelperView = TextView(this).apply {
-            setTextColor(Color.parseColor("#FBBF24"))
+            setTextColor(Color.parseColor("#38BDF8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setPadding(dp(2), dp(2), dp(2), dp(4))
             visibility = if (isTripEditMode) View.VISIBLE else View.GONE
+            setOnClickListener {
+                if (dualPaneSlicerView.selectedDividerIndex >= 0) {
+                    switchToSplitCursorMode()
+                }
+            }
         }
         fun makeEditBarButton(label: String, portraitWeight: Float, onClick: () -> Unit): Button =
             Button(this).apply {
@@ -658,11 +877,17 @@ class MainActivity : AppCompatActivity() {
                 setOnClickListener { onClick() }
             }
 
-        dividerNudgeBar.addView(makeEditBarButton("✂️ Split", 1.35f) { splitAtCurrentCursor() })
-        dividerNudgeBar.addView(makeEditBarButton("-1m", 1f) { nudgeSelectedDivider(-60L) })
+        cursorModeBtn = makeEditBarButton("🎯 Cursor", 1.2f) { switchToSplitCursorMode() }.apply {
+            backgroundTintList = ColorStateList.valueOf(Color.parseColor("#0284C7"))
+            setTextColor(Color.WHITE)
+            visibility = View.GONE
+        }
+        dividerNudgeBar.addView(makeEditBarButton("✂️ Split", 1.2f) { splitAtCurrentCursor() })
+        dividerNudgeBar.addView(cursorModeBtn)
+        dividerNudgeBar.addView(makeEditBarButton("-1m", 0.95f) { nudgeSelectedDivider(-60L) })
         dividerNudgeBar.addView(makeEditBarButton("-15s", 1f) { nudgeSelectedDivider(-15L) })
         dividerNudgeBar.addView(makeEditBarButton("+15s", 1f) { nudgeSelectedDivider(+15L) })
-        dividerNudgeBar.addView(makeEditBarButton("+1m", 1f) { nudgeSelectedDivider(+60L) })
+        dividerNudgeBar.addView(makeEditBarButton("+1m", 0.95f) { nudgeSelectedDivider(+60L) })
 
         if (landscape) {
             // LANDSCAPE MODE: Fit all 3 panes on screen at once with ZERO scrolling!
@@ -699,6 +924,9 @@ class MainActivity : AppCompatActivity() {
             )
             landRoot.addView(dualPaneSlicerView)
             slicesContainer = null
+            pinTripBtn = null
+            manageTripBtn = null
+            tripRetentionBanner = null
             updateEditModeUi()
             return landRoot
         } else {
@@ -731,29 +959,69 @@ class MainActivity : AppCompatActivity() {
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 setOnClickListener { show14dRingWindowSelectorDialog() }
             }
-            val exportCsvBtn = Button(this).apply {
-                text = "📤 CSV"
-                isAllCaps = false
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                setOnClickListener { exportCurrentExcursionToCsv() }
-            }
             actionRow.addView(chooseTripBtn)
             actionRow.addView(carveWindowBtn)
             actionRow.addView(modeToggleBtn)
-            actionRow.addView(exportCsvBtn)
             col.addView(actionRow)
 
             val titleRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(2), dp(4), dp(2), dp(4))
+                setPadding(dp(2), dp(2), dp(2), dp(2))
             }
+            val pinBtn = TextView(this).apply {
+                text = "⏳ 14d • 📌 Pin"
+                maxLines = 1
+                gravity = Gravity.CENTER
+                isClickable = true
+                isFocusable = true
+                setPadding(dp(8), dp(2), dp(8), dp(2))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                setTextColor(Color.parseColor("#FDE68A"))
+                background = roundedRect("#1E293B", dp(6), strokeHex = "#D97706", strokeWidthPx = dp(1))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { marginEnd = dp(4) }
+                setOnClickListener { toggleSelectedTripPin() }
+            }
+            val manageBtn = TextView(this).apply {
+                text = "✏️"
+                maxLines = 1
+                gravity = Gravity.CENTER
+                isClickable = true
+                isFocusable = true
+                setPadding(dp(8), dp(2), dp(8), dp(2))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setTextColor(Color.parseColor("#CBD5E1"))
+                background = roundedRect("#1E293B", dp(6), strokeHex = "#334155", strokeWidthPx = dp(1))
+                setOnClickListener { showManageTripDialog() }
+            }
+            pinTripBtn = pinBtn
+            manageTripBtn = manageBtn
             titleRow.addView(tripSelectorLabel)
+            titleRow.addView(pinBtn)
+            titleRow.addView(manageBtn)
             col.addView(titleRow)
 
             col.addView(dualPaneSlicerView)
             col.addView(dividerNudgeBar)
             col.addView(editHelperView)
+
+            val retentionBanner = TextView(this).apply {
+                setTextColor(Color.parseColor("#FDE68A"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                setPadding(dp(10), dp(8), dp(10), dp(8))
+                background = roundedRect("#1E293B", dp(8), strokeHex = "#F59E0B", strokeWidthPx = dp(1))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(4) }
+                visibility = View.GONE
+                setOnClickListener { toggleSelectedTripPin(forcePin = true) }
+            }
+            tripRetentionBanner = retentionBanner
+            col.addView(retentionBanner)
 
             val segList = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
@@ -771,31 +1039,108 @@ class MainActivity : AppCompatActivity() {
     private fun updateEditModeUi() {
         dualPaneSlicerView.isEditMode = isTripEditMode
         dividerNudgeBar.visibility = if (isTripEditMode) View.VISIBLE else View.GONE
+        if (::cursorModeBtn.isInitialized) {
+            val dividerActive = isTripEditMode &&
+                dualPaneSlicerView.selectedDividerIndex in 0 until (dualPaneSlicerView.slices.size - 1)
+            cursorModeBtn.visibility = if (dividerActive) View.VISIBLE else View.GONE
+        }
         if (::editHelperView.isInitialized) {
             editHelperView.visibility = if (isTripEditMode) View.VISIBLE else View.GONE
             updateEditHelperText()
         }
         modeToggleBtn.text = if (isTripEditMode) "👁️ Done Editing" else "✏️ Edit Trip"
-        modeToggleBtn.setBackgroundColor(
-            if (isTripEditMode) Color.parseColor("#D97706") else Color.parseColor("#334155")
+        modeToggleBtn.backgroundTintList = ColorStateList.valueOf(
+            Color.parseColor(if (isTripEditMode) "#D97706" else "#334155")
         )
         modeToggleBtn.setTextColor(Color.WHITE)
+
+        val svc = collectorService
+        val excId = selectedExcursionId
+        if (svc != null && excId != null && customWindowStartEpochSec == null) {
+            val currentExc = svc.metadataDb.getExcursions().firstOrNull { it.id == excId }
+            updateTripRetentionBanner(currentExc, dualPaneSlicerView.slices)
+        } else {
+            tripRetentionBanner?.visibility = View.GONE
+        }
+    }
+
+    private fun toggleSelectedTripPin(forcePin: Boolean? = null) {
+        val svc = collectorService ?: return
+        if (customWindowStartEpochSec != null) return
+        val excId = selectedExcursionId ?: return
+        val exc = svc.metadataDb.getExcursions().firstOrNull { it.id == excId } ?: return
+        val newPinned = forcePin ?: !exc.isPinned
+        if (!newPinned && svc.metadataDb.isExcursionOutsideRingWindow(exc, svc.ringStore)) {
+            confirmDeleteTrip(exc, initiatedByUnpin = true)
+            return
+        }
+        svc.metadataDb.setExcursionPinned(exc.id, newPinned, svc.ringStore)
+        refreshTripsTab()
+        Toast.makeText(
+            this,
+            if (newPinned) "📌 Trip pinned forever" else "Trip set to 14-day ring retention",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    private fun updateTripRetentionBanner(exc: ExcursionRecord?, slices: List<SessionSliceRecord>) {
+        val banner = tripRetentionBanner ?: return
+        if (exc == null || exc.isPinned || (!isTripEditMode && slices.size <= 1)) {
+            banner.visibility = View.GONE
+            return
+        }
+        banner.text = "⏳ Auto-recorded trip (expires in 14d). Tap here or '⏳ 14d • 📌 Pin' above to retain this trip forever."
+        banner.visibility = View.VISIBLE
     }
 
     private fun updateEditHelperText() {
         if (!::editHelperView.isInitialized || !isTripEditMode) return
         val slices = dualPaneSlicerView.slices
         val divIdx = dualPaneSlicerView.selectedDividerIndex
-        editHelperView.text = when {
-            slices.size <= 1 ->
-                "Edit Mode: Tap chart or ±15s/±1m to place the cursor, then tap ✂️ Split to divide #1."
-            divIdx in 0 until slices.size - 1 -> {
-                val boundaryTime = shortTimeFmt.format(Instant.ofEpochSecond(slices[divIdx].endEpochSec))
-                "Divider ⇔ ${divIdx + 1}|${divIdx + 2} selected ($boundaryTime) — separates #${divIdx + 1} (left) and #${divIdx + 2} (right). Drag or nudge."
+        val cursorTs = dualPaneSlicerView.cursorEpochSec
+        val cursorTime = if (cursorTs > 0L) shortTimeFmt.format(Instant.ofEpochSecond(cursorTs)) else "tap chart"
+        if (divIdx in 0 until slices.size - 1) {
+            val boundaryTime = shortTimeFmt.format(Instant.ofEpochSecond(slices[divIdx].endEpochSec))
+            editHelperView.setTextColor(Color.parseColor("#F97316"))
+            editHelperView.text =
+                "🟠 Divider ⇔ ${divIdx + 1}|${divIdx + 2} ($boundaryTime): Drag ⇔ or tap ±15s/±1m to move boundary. Tap 🎯 Cursor (or tap chart/banner) to place a new split."
+        } else {
+            editHelperView.setTextColor(Color.parseColor("#38BDF8"))
+            editHelperView.text = if (slices.size <= 1) {
+                "🎯 Split Cursor ($cursorTime): Tap/drag chart or ±15s/±1m to aim, then tap ✂️ Split."
+            } else {
+                "🎯 Split Cursor ($cursorTime): Aim cursor & tap ✂️ Split to add a boundary, or tap a ⇔ pill to move an existing boundary."
             }
-            else ->
-                "Edit Mode: Tap inside a segment + ✂️ Split to add a boundary, or tap/drag a ⇔ divider to adjust."
         }
+    }
+
+    private fun switchToSplitCursorMode() {
+        val slices = dualPaneSlicerView.slices
+        val prevDivIdx = dualPaneSlicerView.selectedDividerIndex
+        dualPaneSlicerView.selectedDividerIndex = -1
+        val cursorTs = dualPaneSlicerView.cursorEpochSec
+        val insideSlice = slices.any { cursorTs > it.startEpochSec && cursorTs < it.endEpochSec }
+        if (!insideSlice && slices.isNotEmpty()) {
+            val left = slices.getOrNull(prevDivIdx)
+            val right = slices.getOrNull(prevDivIdx + 1)
+            val preferred = when {
+                left != null && right != null ->
+                    if ((left.endEpochSec - left.startEpochSec) >= (right.endEpochSec - right.startEpochSec)) left else right
+                left != null -> left
+                right != null -> right
+                else -> slices.first()
+            }
+            val mid = (((preferred.startEpochSec + preferred.endEpochSec) / 2L) / 15L) * 15L
+            val candidate = mid.coerceIn(preferred.startEpochSec, preferred.endEpochSec)
+            if (candidate > preferred.startEpochSec && candidate < preferred.endEpochSec) {
+                dualPaneSlicerView.cursorEpochSec = candidate
+            } else if (preferred.startEpochSec + 15L < preferred.endEpochSec) {
+                dualPaneSlicerView.cursorEpochSec = preferred.startEpochSec + 15L
+            }
+        }
+        updateEditModeUi()
+        updateSliceCardHighlights(dualPaneSlicerView.cursorEpochSec)
+        dualPaneSlicerView.invalidate()
     }
 
     // =========================================================================
@@ -1038,7 +1383,11 @@ class MainActivity : AppCompatActivity() {
         }
         contextPillView.text = when (snap.collectorState) {
             ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP ->
-                "🏠 At ${snap.matchedKnownPlace?.label ?: "Saved Place"} • GPS Off • BLE: $bleShortLabel"
+                if (snap.matchedKnownPlace != null) {
+                    "🏠 At ${snap.matchedKnownPlace.label} • GPS Off • BLE: $bleShortLabel"
+                } else {
+                    "📡 Monitoring • GPS Off • BLE: $bleShortLabel"
+                }
             ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE -> {
                 val movementBadge = when {
                     snap.isGpsActive && snap.isStepSensorActive -> "GPS + Steps Active"
@@ -1132,12 +1481,24 @@ class MainActivity : AppCompatActivity() {
 
         val ssidStr = snap.connectedWifiSsid ?: "(Not connected / Location permission needed)"
         val placeMatchStr = snap.matchedKnownPlace?.let { "Saved Place: ${it.label} (GPS Off)" }
-            ?: if (snap.connectedWifiSsid != null) "Unrecognized Wi-Fi (Trip Mode if monitor active)" else "No Wi-Fi Place Matched"
+            ?: when {
+                !snap.hasConfiguredKnownPlaces -> "No Saved Places (Save Wi-Fi for Auto-Trips)"
+                snap.connectedWifiSsid != null -> "Unrecognized Wi-Fi (Trip Mode if monitor active)"
+                else -> "No Wi-Fi Place Matched"
+            }
         wifiStatusView.text = "Wi-Fi: $ssidStr  •  $placeMatchStr"
         saveCurrentWifiBtn.visibility = if (!snap.connectedWifiSsid.isNullOrBlank() && snap.matchedKnownPlace == null) {
             View.VISIBLE
         } else {
             View.GONE
+        }
+        val isTripOpen = snap.activeExcursionId != null ||
+            snap.collectorState == ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE ||
+            snap.collectorState == ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED
+        manualTripToggleBtn.text = if (isTripOpen) {
+            "⏹️ End Current Trip"
+        } else {
+            "🚶 Start Trip Manually"
         }
 
         refreshLiveRecentGraph()
@@ -1191,6 +1552,9 @@ class MainActivity : AppCompatActivity() {
             val slots = svc.ringStore.queryRange(0, cwStart, cwEnd)
             val spanLabel = "${dateShortTimeFmt.format(Instant.ofEpochSecond(cwStart))} – ${shortTimeFmt.format(Instant.ofEpochSecond(cwEnd))}"
             tripSelectorLabel.text = "14d Window: $spanLabel"
+            pinTripBtn?.visibility = View.GONE
+            manageTripBtn?.visibility = View.GONE
+            tripRetentionBanner?.visibility = View.GONE
             dualPaneSlicerView.slices = emptyList()
             dualPaneSlicerView.slots = slots
             slicesContainer?.removeAllViews()
@@ -1209,25 +1573,61 @@ class MainActivity : AppCompatActivity() {
 
         val excursions = svc.metadataDb.getExcursions()
         if (excursions.isEmpty()) {
+            selectedExcursionId = null
+            lastSeenLatestExcursionId = null
             tripSelectorLabel.text = "No Trips Recorded Yet"
+            pinTripBtn?.visibility = View.GONE
+            manageTripBtn?.visibility = View.GONE
+            tripRetentionBanner?.visibility = View.GONE
             dualPaneSlicerView.slots = emptyList()
             dualPaneSlicerView.slices = emptyList()
             slicesContainer?.removeAllViews()
+            if (isDemoDataEnabled()) {
+                slicesContainer?.addView(Button(this).apply {
+                    text = "🎭 Load 75-min Demo Chicago Trip"
+                    isAllCaps = false
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    setOnClickListener {
+                        customWindowStartEpochSec = null
+                        customWindowEndEpochSec = null
+                        selectedExcursionId = svc.seedDemoChicagoExcursion()
+                        refreshTripsTab()
+                    }
+                })
+            }
             return
         }
 
-        val currentExc = excursions.firstOrNull { it.id == selectedExcursionId } ?: excursions.first().also {
-            selectedExcursionId = it.id
-        }
-        val endSec = currentExc.endEpochSec ?: (System.currentTimeMillis() / 1000L)
+        val (resolvedId, newestId) = MetadataDatabase.resolveSelectedExcursionId(
+            excursions = excursions,
+            currentSelectedId = selectedExcursionId,
+            lastSeenLatestId = lastSeenLatestExcursionId,
+            isTripEditMode = isTripEditMode
+        )
+        selectedExcursionId = resolvedId
+        lastSeenLatestExcursionId = newestId
+        val currentExc = excursions.firstOrNull { it.id == resolvedId } ?: excursions.first()
         val slices = svc.metadataDb.getSlicesForExcursion(currentExc.id)
-        val slots = svc.ringStore.queryRange(0, currentExc.startEpochSec, endSec)
+        val slots = svc.metadataDb.resolveSlotsForExcursion(currentExc.id, svc.ringStore)
 
         val pinBadge = if (currentExc.isPinned) "📌" else "14d"
-        tripSelectorLabel.text = "${currentExc.title} [$pinBadge]"
+        tripSelectorLabel.text = if (isLandscape()) "${currentExc.title} [$pinBadge]" else currentExc.title
+        manageTripBtn?.visibility = View.VISIBLE
+        pinTripBtn?.apply {
+            visibility = View.VISIBLE
+            text = if (currentExc.isPinned) "📌 Pinned" else "⏳ 14d • 📌 Pin"
+            if (currentExc.isPinned) {
+                background = roundedRect("#1E293B", dp(6), strokeHex = "#334155", strokeWidthPx = dp(1))
+                setTextColor(Color.parseColor("#94A3B8"))
+            } else {
+                background = roundedRect("#1E293B", dp(6), strokeHex = "#D97706", strokeWidthPx = dp(1))
+                setTextColor(Color.parseColor("#FDE68A"))
+            }
+        }
         dualPaneSlicerView.slices = slices
         dualPaneSlicerView.slots = slots
         updateEditHelperText()
+        updateTripRetentionBanner(currentExc, slices)
 
         if (!isLandscape()) {
             renderSliceCards(slices, slots)
@@ -1250,15 +1650,13 @@ class MainActivity : AppCompatActivity() {
         slices: List<SessionSliceRecord>,
         allSlots: List<AqlRingBufferStore.RingSlotRecord>
     ) {
-        val svc = collectorService ?: return
         val container = slicesContainer ?: return
         container.removeAllViews()
         val cardsList = mutableListOf<Pair<SessionSliceRecord, LinearLayout>>()
         val cursorTs = dualPaneSlicerView.cursorEpochSec
 
         for ((idx, slice) in slices.withIndex()) {
-            val sliceSlots = svc.metadataDb.getPinnedSlotsForSlice(slice.id)
-                ?: allSlots.filter { it.bucketEpochSec in slice.startEpochSec..slice.endEpochSec }
+            val sliceSlots = allSlots.filter { it.bucketEpochSec in slice.startEpochSec..slice.endEpochSec }
             val stats = AqlRingBufferStore.computeSliceStats(sliceSlots, stepSec = 15)
             val isCursorInside = slices.size > 1 && cursorTs in slice.startEpochSec..slice.endEpochSec
 
@@ -1274,6 +1672,14 @@ class MainActivity : AppCompatActivity() {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { bottomMargin = dp(8) }
+                setOnClickListener {
+                    dualPaneSlicerView.selectedDividerIndex = -1
+                    val mid = (((slice.startEpochSec + slice.endEpochSec) / 2L) / 15L) * 15L
+                    dualPaneSlicerView.cursorEpochSec = mid.coerceIn(slice.startEpochSec, slice.endEpochSec)
+                    updateEditModeUi()
+                    updateSliceCardHighlights(dualPaneSlicerView.cursorEpochSec)
+                    dualPaneSlicerView.invalidate()
+                }
             }
 
             val headerRow = LinearLayout(this).apply {
@@ -1283,11 +1689,22 @@ class MainActivity : AppCompatActivity() {
             val spanDuration = formatElapsedAge((slice.endEpochSec - slice.startEpochSec).coerceAtLeast(0L))
             val timeSpan = "${shortTimeFmt.format(Instant.ofEpochSecond(slice.startEpochSec))}–${shortTimeFmt.format(Instant.ofEpochSecond(slice.endEpochSec))} ($spanDuration)"
             val titleTv = TextView(this).apply {
-                text = "#${idx + 1} ${slice.label} [${slice.category.name}]\n$timeSpan"
+                text = "#${idx + 1} ${slice.label}\n$timeSpan"
                 setTextColor(Color.parseColor("#F8FAFC"))
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
                 setTypeface(typeface, Typeface.BOLD)
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            headerRow.addView(titleTv)
+            if (slices.size >= 2 && (idx == 0 || idx == slices.size - 1)) {
+                val isStart = (idx == 0)
+                val dropBtn = Button(this).apply {
+                    text = if (isStart) "🗑️ Drop #1" else "🗑️ Drop #${idx + 1}"
+                    isAllCaps = false
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                    setOnClickListener { confirmAndTrimSlice(slice, isStart = isStart, idx = idx) }
+                }
+                headerRow.addView(dropBtn)
             }
             val editSegmentBtn = Button(this).apply {
                 text = "✏️ Edit"
@@ -1298,66 +1715,193 @@ class MainActivity : AppCompatActivity() {
                     showSegmentEditModal(slice, nextSlice, idx)
                 }
             }
-            headerRow.addView(titleTv)
             headerRow.addView(editSegmentBtn)
             card.addView(headerRow)
 
-            val notesSuffix = if (slice.notes.isNotBlank()) " • \"${slice.notes}\"" else ""
-            val statsRow = TextView(this).apply {
+            val metaRow = TextView(this).apply {
                 text = String.format(
                     Locale.US,
-                    "CO₂: %.0f ppm (Max %d, P95 %d) • PM2.5: %.1f µg/m³ • %.0fm%s",
-                    stats.co2Mean,
-                    stats.co2Max,
-                    stats.co2P95,
-                    stats.pm25Mean,
+                    "Est. distance: %.0fm • CO₂ ≥1000 ppm: %.1fm • %d samples",
                     stats.totalDistanceMetersEstimate,
-                    notesSuffix
+                    stats.minutesCo2Above1000,
+                    stats.totalSamples
                 )
-                setTextColor(Color.parseColor("#38BDF8"))
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setTextColor(Color.parseColor("#94A3B8"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
                 setPadding(0, dp(4), 0, dp(4))
             }
-            card.addView(statsRow)
+            card.addView(metaRow)
+
+            card.addView(buildSliceStatsTable(stats))
+
+            if (slice.notes.isNotBlank()) {
+                val notesView = TextView(this).apply {
+                    text = "📝 \"${slice.notes}\""
+                    setTextColor(Color.parseColor("#CBD5E1"))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                    setPadding(0, dp(4), 0, dp(2))
+                }
+                card.addView(notesView)
+            }
 
             val controlsRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
+                gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                setPadding(0, dp(4), 0, 0)
             }
-            val pinCheck = CheckBox(this).apply {
-                text = "Pin Forever"
-                isChecked = slice.isPinned
-                setTextColor(Color.parseColor("#CBD5E1"))
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                setOnCheckedChangeListener { _, checked ->
-                    svc.metadataDb.updateSliceMetadata(
-                        slice.id, slice.label, slice.category, slice.notes,
-                        isPinned = checked, includeInExport = slice.includeInExport, ringStore = svc.ringStore
-                    )
-                    refreshTripsTab()
+            val exportSliceBtn = Button(this).apply {
+                text = "📤 Export CSV"
+                isAllCaps = false
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                setOnClickListener {
+                    exportSliceToCsv(slice, idx + 1, sliceSlots)
                 }
             }
-            val exportCheck = CheckBox(this).apply {
-                text = "Include in CSV"
-                isChecked = slice.includeInExport
-                setTextColor(Color.parseColor("#CBD5E1"))
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                setOnCheckedChangeListener { _, checked ->
-                    svc.metadataDb.updateSliceMetadata(
-                        slice.id, slice.label, slice.category, slice.notes,
-                        isPinned = slice.isPinned, includeInExport = checked, ringStore = svc.ringStore
-                    )
-                    refreshTripsTab()
-                }
-            }
-            controlsRow.addView(pinCheck)
-            controlsRow.addView(exportCheck)
+            controlsRow.addView(exportSliceBtn)
             card.addView(controlsRow)
 
             cardsList.add(slice to card)
             container.addView(card)
         }
         renderedSliceCards = cardsList
+    }
+
+    private data class SliceStatRowSpec(
+        val label: String,
+        val colorHex: String,
+        val p50: String,
+        val p95: String,
+        val max: String,
+        val avg: String,
+        val highlightMedian: Boolean = false
+    )
+
+    private fun buildSliceStatsTable(stats: AqlRingBufferStore.SliceStatistics): View {
+        if (stats.slotCount <= 0) {
+            return TextView(this).apply {
+                text = "No air-quality samples recorded in this segment."
+                setTextColor(Color.parseColor("#64748B"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                setPadding(0, dp(2), 0, dp(4))
+            }
+        }
+
+        val useF = TemperatureUnitFormatter.useFahrenheit(this)
+        val tempUnit = TemperatureUnitFormatter.unitSymbol(useF)
+        fun fmtTemp(c: Float): String = String.format(
+            Locale.US,
+            "%.1f",
+            TemperatureUnitFormatter.convertFromCelsius(c, useF)
+        )
+
+        val rows = listOf(
+            SliceStatRowSpec(
+                label = "CO₂ (ppm)",
+                colorHex = "#38BDF8",
+                p50 = stats.co2Median.toString(),
+                p95 = stats.co2P95.toString(),
+                max = stats.co2Max.toString(),
+                avg = String.format(Locale.US, "%.0f", stats.co2Mean)
+            ),
+            SliceStatRowSpec(
+                label = "PM2.5 (µg/m³)",
+                colorHex = "#A78BFA",
+                p50 = String.format(Locale.US, "%.1f", stats.pm25P50),
+                p95 = String.format(Locale.US, "%.1f", stats.pm25P95),
+                max = stats.pm25Max.toString(),
+                avg = String.format(Locale.US, "%.1f", stats.pm25Mean)
+            ),
+            SliceStatRowSpec(
+                label = "PM10 (µg/m³)",
+                colorHex = "#C084FC",
+                p50 = String.format(Locale.US, "%.1f", stats.pm10P50),
+                p95 = String.format(Locale.US, "%.1f", stats.pm10P95),
+                max = stats.pm10Max.toString(),
+                avg = String.format(Locale.US, "%.1f", stats.pm10Mean)
+            ),
+            SliceStatRowSpec(
+                label = "Temp ($tempUnit)",
+                colorHex = "#FB923C",
+                p50 = fmtTemp(stats.tempCP50),
+                p95 = fmtTemp(stats.tempCP95),
+                max = fmtTemp(stats.tempCMax),
+                avg = fmtTemp(stats.tempCMean),
+                highlightMedian = true
+            ),
+            SliceStatRowSpec(
+                label = "RH (%)",
+                colorHex = "#2DD4BF",
+                p50 = String.format(Locale.US, "%.1f", stats.humidityP50),
+                p95 = String.format(Locale.US, "%.1f", stats.humidityP95),
+                max = String.format(Locale.US, "%.1f", stats.humidityMax),
+                avg = String.format(Locale.US, "%.1f", stats.humidityMean),
+                highlightMedian = true
+            )
+        )
+
+        val table = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundedRect("#0F172A", dp(8))
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(2)
+                bottomMargin = dp(4)
+            }
+        }
+
+        fun makeCell(text: String, weight: Float, alignEnd: Boolean, colorHex: String, bold: Boolean = false): TextView =
+            TextView(this).apply {
+                this.text = text
+                setTextColor(Color.parseColor(colorHex))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                if (bold) setTypeface(typeface, Typeface.BOLD)
+                gravity = if (alignEnd) Gravity.END else Gravity.START
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weight)
+            }
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, dp(3))
+        }
+        header.addView(makeCell("Metric", 1.55f, alignEnd = false, colorHex = "#94A3B8", bold = true))
+        header.addView(makeCell("P50", 1.0f, alignEnd = true, colorHex = "#94A3B8", bold = true))
+        header.addView(makeCell("P95", 1.0f, alignEnd = true, colorHex = "#94A3B8", bold = true))
+        header.addView(makeCell("Max", 1.0f, alignEnd = true, colorHex = "#94A3B8", bold = true))
+        header.addView(makeCell("Avg", 1.0f, alignEnd = true, colorHex = "#94A3B8", bold = true))
+        table.addView(header)
+
+        for (spec in rows) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(2), 0, dp(2))
+            }
+            row.addView(makeCell(spec.label, 1.55f, alignEnd = false, colorHex = spec.colorHex, bold = true))
+            row.addView(
+                makeCell(
+                    spec.p50,
+                    1.0f,
+                    alignEnd = true,
+                    colorHex = if (spec.highlightMedian) "#F8FAFC" else "#E2E8F0",
+                    bold = spec.highlightMedian
+                )
+            )
+            row.addView(makeCell(spec.p95, 1.0f, alignEnd = true, colorHex = "#E2E8F0"))
+            row.addView(
+                makeCell(
+                    spec.max,
+                    1.0f,
+                    alignEnd = true,
+                    colorHex = if (!spec.highlightMedian) "#F8FAFC" else "#E2E8F0",
+                    bold = !spec.highlightMedian
+                )
+            )
+            row.addView(makeCell(spec.avg, 1.0f, alignEnd = true, colorHex = "#CBD5E1"))
+            table.addView(row)
+        }
+        return table
     }
 
     // =========================================================================
@@ -1383,23 +1927,6 @@ class MainActivity : AppCompatActivity() {
         layout.addView(labelTitle)
         layout.addView(labelInput)
 
-        val categoryTitle = TextView(this).apply {
-            text = "Category:"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-            setPadding(0, dp(8), 0, dp(2))
-        }
-        val categories = SliceCategory.entries
-        val categorySpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@MainActivity,
-                android.R.layout.simple_spinner_dropdown_item,
-                categories.map { it.name }
-            )
-            setSelection(categories.indexOf(slice.category).coerceAtLeast(0))
-        }
-        layout.addView(categoryTitle)
-        layout.addView(categorySpinner)
-
         // Optional quick-fill presets inside the modal (populates the freeform fields without forcing preset creation)
         val presetsHint = TextView(this).apply {
             text = "Quick-Fill from Saved Presets (optional):"
@@ -1417,7 +1944,6 @@ class MainActivity : AppCompatActivity() {
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
                 setOnClickListener {
                     labelInput.setText(preset.label)
-                    categorySpinner.setSelection(categories.indexOf(preset.defaultCategory).coerceAtLeast(0))
                 }
             }
             chipRow.addView(chipBtn)
@@ -1437,22 +1963,30 @@ class MainActivity : AppCompatActivity() {
         layout.addView(notesTitle)
         layout.addView(notesInput)
 
+        val allSlices = dualPaneSlicerView.slices
+        var dropBoundaryBtn: Button? = null
+        if (allSlices.size >= 2 && (sliceIdx == 0 || sliceIdx == allSlices.size - 1)) {
+            val isStart = (sliceIdx == 0)
+            dropBoundaryBtn = Button(this).apply {
+                text = "🗑️ Drop #${sliceIdx + 1} (Trim Trip ${if (isStart) "Start" else "End"})"
+                isAllCaps = false
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            }
+            layout.addView(dropBoundaryBtn)
+        }
+
         val spanTitle = "${shortTimeFmt.format(Instant.ofEpochSecond(slice.startEpochSec))}–${shortTimeFmt.format(Instant.ofEpochSecond(slice.endEpochSec))}"
         val dialogBuilder = AlertDialog.Builder(this)
             .setTitle("Edit Segment #${sliceIdx + 1} ($spanTitle)")
             .setView(layout)
             .setPositiveButton("Save") { _, _ ->
                 val newLabel = labelInput.text.toString().trim().ifEmpty { "Segment" }
-                val newCategory = categories[categorySpinner.selectedItemPosition]
                 val newNotes = notesInput.text.toString().trim()
                 svc.metadataDb.updateSliceMetadata(
                     sliceId = slice.id,
                     label = newLabel,
-                    category = newCategory,
                     notes = newNotes,
-                    isPinned = slice.isPinned,
-                    includeInExport = slice.includeInExport,
-                    ringStore = svc.ringStore
+                    includeInExport = slice.includeInExport
                 )
                 refreshTripsTab()
             }
@@ -1460,11 +1994,23 @@ class MainActivity : AppCompatActivity() {
 
         if (nextSlice != null) {
             dialogBuilder.setNeutralButton("Merge #${sliceIdx + 1} + #${sliceIdx + 2} ↓") { _, _ ->
-                svc.metadataDb.mergeAdjacentSlices(slice.id, nextSlice.id)
+                svc.metadataDb.mergeAdjacentSlices(slice.id, nextSlice.id, svc.ringStore)
                 refreshTripsTab()
             }
         }
-        dialogBuilder.show()
+        val dialog = dialogBuilder.create()
+        dropBoundaryBtn?.setOnClickListener {
+            dialog.dismiss()
+            confirmAndTrimSlice(slice, isStart = (sliceIdx == 0), idx = sliceIdx)
+        }
+        activeSegmentModalDialog?.dismiss()
+        activeSegmentModalDialog = dialog
+        dialog.setOnDismissListener {
+            if (activeSegmentModalDialog === dialog) {
+                activeSegmentModalDialog = null
+            }
+        }
+        dialog.show()
     }
 
     // =========================================================================
@@ -1559,12 +2105,13 @@ class MainActivity : AppCompatActivity() {
         val svc = collectorService ?: return
         val title = "Carved Trip (${dateShortTimeFmt.format(Instant.ofEpochSecond(startSec))})"
         val exc = svc.metadataDb.startExcursion(deviceId = 1L, startEpochSec = startSec, title = title)
-        svc.metadataDb.updateOngoingExcursionEnd(exc.id, endSec, closeExcursion = true)
+        svc.metadataDb.updateOngoingExcursionEnd(exc.id, endSec, closeExcursion = true, ringStore = svc.ringStore)
+        svc.metadataDb.setExcursionPinned(exc.id, true, svc.ringStore)
         customWindowStartEpochSec = null
         customWindowEndEpochSec = null
         selectedExcursionId = exc.id
         refreshTripsTab()
-        Toast.makeText(this, "Created Trip: $title", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "📌 Carved & Pinned Trip: $title", Toast.LENGTH_SHORT).show()
     }
 
     // =========================================================================
@@ -1661,8 +2208,9 @@ class MainActivity : AppCompatActivity() {
             }
             col.addView(emptyTv)
         } else {
+            val fakeSsid = svc.fakeWifiSsidOverride
             for (p in places) {
-                val ssids = p.networks.joinToString(", ") { it.ssid }
+                val ssids = p.networks.joinToString(", ") { fakeSsid ?: it.ssid }
                 val row = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
@@ -1674,14 +2222,25 @@ class MainActivity : AppCompatActivity() {
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 }
                 row.addView(tv)
-                if (isDeveloperModeEnabled()) {
+                if (isDemoDataEnabled()) {
+                    val simActiveHere = svc.isManualKnownPlaceOverrideActive() &&
+                        svc.buildSnapshot().matchedKnownPlace?.id == p.id
                     val simBtn = Button(this).apply {
-                        text = "Simulate"
+                        text = if (simActiveHere) "Stop Sim" else "Simulate"
                         isAllCaps = false
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                         setOnClickListener {
-                            svc.setManualKnownPlaceOverride(p.id)
-                            Toast.makeText(this@MainActivity, "Simulating presence at ${p.label} (GPS Off)", Toast.LENGTH_SHORT).show()
+                            val stopping = svc.isManualKnownPlaceOverrideActive() &&
+                                svc.buildSnapshot().matchedKnownPlace?.id == p.id
+                            if (stopping) {
+                                svc.setManualKnownPlaceOverride(0)
+                                text = "Simulate"
+                                Toast.makeText(this@MainActivity, "Stopped simulated presence", Toast.LENGTH_SHORT).show()
+                            } else {
+                                svc.setManualKnownPlaceOverride(p.id)
+                                text = "Stop Sim"
+                                Toast.makeText(this@MainActivity, "Simulating presence at ${p.label} (GPS Off)", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     }
                     row.addView(simBtn)
@@ -1808,12 +2367,50 @@ class MainActivity : AppCompatActivity() {
             col.addView(enableLocationBtn)
         }
 
+        val demoDataCheck = CheckBox(this).apply {
+            text = "🎭 Demo Data Mode (Synthetic BLE Stream, Sample Trip & Place Sim)"
+            isChecked = isDemoDataEnabled()
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        }
+        col.addView(demoDataCheck)
+
         val devModeCheck = CheckBox(this).apply {
-            text = "🛠️ Developer Mode (Show HW Test Tab & Demo Controls)"
+            text = "🛠️ Developer Mode (Show HW Test Tab & Raw BLE Logs)"
             isChecked = isDeveloperModeEnabled()
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         }
         col.addView(devModeCheck)
+
+        val fakeWifiContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), dp(4), 0, dp(4))
+            visibility = if (devModeCheck.isChecked || !svc.fakeWifiSsidOverride.isNullOrBlank()) {
+                View.VISIBLE
+            } else {
+                View.GONE
+            }
+        }
+        val fakeWifiLabel = TextView(this).apply {
+            text = "Anonymized Wi-Fi SSID Override (Video/Screenshots):"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        }
+        val fakeWifiSsidInput = EditText(this).apply {
+            hint = "Leave blank for real SSID (e.g. ChicagoHome-5G)"
+            setText(svc.fakeWifiSsidOverride ?: "")
+            setSingleLine(true)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        }
+        fakeWifiContainer.addView(fakeWifiLabel)
+        fakeWifiContainer.addView(fakeWifiSsidInput)
+        col.addView(fakeWifiContainer)
+
+        devModeCheck.setOnCheckedChangeListener { _, checked ->
+            fakeWifiContainer.visibility = if (checked || !svc.fakeWifiSsidOverride.isNullOrBlank()) {
+                View.VISIBLE
+            } else {
+                View.GONE
+            }
+        }
 
         scroll.addView(col)
 
@@ -1842,7 +2439,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 val chosenGraceSec = dropoutValuesSec[dropoutSpinner.selectedItemPosition]
                 setDropoutGracePeriodSec(chosenGraceSec)
+                setDemoDataEnabled(demoDataCheck.isChecked)
                 setDeveloperModeEnabled(devModeCheck.isChecked)
+                svc.setFakeWifiSsidOverride(fakeWifiSsidInput.text.toString())
+                refreshTripsTab()
                 svc.let { renderLiveSnapshot(it.buildSnapshot()) }
                 dualPaneSlicerView.invalidate()
                 liveRecentHistoryView.invalidate()
@@ -1857,11 +2457,30 @@ class MainActivity : AppCompatActivity() {
         val slices = svc.metadataDb.getSlicesForExcursion(excId)
         val targetSlice = slices.firstOrNull { cursorTs > it.startEpochSec && cursorTs < it.endEpochSec }
         if (targetSlice == null) {
-            Toast.makeText(this, "Tap inside a segment (between dividers) on the chart to place the split cursor.", Toast.LENGTH_SHORT).show()
+            if (dualPaneSlicerView.selectedDividerIndex >= 0) {
+                switchToSplitCursorMode()
+                Toast.makeText(
+                    this,
+                    "Switched to 🎯 Split Cursor — aim inside the segment and tap ✂️ Split.",
+                    Toast.LENGTH_SHORT
+                ).show()
+            } else {
+                Toast.makeText(this, "Tap inside a segment (between dividers) on the chart to place the split cursor.", Toast.LENGTH_SHORT).show()
+            }
             return
         }
-        if (svc.metadataDb.splitSliceAt(targetSlice.id, cursorTs)) {
+        val alignedSplit = (cursorTs / 15L) * 15L
+        if (svc.metadataDb.splitSliceAt(targetSlice.id, cursorTs, svc.ringStore)) {
+            dualPaneSlicerView.selectedDividerIndex = -1
             refreshTripsTab()
+            val newRight = dualPaneSlicerView.slices.firstOrNull { it.startEpochSec == alignedSplit }
+            if (newRight != null && newRight.endEpochSec - newRight.startEpochSec >= 30L) {
+                val mid = (((newRight.startEpochSec + newRight.endEpochSec) / 2L) / 15L) * 15L
+                dualPaneSlicerView.cursorEpochSec = mid.coerceIn(newRight.startEpochSec, newRight.endEpochSec)
+            }
+            updateEditModeUi()
+            updateSliceCardHighlights(dualPaneSlicerView.cursorEpochSec)
+            dualPaneSlicerView.invalidate()
         }
     }
 
@@ -1877,17 +2496,197 @@ class MainActivity : AppCompatActivity() {
         val left = slices[divIdx]
         val right = slices[divIdx + 1]
         val newBoundary = left.endEpochSec + deltaSec
-        if (svc.metadataDb.moveSharedDivider(left.id, right.id, newBoundary)) {
+        if (svc.metadataDb.moveSharedDivider(left.id, right.id, newBoundary, svc.ringStore)) {
+            dualPaneSlicerView.cursorEpochSec = (newBoundary / 15L) * 15L
             refreshTripsTab()
         }
+    }
+
+    private fun applyExcursionTrim(excursionId: Long, boundaryEpochSec: Long, trimStart: Boolean) {
+        val svc = collectorService ?: return
+        val ok = if (trimStart) {
+            svc.metadataDb.trimExcursionStart(excursionId, boundaryEpochSec, svc.ringStore)
+        } else {
+            val trimmed = svc.metadataDb.trimExcursionEnd(excursionId, boundaryEpochSec, svc.ringStore)
+            if (trimmed) svc.detachActiveExcursionIfMatching(excursionId)
+            trimmed
+        }
+        if (!ok) {
+            Toast.makeText(this, "Cannot trim outside the current trip bounds.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        dualPaneSlicerView.selectedDividerIndex = -1
+        refreshTripsTab()
+        val remaining = dualPaneSlicerView.slices
+        if (remaining.isNotEmpty()) {
+            val focusSlice = if (trimStart) remaining.first() else remaining.last()
+            val mid = (((focusSlice.startEpochSec + focusSlice.endEpochSec) / 2L) / 15L) * 15L
+            dualPaneSlicerView.cursorEpochSec = mid.coerceIn(focusSlice.startEpochSec, focusSlice.endEpochSec)
+        }
+        updateEditModeUi()
+        updateSliceCardHighlights(dualPaneSlicerView.cursorEpochSec)
+        dualPaneSlicerView.invalidate()
+    }
+
+    private fun confirmAndTrimSlice(slice: SessionSliceRecord, isStart: Boolean, idx: Int) {
+        val boundaryTs = if (isStart) slice.endEpochSec else slice.startEpochSec
+        val boundaryTime = shortTimeFmt.format(Instant.ofEpochSecond(boundaryTs))
+        AlertDialog.Builder(this)
+            .setTitle("Drop Segment #${idx + 1} (${slice.label})?")
+            .setMessage("This trims the ${if (isStart) "beginning" else "end"} of the trip to $boundaryTime.")
+            .setPositiveButton("Drop & Trim") { _, _ ->
+                applyExcursionTrim(slice.excursionId, boundaryTs, trimStart = isStart)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showManageTripDialog() {
+        val svc = collectorService ?: return
+        if (customWindowStartEpochSec != null) return
+        val excId = selectedExcursionId ?: return
+        val exc = svc.metadataDb.getExcursions().firstOrNull { it.id == excId } ?: return
+
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(14), dp(20), dp(8))
+        }
+        val titleLabel = TextView(this).apply {
+            text = "Trip Title:"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+        }
+        val titleInput = EditText(this).apply {
+            hint = "e.g., Morning Walk & Coffee, Clinic Visit"
+            setText(exc.title)
+        }
+
+        val pinCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(10)
+                bottomMargin = dp(4)
+            }
+        }
+        val pinTripCheck = CheckBox(this).apply {
+            text = "📌 Retain / Pin Entire Trip Forever"
+            isChecked = exc.isPinned
+            setTextColor(Color.parseColor("#F8FAFC"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setTypeface(typeface, Typeface.BOLD)
+        }
+        val pinStatusHint = TextView(this).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setPadding(dp(4), dp(4), dp(4), 0)
+        }
+        val outsideWindow = svc.metadataDb.isExcursionOutsideRingWindow(exc, svc.ringStore)
+        fun refreshPinCardStyle(pinned: Boolean) {
+            val strokeColor = when {
+                pinned -> "#059669"
+                outsideWindow -> "#EF4444"
+                else -> "#F59E0B"
+            }
+            val textColor = when {
+                pinned -> "#34D399"
+                outsideWindow -> "#FCA5A5"
+                else -> "#FBBF24"
+            }
+            pinCard.background = roundedRect("#1E293B", dp(8), strokeHex = strokeColor, strokeWidthPx = dp(2))
+            pinStatusHint.setTextColor(Color.parseColor(textColor))
+            pinStatusHint.text = when {
+                pinned -> "✅ Retained Forever: Full 15-second telemetry is saved in permanent storage."
+                outsideWindow -> "⚠️ Outside 14-Day Window: Unpinning this trip will permanently delete it and its saved readings."
+                else -> "⚠️ Temporary (14-Day Ring): Auto-recorded trips are not retained beyond 14 days unless pinned."
+            }
+        }
+        refreshPinCardStyle(exc.isPinned)
+        pinTripCheck.setOnCheckedChangeListener { _, checked -> refreshPinCardStyle(checked) }
+        pinCard.addView(pinTripCheck)
+        pinCard.addView(pinStatusHint)
+
+        var autoPinnedFromRename = false
+        titleInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                val edited = s?.toString()?.trim().orEmpty()
+                if (!exc.isPinned && !autoPinnedFromRename && edited.isNotEmpty() && edited != exc.title) {
+                    autoPinnedFromRename = true
+                    if (!pinTripCheck.isChecked) {
+                        pinTripCheck.isChecked = true
+                    }
+                }
+            }
+        })
+
+        layout.addView(titleLabel)
+        layout.addView(titleInput)
+        layout.addView(pinCard)
+
+        AlertDialog.Builder(this)
+            .setTitle("Manage Trip")
+            .setView(layout)
+            .setPositiveButton("Save") { _, _ ->
+                val newTitle = titleInput.text.toString().trim().ifEmpty { "Trip" }
+                svc.metadataDb.renameExcursion(exc.id, newTitle)
+                val updatedExc = exc.copy(title = newTitle)
+                if (pinTripCheck.isChecked != exc.isPinned) {
+                    if (!pinTripCheck.isChecked && outsideWindow) {
+                        refreshTripsTab()
+                        confirmDeleteTrip(updatedExc, initiatedByUnpin = true)
+                        return@setPositiveButton
+                    }
+                    svc.metadataDb.setExcursionPinned(exc.id, pinTripCheck.isChecked, svc.ringStore)
+                }
+                refreshTripsTab()
+            }
+            .setNeutralButton("🗑️ Delete Trip") { _, _ ->
+                confirmDeleteTrip(exc)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun confirmDeleteTrip(exc: ExcursionRecord, initiatedByUnpin: Boolean = false) {
+        val svc = collectorService ?: return
+        val outsideWindow = svc.metadataDb.isExcursionOutsideRingWindow(exc, svc.ringStore)
+        val dialogTitle = if (initiatedByUnpin) {
+            "Unpin & Delete Trip (${exc.title})?"
+        } else {
+            "Delete Trip (${exc.title})?"
+        }
+        val dialogMessage = if (outsideWindow) {
+            "⚠️ This trip is outside the 14-day ring buffer window. ${if (initiatedByUnpin) "Unpinning" else "Deleting"} it will permanently delete the trip, its segment labels, and its saved air-quality readings (they are no longer in the 14-day ring buffer)."
+        } else {
+            "This removes the trip and its segment labels. (Underlying 14-day ring-buffer readings remain intact and can still be carved via 🗓️ 14d Window.)"
+        }
+        val positiveLabel = when {
+            initiatedByUnpin -> "Unpin & Delete"
+            outsideWindow -> "Delete Permanently"
+            else -> "Delete Trip"
+        }
+        AlertDialog.Builder(this)
+            .setTitle(dialogTitle)
+            .setMessage(dialogMessage)
+            .setPositiveButton(positiveLabel) { _, _ ->
+                svc.detachActiveExcursionIfMatching(exc.id)
+                svc.metadataDb.deleteExcursion(exc.id)
+                selectedExcursionId = svc.metadataDb.getExcursions().firstOrNull()?.id
+                refreshTripsTab()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun showTripPickerDialog() {
         val svc = collectorService ?: return
         val excursions = svc.metadataDb.getExcursions()
-        val dev = isDeveloperModeEnabled()
+        val demo = isDemoDataEnabled()
         val options = excursions.map { "${it.title} (${if (it.isPinned) "Pinned" else "14d Ring"})" }.toMutableList()
-        if (dev) {
+        if (demo) {
             options.add("🔄 Reload 75-min Demo Chicago Trip")
         }
         if (options.isEmpty()) {
@@ -1901,7 +2700,7 @@ class MainActivity : AppCompatActivity() {
                 customWindowEndEpochSec = null
                 if (which < excursions.size) {
                     selectedExcursionId = excursions[which].id
-                } else if (dev) {
+                } else if (demo) {
                     selectedExcursionId = svc.seedDemoChicagoExcursion()
                 }
                 refreshTripsTab()
@@ -1909,36 +2708,51 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun exportCurrentExcursionToCsv() {
+    private fun exportSliceToCsv(
+        slice: SessionSliceRecord,
+        sliceNumber: Int,
+        preloadedSlots: List<AqlRingBufferStore.RingSlotRecord>? = null
+    ) {
         val svc = collectorService ?: return
-        val excId = selectedExcursionId ?: return
-        val exc = svc.metadataDb.getExcursions().firstOrNull { it.id == excId } ?: return
-        val slices = svc.metadataDb.getSlicesForExcursion(excId)
-        val endSec = exc.endEpochSec ?: (System.currentTimeMillis() / 1000L)
-        val slots = svc.ringStore.queryRange(0, exc.startEpochSec, endSec)
+        val exc = svc.metadataDb.getExcursions().firstOrNull { it.id == slice.excursionId } ?: return
+        val slots = preloadedSlots
+            ?: svc.metadataDb.resolveSlotsForExcursion(exc.id, svc.ringStore)
+                .filter { it.bucketEpochSec in slice.startEpochSec..slice.endEpochSec }
+        if (slots.isEmpty()) {
+            Toast.makeText(this, "No air-quality samples recorded in this segment.", Toast.LENGTH_SHORT).show()
+            return
+        }
         val device = svc.metadataDb.getPrimaryDevice()
             ?: MonitorDevice(1L, "58:2D:34:12:AB:CD", "CGDN1", "Qingping Air Monitor Lite", true)
         val placesMap = svc.metadataDb.getKnownPlaces().associateBy { it.id }
 
-        val csvText = CsvExporter.exportExcursionCsv(
+        val csvText = CsvExporter.exportSliceCsv(
             device = device,
             excursion = exc,
-            slices = slices,
+            slice = slice,
             slots = slots,
-            knownPlacesById = placesMap,
-            onlySelectedForExport = true
+            knownPlacesById = placesMap
         )
 
+        val slug = slice.label.lowercase(Locale.US)
+            .replace(Regex("[^a-z0-9]+"), "_")
+            .trim('_')
+            .ifEmpty { "segment" }
+            .take(32)
         val exportDir = File(filesDir, "exports").apply { mkdirs() }
-        val outFile = File(exportDir, "trip_${exc.id}_export.csv")
+        val outFile = File(exportDir, "trip_${exc.id}_seg_${sliceNumber}_${slug}.csv")
         outFile.writeText(csvText)
 
+        val authority = "${applicationContext.packageName}.fileprovider"
+        val contentUri = FileProvider.getUriForFile(this, authority, outFile)
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
             type = "text/csv"
-            putExtra(Intent.EXTRA_SUBJECT, "Air Quality Export: ${exc.title}")
-            putExtra(Intent.EXTRA_TEXT, csvText)
+            putExtra(Intent.EXTRA_SUBJECT, "Air Quality Segment CSV: #${sliceNumber} ${slice.label}")
+            putExtra(Intent.EXTRA_STREAM, contentUri)
+            clipData = ClipData.newRawUri(outFile.name, contentUri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        startActivity(Intent.createChooser(shareIntent, "Share Advocacy CSV (${outFile.name})"))
+        startActivity(Intent.createChooser(shareIntent, "Share Segment CSV (${outFile.name})"))
     }
 
     private fun shareHardwareDiagnosticTrace() {
@@ -2028,16 +2842,10 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("Add Reusable Segment Preset")
             .setView(layout)
-            .setPositiveButton("Add Destination Preset") { _, _ ->
+            .setPositiveButton("Add Preset") { _, _ ->
                 val lbl = labelInput.text.toString().trim()
                 if (lbl.isNotEmpty()) {
-                    svc.metadataDb.addSegmentPreset(lbl, emojiInput.text.toString().trim(), SliceCategory.DESTINATION)
-                }
-            }
-            .setNeutralButton("Add Transit Preset") { _, _ ->
-                val lbl = labelInput.text.toString().trim()
-                if (lbl.isNotEmpty()) {
-                    svc.metadataDb.addSegmentPreset(lbl, emojiInput.text.toString().trim(), SliceCategory.TRANSIT)
+                    svc.metadataDb.addSegmentPreset(lbl, emojiInput.text.toString().trim())
                 }
             }
             .setNegativeButton("Cancel", null)

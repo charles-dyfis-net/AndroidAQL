@@ -91,9 +91,21 @@ class AqlRingBufferStore(
         val co2P95: Int,
         val minutesCo2Above1000: Float,
         val pm25Mean: Float,
+        val pm25P50: Float,
+        val pm25P95: Float,
         val pm25Max: Int,
         val pm10Mean: Float,
+        val pm10P50: Float,
+        val pm10P95: Float,
         val pm10Max: Int,
+        val tempCMean: Float,
+        val tempCP50: Float,
+        val tempCP95: Float,
+        val tempCMax: Float,
+        val humidityMean: Float,
+        val humidityP50: Float,
+        val humidityP95: Float,
+        val humidityMax: Float,
         val totalDistanceMetersEstimate: Float
     )
 
@@ -225,6 +237,11 @@ class AqlRingBufferStore(
         val step = desc.stepSec.toLong()
         val bucketSec = (sample.timestampEpochSec / step) * step
 
+        if (desc.lastBucketSec >= 0L) {
+            val oldestValidBucketSec = desc.lastBucketSec - (desc.slotCount - 1L) * step
+            if (bucketSec < oldestValidBucketSec) return
+        }
+
         // 1. Advance-and-clear skipped slots if time advanced forward
         if (desc.lastBucketSec >= 0L && bucketSec > desc.lastBucketSec) {
             val stepsElapsed = (bucketSec - desc.lastBucketSec) / step
@@ -248,6 +265,9 @@ class AqlRingBufferStore(
         val slotIdx = ((bucketSec / step) % desc.slotCount).toInt()
         val slotOffset = desc.dataOffsetBytes.toLong() + slotIdx.toLong() * SLOT_SIZE_BYTES
         val existing = readSlotAtOffset(slotOffset)
+        if (existing != null && existing.sampleCount > 0 && existing.bucketEpochSec > bucketSec) {
+            return
+        }
 
         val tempX10 = (sample.tempC * 10.0f).roundToInt().coerceIn(-32768, 32767)
         val humX10 = (sample.humidityPct * 10.0f).roundToInt().coerceIn(0, 1000)
@@ -457,6 +477,9 @@ class AqlRingBufferStore(
 
     fun getArchiveDescriptor(index: Int): ArchiveDescriptor = descriptors[index]
 
+    fun getArchiveWindowSec(archiveIndex: Int = 0): Long =
+        descriptors[archiveIndex].let { it.stepSec.toLong() * it.slotCount.toLong() }
+
     private fun readSlotAtOffset(offset: Long): RingSlotRecord? {
         val buf = ByteBuffer.allocate(SLOT_SIZE_BYTES).order(ByteOrder.LITTLE_ENDIAN)
         val n = channel.read(buf, offset)
@@ -573,9 +596,28 @@ class AqlRingBufferStore(
             return out
         }
 
+        private data class FloatPercentiles(val p50: Float, val p95: Float, val maxVal: Float)
+
+        private fun computeFloatPercentiles(values: FloatArray): FloatPercentiles {
+            if (values.isEmpty()) return FloatPercentiles(0f, 0f, 0f)
+            values.sort()
+            val p50 = values[values.size / 2]
+            val p95Idx = ((values.size - 1) * 0.95).toInt().coerceIn(0, values.size - 1)
+            return FloatPercentiles(p50 = p50, p95 = values[p95Idx], maxVal = values.last())
+        }
+
         fun computeSliceStats(slots: List<RingSlotRecord>, stepSec: Int = 15): SliceStatistics {
             if (slots.isEmpty()) {
-                return SliceStatistics(0, 0, 0L, 0, 0, 0f, 0, 0, 0f, 0f, 0, 0f, 0, 0f)
+                return SliceStatistics(
+                    slotCount = 0, totalSamples = 0, durationSec = 0L,
+                    co2Min = 0, co2Max = 0, co2Mean = 0f, co2Median = 0, co2P95 = 0,
+                    minutesCo2Above1000 = 0f,
+                    pm25Mean = 0f, pm25P50 = 0f, pm25P95 = 0f, pm25Max = 0,
+                    pm10Mean = 0f, pm10P50 = 0f, pm10P95 = 0f, pm10Max = 0,
+                    tempCMean = 0f, tempCP50 = 0f, tempCP95 = 0f, tempCMax = 0f,
+                    humidityMean = 0f, humidityP50 = 0f, humidityP95 = 0f, humidityMax = 0f,
+                    totalDistanceMetersEstimate = 0f
+                )
             }
             var co2Min = Int.MAX_VALUE
             var co2Max = 0
@@ -584,22 +626,40 @@ class AqlRingBufferStore(
             var pm25Max = 0
             var pm10SumX10 = 0L
             var pm10Max = 0
+            var tempCSum = 0f
+            var humiditySum = 0f
             var totalSamples = 0
             var slotsAbove1000 = 0
             var distanceMeters = 0f
 
-            val co2Means = IntArray(slots.size)
+            val co2Values = FloatArray(slots.size)
+            val pm25Values = FloatArray(slots.size)
+            val pm10Values = FloatArray(slots.size)
+            val tempCValues = FloatArray(slots.size)
+            val humidityValues = FloatArray(slots.size)
+
             for ((i, s) in slots.withIndex()) {
                 co2Min = min(co2Min, s.co2PpmMin)
                 co2Max = max(co2Max, s.co2PpmMax)
                 co2Sum += s.co2PpmMean
-                co2Means[i] = s.co2PpmMean
+                co2Values[i] = s.co2PpmMean.toFloat()
                 if (s.co2PpmMean >= 1000) slotsAbove1000++
 
                 pm25SumX10 += s.pm25MeanX10
                 pm25Max = max(pm25Max, s.pm25Max)
+                pm25Values[i] = s.pm25Mean
+
                 pm10SumX10 += s.pm10MeanX10
                 pm10Max = max(pm10Max, s.pm10Max)
+                pm10Values[i] = s.pm10Mean
+
+                val tempC = s.tempCMean
+                val hum = s.humidityPctMean
+                tempCSum += tempC
+                humiditySum += hum
+                tempCValues[i] = tempC
+                humidityValues[i] = hum
+
                 totalSamples += s.sampleCount
 
                 val spd = s.speedMps
@@ -609,10 +669,12 @@ class AqlRingBufferStore(
                     distanceMeters += spd * stepSec
                 }
             }
-            co2Means.sort()
-            val median = co2Means[co2Means.size / 2]
-            val p95Idx = ((co2Means.size - 1) * 0.95).toInt().coerceIn(0, co2Means.size - 1)
-            val p95 = co2Means[p95Idx]
+
+            val co2Pct = computeFloatPercentiles(co2Values)
+            val pm25Pct = computeFloatPercentiles(pm25Values)
+            val pm10Pct = computeFloatPercentiles(pm10Values)
+            val tempPct = computeFloatPercentiles(tempCValues)
+            val humidityPct = computeFloatPercentiles(humidityValues)
             val durationSec = max(stepSec.toLong(), slots.last().bucketEpochSec - slots.first().bucketEpochSec + stepSec)
 
             return SliceStatistics(
@@ -622,13 +684,25 @@ class AqlRingBufferStore(
                 co2Min = if (co2Min == Int.MAX_VALUE) 0 else co2Min,
                 co2Max = co2Max,
                 co2Mean = co2Sum.toFloat() / slots.size,
-                co2Median = median,
-                co2P95 = p95,
+                co2Median = co2Pct.p50.roundToInt(),
+                co2P95 = co2Pct.p95.roundToInt(),
                 minutesCo2Above1000 = (slotsAbove1000 * stepSec) / 60.0f,
                 pm25Mean = (pm25SumX10.toFloat() / slots.size) / 10.0f,
+                pm25P50 = pm25Pct.p50,
+                pm25P95 = pm25Pct.p95,
                 pm25Max = pm25Max,
                 pm10Mean = (pm10SumX10.toFloat() / slots.size) / 10.0f,
+                pm10P50 = pm10Pct.p50,
+                pm10P95 = pm10Pct.p95,
                 pm10Max = pm10Max,
+                tempCMean = tempCSum / slots.size,
+                tempCP50 = tempPct.p50,
+                tempCP95 = tempPct.p95,
+                tempCMax = tempPct.maxVal,
+                humidityMean = humiditySum / slots.size,
+                humidityP50 = humidityPct.p50,
+                humidityP95 = humidityPct.p95,
+                humidityMax = humidityPct.maxVal,
                 totalDistanceMetersEstimate = distanceMeters
             )
         }

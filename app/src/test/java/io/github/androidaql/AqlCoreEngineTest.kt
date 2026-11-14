@@ -9,9 +9,9 @@ import io.github.androidaql.export.CsvExporter
 import io.github.androidaql.storage.AqlRingBufferStore
 import io.github.androidaql.storage.BleCollectionMode
 import io.github.androidaql.storage.ExcursionRecord
+import io.github.androidaql.storage.MetadataDatabase
 import io.github.androidaql.storage.MonitorDevice
 import io.github.androidaql.storage.SessionSliceRecord
-import io.github.androidaql.storage.SliceCategory
 import io.github.androidaql.ui.DualPaneSlicerView
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -441,8 +441,8 @@ class AqlCoreEngineTest {
         val device = MonitorDevice(1L, "58:2D:34:12:AB:CD", "CGDN1", "Travel Monitor", true)
         val excursion = ExcursionRecord(7L, 1L, 1500L, 1530L, true, "Downtown Doctor Visit", "")
         val slices = listOf(
-            SessionSliceRecord(10L, 7L, 1500L, 1500L, false, false, SliceCategory.TRANSIT, "CTA Bus", ""),
-            SessionSliceRecord(11L, 7L, 1515L, 1530L, true, true, SliceCategory.DESTINATION, "Waiting Room, Fl 10", "Busy")
+            SessionSliceRecord(10L, 7L, 1500L, 1500L, false, "CTA Bus", ""),
+            SessionSliceRecord(11L, 7L, 1515L, 1530L, true, "Waiting Room, Fl 10", "Busy")
         )
         val slots = listOf(
             AqlRingBufferStore.RingSlotRecord(1500L, 2, 0, 950, 920, 980, 80, 10, 120, 15, 215, 400, 90, -60, 450, 150),
@@ -458,10 +458,34 @@ class AqlCoreEngineTest {
             zoneId = ZoneOffset.UTC
         )
         val lines = csv.trim().lines()
-        // Header + 1 row (since slice 10 had includeInExport = false)
+        // Header (26 columns) + 1 row (since slice 10 had includeInExport = false)
         assertEquals(2, lines.size)
+        assertFalse(lines[0].contains("slice_category"))
+        assertEquals(26, lines[0].split(",").size)
         assertTrue(lines[1].contains("\"Waiting Room, Fl 10\""))
         assertTrue(lines[1].contains(",1480,1450,1510,"))
+
+        // Verify per-segment time-series export filters strictly to the segment's span
+        // and emits sample rows in chronological order regardless of input ordering.
+        val segSlots = listOf(
+            AqlRingBufferStore.RingSlotRecord(1530L, 4, 0, 1520, 1490, 1550, 120, 16, 170, 20, 230, 450, 88, -59, 0, 850),
+            slots[0], // belongs to slice 10 (outside slice 11)
+            slots[1]  // 1515L, earlier within slice 11
+        )
+        val segCsv = CsvExporter.exportSliceCsv(
+            device = device,
+            excursion = excursion,
+            slice = slices[1],
+            slots = segSlots,
+            zoneId = ZoneOffset.UTC
+        )
+        val segLines = segCsv.trim().lines()
+        assertEquals(3, segLines.size)
+        assertEquals(26, segLines[0].split(",").size)
+        assertTrue(segLines[1].contains(",1515,15,3,"))
+        assertTrue(segLines[1].contains("\"Waiting Room, Fl 10\""))
+        assertTrue(segLines[2].contains(",1530,15,4,"))
+        assertTrue(segLines[2].contains(",1520,1490,1550,"))
     }
 
     @Test
@@ -843,5 +867,334 @@ class AqlCoreEngineTest {
         } finally {
             tmpDir.deleteRecursively()
         }
+    }
+
+    @Test
+    fun testComputeSliceStatsUniformPercentilesAcrossAllMetrics() {
+        val tmpDir = Files.createTempDirectory("aql_slice_stats_test").toFile()
+        try {
+            val ringFile = File(tmpDir, "test_stats.aqlring")
+            val store = AqlRingBufferStore(
+                file = ringFile,
+                archiveSpecs = listOf(AqlRingBufferStore.ArchiveSpec(15, 64))
+            )
+            val baseSec = 1_700_000_010L // aligned+offset within bucket 1_700_000_010 / 15 * 15 = 1_700_000_010? Wait: use exact multiple
+            val alignedBase = (baseSec / 15L) * 15L
+            val points = listOf(
+                listOf(500, 5, 10, 19.0f, 35.0f),
+                listOf(700, 10, 16, 20.0f, 40.0f),
+                listOf(900, 15, 22, 21.0f, 45.0f),
+                listOf(1100, 20, 28, 22.0f, 50.0f)
+            )
+            for ((i, p) in points.withIndex()) {
+                store.writeSample(
+                    AqlRingBufferStore.RawSampleInput(
+                        timestampEpochSec = alignedBase + i * 15L,
+                        knownPlaceId = 0,
+                        co2Ppm = p[0] as Int,
+                        pm25Ugm3 = p[1] as Int,
+                        pm10Ugm3 = p[2] as Int,
+                        tempC = p[3] as Float,
+                        humidityPct = p[4] as Float
+                    )
+                )
+            }
+            // Bucket 4 gets two samples so slot mean < intra-slot raw max for CO2/PM2.5/PM10
+            store.writeSample(
+                AqlRingBufferStore.RawSampleInput(
+                    timestampEpochSec = alignedBase + 60L,
+                    knownPlaceId = 0,
+                    co2Ppm = 1150,
+                    pm25Ugm3 = 25,
+                    pm10Ugm3 = 34,
+                    tempC = 24.0f,
+                    humidityPct = 55.0f
+                )
+            )
+            store.writeSample(
+                AqlRingBufferStore.RawSampleInput(
+                    timestampEpochSec = alignedBase + 63L,
+                    knownPlaceId = 0,
+                    co2Ppm = 1450,
+                    pm25Ugm3 = 35,
+                    pm10Ugm3 = 48,
+                    tempC = 26.0f,
+                    humidityPct = 65.0f
+                )
+            )
+
+            val slots = store.queryRange(0, alignedBase, alignedBase + 60L)
+            assertEquals(5, slots.size)
+            val stats = AqlRingBufferStore.computeSliceStats(slots, stepSec = 15)
+
+            assertEquals(900, stats.co2Median)
+            assertEquals(1100, stats.co2P95)
+            assertEquals(1450, stats.co2Max)
+            assertEquals(900.0f, stats.co2Mean, 0.1f)
+
+            assertEquals(15.0f, stats.pm25P50, 0.05f)
+            assertEquals(20.0f, stats.pm25P95, 0.05f)
+            assertEquals(35, stats.pm25Max)
+            assertEquals(16.0f, stats.pm25Mean, 0.1f)
+
+            assertEquals(22.0f, stats.pm10P50, 0.05f)
+            assertEquals(28.0f, stats.pm10P95, 0.05f)
+            assertEquals(48, stats.pm10Max)
+            assertEquals(23.4f, stats.pm10Mean, 0.15f)
+
+            assertEquals(21.0f, stats.tempCP50, 0.05f)
+            assertEquals(22.0f, stats.tempCP95, 0.05f)
+            assertEquals(25.0f, stats.tempCMax, 0.05f)
+            assertEquals(21.4f, stats.tempCMean, 0.1f)
+
+            assertEquals(45.0f, stats.humidityP50, 0.05f)
+            assertEquals(50.0f, stats.humidityP95, 0.05f)
+            assertEquals(60.0f, stats.humidityMax, 0.05f)
+            assertEquals(46.0f, stats.humidityMean, 0.1f)
+
+            store.close()
+        } finally {
+            tmpDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun testRingBufferContinuousWrapAroundAndRejectsExpiredHistoricalWrite() {
+        val tmpDir = Files.createTempDirectory("aql_wrap_test").toFile()
+        try {
+            val ringFile = File(tmpDir, "wrap_test.aqlring")
+            val specs = listOf(
+                AqlRingBufferStore.ArchiveSpec(stepSec = 15, slotCount = 64),
+                AqlRingBufferStore.ArchiveSpec(stepSec = 300, slotCount = 32),
+                AqlRingBufferStore.ArchiveSpec(stepSec = 3600, slotCount = 16)
+            )
+            AqlRingBufferStore(ringFile, deviceId = 1L, archiveSpecs = specs).use { store ->
+                assertEquals(960L, store.getArchiveWindowSec(0))
+
+                // Write 150 consecutive 15s slots (t = 1500 .. 3735, >2 full rotations of Archive 0)
+                for (i in 0 until 150) {
+                    val ts = 1500L + i * 15L
+                    store.writeSample(
+                        AqlRingBufferStore.RawSampleInput(
+                            timestampEpochSec = ts,
+                            knownPlaceId = if (i % 2 == 0) 0 else 1,
+                            co2Ppm = 500 + i * 5,
+                            pm25Ugm3 = 5 + (i % 10),
+                            pm10Ugm3 = 10 + (i % 10),
+                            tempC = 20.0f,
+                            humidityPct = 40.0f
+                        )
+                    )
+                }
+
+                // Archive 0 retains the exact 64 most recent slots: i = 86..149 -> 2790..3735
+                val arch0 = store.queryRange(0, 1500L, 3735L)
+                assertEquals(64, arch0.size)
+                assertEquals(2790L, arch0.first().bucketEpochSec)
+                assertEquals(3735L, arch0.last().bucketEpochSec)
+                for (k in 0 until 64) {
+                    val expectedTs = 2790L + k * 15L
+                    assertEquals(expectedTs, arch0[k].bucketEpochSec)
+                    assertEquals(500 + (86 + k) * 5, arch0[k].co2PpmMean)
+                }
+
+                // Archive 1 (300s) covers 1500 .. 3600 (8 buckets)
+                val arch1 = store.queryRange(1, 1500L, 3735L)
+                assertEquals(listOf(1500L, 1800L, 2100L, 2400L, 2700L, 3000L, 3300L, 3600L), arch1.map { it.bucketEpochSec })
+
+                // Historical write at ts = 1500 maps to the same modulo-64 index as ts = 3420 (i = 128, co2 = 1140)
+                store.writeSample(
+                    AqlRingBufferStore.RawSampleInput(
+                        timestampEpochSec = 1500L,
+                        knownPlaceId = 1,
+                        co2Ppm = 9999,
+                        pm25Ugm3 = 99,
+                        pm10Ugm3 = 99,
+                        tempC = 10.0f,
+                        humidityPct = 10.0f
+                    )
+                )
+                val slot3420 = store.queryRange(0, 3420L, 3420L)
+                assertEquals("Expired write must NOT clobber newer slot at same modulo index", 1, slot3420.size)
+                assertEquals(3420L, slot3420[0].bucketEpochSec)
+                assertEquals(1140, slot3420[0].co2PpmMean)
+            }
+        } finally {
+            tmpDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun testTripSelectionAdvancesToNewAutoTripWithoutBreakingManualPickOrEditMode() {
+        val exc1 = ExcursionRecord(1L, 1L, 1000L, 1500L, false, "Trip 1", "")
+        val exc2 = ExcursionRecord(2L, 1L, 2000L, null, false, "Trip 2", "")
+
+        // Initial load with only exc1
+        val (selInit, newestInit) = MetadataDatabase.resolveSelectedExcursionId(
+            excursions = listOf(exc1),
+            currentSelectedId = null,
+            lastSeenLatestId = null,
+            isTripEditMode = false
+        )
+        assertEquals(1L, selInit)
+        assertEquals(1L, newestInit)
+
+        // New trip exc2 arrives in background while not in edit mode -> advances selection to exc2
+        val (selAuto, newestAuto) = MetadataDatabase.resolveSelectedExcursionId(
+            excursions = listOf(exc2, exc1),
+            currentSelectedId = selInit,
+            lastSeenLatestId = newestInit,
+            isTripEditMode = false
+        )
+        assertEquals(2L, selAuto)
+        assertEquals(2L, newestAuto)
+
+        // User manually picks exc1 while newest is already exc2 -> stays on exc1 (no fight!)
+        val (selManual, newestManual) = MetadataDatabase.resolveSelectedExcursionId(
+            excursions = listOf(exc2, exc1),
+            currentSelectedId = 1L,
+            lastSeenLatestId = 2L,
+            isTripEditMode = false
+        )
+        assertEquals(1L, selManual)
+        assertEquals(2L, newestManual)
+
+        // While actively editing exc1, a new trip exc2 arrives -> stays on exc1 until user finishes editing
+        val (selEditing, newestEditing) = MetadataDatabase.resolveSelectedExcursionId(
+            excursions = listOf(exc2, exc1),
+            currentSelectedId = 1L,
+            lastSeenLatestId = 1L,
+            isTripEditMode = true
+        )
+        assertEquals(1L, selEditing)
+        assertEquals(2L, newestEditing)
+    }
+
+    @Test
+    fun testAutoExcursionDisabledUntilAtLeastOneKnownPlaceConfigured() {
+        val sm = ExcursionStateMachine(gpsPauseTimeoutSec = 90L, excursionCloseTimeoutSec = 2700L)
+
+        // 1. Before any Saved Wi-Fi Place exists, live BLE advertisements must NOT auto-start
+        //    a trip or enable GPS, while keeping offline 0x88 setup / periodic keep-alive ready.
+        val t1 = sm.onBleAdvertisement(
+            timestampEpochSec = 1000L,
+            connectedKnownPlaceId = 0,
+            hasConfiguredKnownPlaces = false
+        )
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, t1.currentState)
+        assertFalse(t1.startedNewExcursion)
+        assertFalse(t1.shouldRunGps)
+        assertEquals(0, t1.activeKnownPlaceId)
+        assertEquals(BleCollectionMode.PERIODIC_GATT_KEEPALIVE, t1.effectiveBleMode)
+
+        // 2. User saves their Home Wi-Fi while still connected -> stays stationary with knownPlaceId = 1.
+        val t2 = sm.onWifiContextChanged(
+            timestampEpochSec = 1015L,
+            connectedKnownPlaceId = 1,
+            hasConfiguredKnownPlaces = true
+        )
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, t2.currentState)
+        assertFalse(t2.startedNewExcursion)
+        assertFalse(t2.shouldRunGps)
+        assertEquals(1, t2.activeKnownPlaceId)
+
+        // 3. Leaving Home Wi-Fi while BLE is fresh now auto-starts a Field Excursion with GPS.
+        val t3 = sm.onWifiContextChanged(
+            timestampEpochSec = 1030L,
+            connectedKnownPlaceId = 0,
+            hasConfiguredKnownPlaces = true
+        )
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, t3.currentState)
+        assertTrue(t3.startedNewExcursion)
+        assertTrue(t3.shouldRunGps)
+        assertEquals(0, t3.activeKnownPlaceId)
+    }
+
+    @Test
+    fun testManualTripStartAndEndOverride() {
+        // Case 1 & 2: No Saved Places configured + fresh BLE -> manual start opens trip with GPS,
+        // and manual end closes it without auto-restarting on subsequent BLE packets.
+        val sm = ExcursionStateMachine(gpsPauseTimeoutSec = 90L, excursionCloseTimeoutSec = 2700L)
+        val tIdle = sm.onBleAdvertisement(
+            timestampEpochSec = 1000L,
+            connectedKnownPlaceId = 0,
+            hasConfiguredKnownPlaces = false
+        )
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tIdle.currentState)
+        assertFalse(tIdle.startedNewExcursion)
+
+        val tStart = sm.onManualTripStart(timestampEpochSec = 1005L)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, tStart.currentState)
+        assertTrue(tStart.startedNewExcursion)
+        assertTrue(tStart.shouldRunGps)
+        assertEquals(0, tStart.activeKnownPlaceId)
+
+        val tBleDuringManual = sm.onBleAdvertisement(
+            timestampEpochSec = 1020L,
+            connectedKnownPlaceId = 0,
+            hasConfiguredKnownPlaces = false
+        )
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, tBleDuringManual.currentState)
+        assertFalse(tBleDuringManual.startedNewExcursion)
+        assertTrue(tBleDuringManual.shouldRunGps)
+
+        val tEnd = sm.onManualTripEnd(timestampEpochSec = 1100L)
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tEnd.currentState)
+        assertTrue(tEnd.closedExcursion)
+        assertFalse(tEnd.shouldRunGps)
+
+        val tAfterEnd = sm.onBleAdvertisement(
+            timestampEpochSec = 1105L,
+            connectedKnownPlaceId = 0,
+            hasConfiguredKnownPlaces = false
+        )
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tAfterEnd.currentState)
+        assertFalse(tAfterEnd.startedNewExcursion)
+        assertFalse(tAfterEnd.shouldRunGps)
+
+        // Case 3: Manual trip started BEFORE any BLE packet arrives enters SIGNAL_PAUSED (GPS off),
+        // upgrades to ACTIVE as soon as first BLE packet arrives, and can also be manually ended from SIGNAL_PAUSED.
+        val smPreBle = ExcursionStateMachine(gpsPauseTimeoutSec = 90L, excursionCloseTimeoutSec = 2700L)
+        val p0 = smPreBle.onWifiContextChanged(1000L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = false)
+        assertEquals(ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE, p0.currentState)
+
+        val pStart = smPreBle.onManualTripStart(1005L)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED, pStart.currentState)
+        assertTrue(pStart.startedNewExcursion)
+        assertFalse(pStart.shouldRunGps)
+
+        val pFirstBle = smPreBle.onBleAdvertisement(1020L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = false)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, pFirstBle.currentState)
+        assertFalse(pFirstBle.startedNewExcursion)
+        assertTrue(pFirstBle.shouldRunGps)
+
+        val smPauseEnd = ExcursionStateMachine(gpsPauseTimeoutSec = 90L, excursionCloseTimeoutSec = 2700L)
+        smPauseEnd.onWifiContextChanged(1000L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        val peStart = smPauseEnd.onManualTripStart(1005L)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED, peStart.currentState)
+        val peEnd = smPauseEnd.onManualTripEnd(1010L)
+        assertTrue(peEnd.closedExcursion)
+        assertEquals(ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE, peEnd.currentState)
+
+        // Case 4: Starting manually while still connected to Saved Place #1 starts immediately,
+        // stays active after leaving #1, and auto-closes upon returning to #1.
+        val smAtHome = ExcursionStateMachine(gpsPauseTimeoutSec = 90L, excursionCloseTimeoutSec = 2700L)
+        smAtHome.onBleAdvertisement(1000L, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
+        val hStart = smAtHome.onManualTripStart(1005L)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, hStart.currentState)
+        assertTrue(hStart.startedNewExcursion)
+        assertTrue(hStart.shouldRunGps)
+        assertEquals(0, hStart.activeKnownPlaceId)
+
+        val hLeave = smAtHome.onWifiContextChanged(1030L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, hLeave.currentState)
+        assertFalse(hLeave.closedExcursion)
+
+        smAtHome.onBleAdvertisement(1150L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        val hReturn = smAtHome.onWifiContextChanged(1200L, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, hReturn.currentState)
+        assertTrue(hReturn.closedExcursion)
+        assertFalse(hReturn.shouldRunGps)
+        assertEquals(1, hReturn.activeKnownPlaceId)
     }
 }

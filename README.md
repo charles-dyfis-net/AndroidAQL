@@ -4,7 +4,7 @@
 
 | Live **Now** Dashboard (`BTHome v2` Passive BLE) | **Trips** — 3-Pane Synchronized Telemetry Timeline |
 | :---: | :---: |
-| [<img src="docs/screenshots/now_dashboard.webp" width="260" alt="Live Now Dashboard captured on Pixel 6a">](docs/screenshots/now_dashboard.webp) | [<img src="docs/screenshots/real_trip_overview.webp" width="260" alt="Trips 3-Pane Slicer with real 3h 30m telemetry captured on Pixel 6a">](docs/screenshots/real_trip_overview.webp) |
+| [<img src="docs/screenshots/now_dashboard.webp" width="260" alt="Live Now Dashboard captured on Pixel 6a">](docs/screenshots/now_dashboard.webp) | [<img src="docs/screenshots/real_trip_overview.webp" width="260" alt="Trips 3-Pane Slicer with real 30m multi-segment telemetry captured on Pixel 6a">](docs/screenshots/real_trip_overview.webp) |
 
 ---
 
@@ -16,17 +16,17 @@ The **Qingping Air Monitor Lite (`CGDN1`)** packs research-grade environmental s
   In its intended desktop setup, the `CGDN1` sits plugged into wall power on a 2.4 GHz Wi-Fi network and pushes telemetry to Qingping Cloud, Xiaomi Home, or a local **MQTT** broker. Consequently, almost all third-party clients and integrations (Home Assistant MQTT bridges, stationary BLE-to-MQTT hubs like ESPHome/OpenMQTTGateway, and web dashboards) assume the monitor lives on a shelf in one room with permanent Wi-Fi and mains power.
 * **Why Stock Firmware Fails in Mobile Use:**
   As soon as you unplug the `CGDN1` and carry it out the door (into an elevator, onto a bus or train, or into an office, clinic, or restaurant), your home Wi-Fi and MQTT server are out of reach. Worse, out of the box (before initial setup), the monitor's Bluetooth is off—and if you hold the top touch-bar for ~7 seconds to wake Bluetooth, it enters **Wi-Fi setup mode** (replacing the normal CO₂ readout with a static Wi-Fi setup icon) and shuts Bluetooth back down after **1 to 30 minutes**. Normally, getting the monitor out of setup mode so it broadcasts continuously requires the proprietary Qingping+ or Xiaomi app, a user account, and a live 2.4 GHz Wi-Fi network.
-* **How `AndroidAQL` Approaches Portable Field Collection:**
+* **How `AndroidAQL` Approaches Portable Field Recording:**
   1. **Direct Phone-to-Monitor Bluetooth Recording (Zero Wi-Fi or Cloud Needed):** `AndroidAQL` receives live readings directly from your `CGDN1` over Bluetooth Low Energy on your Android phone—anywhere you carry it, with no internet connection, cloud account, or MQTT broker required.
   2. **Automatic 5-Second Offline Setup (Continuous Bluetooth • Normal Anti-Burn-In Screen):** If you hold the touch-bar for ~7 seconds on an unconfigured monitor, `AndroidAQL` completes setup offline over Bluetooth in ~5 seconds, restores the normal pixel-shifting CO₂ display, and unlocks continuous passive Bluetooth broadcasts—with no Wi-Fi network or vendor app required. Already-configured monitors stay untouched and passive.
-  3. **Privacy-by-Default Location & Movement Correlation:** When you are at a configured **Saved Wi-Fi Place** (e.g., Home) or when the monitor is turned off or out of range for 90 seconds, `AndroidAQL` turns GPS polling off (`0 mW`). When you leave a Saved Wi-Fi Place with your monitor active, `AndroidAQL` opens a **Field Excursion** and records movement speed and GPS accuracy alongside your air quality readings.
-  4. **Retrospective Trip Slicer & Self-Contained CSV Export:** Instead of making you fiddle with start/stop buttons while walking or riding transit, `AndroidAQL` records continuously into a constant-size (`3.79 MB`) on-device ring buffer. After your outing, you can scrub a synchronized **3-Pane Graph Stack**, split the trip into named segments, pin those slices so they are never overwritten, and export self-contained RFC 4180 CSV reports for analysis or indoor-air-quality advocacy.
+  3. **Privacy-by-Default Location & Movement Correlation:** Out of the box (`📡 Monitoring • GPS Off`), `AndroidAQL` keeps GPS and step sensing disabled until you either save a **Saved Wi-Fi Place** (e.g., Home) or explicitly tap **`🚶 Start Trip Manually`**—and whenever you are at a Saved Wi-Fi Place or the monitor is turned off or out of range for 90 seconds, GPS polling turns right back off (`0 mW`). Auto-recorded **Field Excursions** activate once at least one Saved Wi-Fi Place is configured, recording local movement speed and GPS accuracy on-device alongside your air quality readings whenever you leave a saved place (or start a trip manually) with your monitor active—and any recorded trips automatically expire and are deleted after **14 days** unless you actively choose to keep (pin) them.
+  4. **Retrospective Trip Slicer & Self-Contained CSV Export:** Instead of making you fiddle with start/stop buttons while walking or riding transit, `AndroidAQL` records continuously into a constant-size (`3.79 MB`) on-device ring buffer (14 days at 15-second resolution). After your outing, you can scrub a synchronized **3-Pane Graph Stack**, split the trip into named segments, trim start/end dead time, pin trips you want to keep forever so they are never overwritten, and export self-contained RFC 4180 CSV reports for analysis or indoor-air-quality advocacy.
 
 | Capability | Stock Qingping / MQTT Clients | `AndroidAQL` |
 | :--- | :--- | :--- |
 | **Primary Transport** | 2.4 GHz Wi-Fi + Cloud / Local MQTT broker | Direct Bluetooth Low Energy to Android phone |
 | **Target Use Case** | Stationary room monitor on fixed Wi-Fi | Mobile excursions (transit, offices, clinics, elevators) + stationary monitoring |
-| **Works Outside Home Wi-Fi?** | ❌ Loses connectivity as soon as you leave your AP | ✅ Collects over Bluetooth anywhere with your phone |
+| **Works Outside Home Wi-Fi?** | ❌ Loses connectivity as soon as you leave your AP | ✅ Records over Bluetooth anywhere with your phone |
 | **Unconfigured Setup & Sleep Limits** | ❌ Bluetooth stays off or sleeps after 1–30m until set up via Qingping+ & Wi-Fi | ✅ **Automatic 5-second offline setup** + continuous passive recording (anti-burn-in OLED restored) |
 | **Retrospective Trip Slicing** | ❌ Continuous unsegmented stream | ✅ Interactive 3-pane timeline slicer with named segments & notes |
 | **Cloud / Account Dependency** | Typically requires Qingping/Xiaomi app or local server | **None** — 100% local on-device storage and direct CSV export |
@@ -59,7 +59,7 @@ The **Qingping Air Monitor Lite (`CGDN1`)** packs research-grade environmental s
 * **Pane 1 — Air Quality:** CO₂ (`ppm`) & PM2.5 (`µg/m³`) with non-overlapping scrubber callout pills and leader lines.
 * **Pane 2 — Thermal Comfort:** Temperature & Relative Humidity (`%`).
 * **Pane 3 — Mobility & Context:** Movement speed (`m/s`, cumulative-anchor filtered to suppress stationary indoor GPS jitter), amber shading for weak/urban-canyon GPS (`> 50 m`), and green bands for `🏠 GPS Off (Saved Place)`.
-* **View vs. Edit Modes & Zero-Scroll Landscape:** Clean read-only scrubbing by default with a color-coded **Segment Strip** (`#1`, `#2`, ...) directly below Pane 3; toggle **Edit Mode** to drag shared `⇔ 1|2` divider boundaries, nudge dividers or the cursor by `-1m / -15s / +15s / +1m`, split segments at the cursor, and label each leg (Category, Location/Activity Label, Notes). Rotate to **Landscape** to see all three panes simultaneously with zero vertical scrolling. See **[How Trips, Segments, and Splits Work](docs/trip_slicing_guide.md)**.
+* **View vs. Edit Modes & Zero-Scroll Landscape:** Clean read-only scrubbing by default with a color-coded **Segment Strip** (`#1`, `#2`, ...) directly below Pane 3; toggle **Edit Mode** to drag shared `⇔ 1|2` divider boundaries, nudge dividers or the cursor by `-1m / -15s / +15s / +1m`, split segments at the cursor, trim the trip start or end (`🗑️ Drop #1` / `🗑️ Drop #N`), and label each leg (Location/Activity Label, Notes). Rotate to **Landscape** to see all three panes simultaneously with zero vertical scrolling. See **[How Trips, Segments, and Splits Work](docs/trip_slicing_guide.md)**.
 
 ### 3. **BLE & Hardware** Diagnostic Testbench & Provisioning CLI
 * **Gated behind `🛠️ Developer Mode` (off by default):** Toggle **`⚙️ Settings → Diagnostics & Support → 🛠️ Developer Mode`** to reveal the **`3. HW Test`** tab (live BLE/GATT inspector and experiment controls) along with UI options that inject demo data or simulate Saved Wi-Fi Places.
@@ -86,14 +86,20 @@ The **Qingping Air Monitor Lite (`CGDN1`)** packs research-grade environmental s
 * **[Reference ESPHome Fork (`charles-dyfis-net/esphome-qingping-cgdn1`, `dev` branch)](https://github.com/charles-dyfis-net/esphome-qingping-cgdn1/tree/dev)** — Hardware-tested fork of [`nemethhh/esphome-qingping-cgdn1`](https://github.com/nemethhh/esphome-qingping-cgdn1); compile with `-s portable true -s bthome true` for a configuration tuned for portable `AndroidAQL` use with passive BTHome v2 (`0xFCD2`) BLE broadcasts.
 * **[Requirements & Architecture Specification](docs/requirements_spec.md)** — State machine, decoupled BLE timeouts, 3-mode BLE/GATT privacy strategy, data model, 3-pane graph stack, View/Edit & Portrait/Landscape ergonomics, and hardware bring-up logger.
 * **[Physical Hardware Observations (`CGDN1`)](docs/hardware_observations.md)** — Empirical and firmware-verified wire-protocol reference for `CGDN1` (`Firmware 4.8.5`, Product ID `0x24`), including ESP32-WROVER-B internals, dual-MAC radio behavior (`:BA` vs. `:BC`), the `7.2 s` touch-slider reset, Bluetooth timers, SHT4x self-heating, and the full GATT characteristic/command map.
-* **[Binary Ring-Buffer Format (`.aqlring`)](docs/binary_storage_format.md)** — Byte-level specification of the constant-size (`3.79 MB`) multi-archive circular time-series store (`AQLRING1`) and pinned slice blobs (`AQLP`).
-* **[CSV Export Schema](docs/csv_export_schema.md)** — Self-contained 27-column RFC 4180 CSV export contract designed to feed external PDF/advocacy report generators.
+* **[Binary Ring-Buffer Format (`.aqlring`)](docs/binary_storage_format.md)** — Byte-level specification of the constant-size (`3.79 MB`) multi-archive circular time-series store (`AQLRING1`) and pinned trip blobs (`AQLP`).
+* **[CSV Export Schema](docs/csv_export_schema.md)** — Self-contained RFC 4180 CSV export contract designed to feed external PDF/advocacy report generators.
 * **[Privacy Policy](docs/PRIVACY_POLICY.md)** — Local-only privacy disclosure for Google Play (`net.dyfis.androidaql`).
 
 ---
 
-## Building & Running Tests
+## Building, Testing & Screenshots
 
 ```bash
 ./gradlew test assembleDebug
+```
+
+Debug-only screenshot capture automation (requires `adb`, `ffmpeg`, and a connected Android device or emulator; safely backs up and restores live app data afterward):
+
+```bash
+./scripts/update-screenshots
 ```

@@ -4,10 +4,10 @@
 **Developer:** Charles Duffy (`charles-dyfis-net` / `dyfis.net`)
 
 ## 1. Overview — 100% Local On-Device Operation
-**AndroidAQL** is an open-source, local-first Android application for collecting, visualizing, slicing, and exporting environmental air quality telemetry (CO₂, PM2.5, PM10, temperature, and relative humidity) from a user-owned **Qingping Air Monitor Lite (`CGDN1`)** over Bluetooth Low Energy (BLE).
+**AndroidAQL** is an open-source, local-first Android application for recording, visualizing, slicing, and exporting environmental air quality telemetry (CO₂, PM2.5, PM10, temperature, and relative humidity) from a user-owned **Qingping Air Monitor Lite (`CGDN1`)** over Bluetooth Low Energy (BLE) strictly on-device.
 
-- **No Cloud Backend:** AndroidAQL does not connect to any cloud server, Qingping Cloud, Xiaomi Home, or remote API.
-- **No Analytics, Telemetry, or Ads:** AndroidAQL contains zero analytics SDKs, crash-reporting trackers, advertising identifiers, or third-party data collectors.
+- **No Cloud Backend & No Data "Collected" Off-Device:** Under Google Play's Data Safety definition, no user data is "collected" or shared off-device—all sensor, Wi-Fi, location, and step processing and storage occur strictly locally on your phone, and AndroidAQL does not connect to any cloud server, Qingping Cloud, Xiaomi Home, or remote API.
+- **No Analytics, Telemetry, or Ads:** AndroidAQL contains zero analytics SDKs, crash-reporting trackers, advertising identifiers, or third-party data trackers.
 - **No Automatic Data Transmission:** No data leaves your device unless you explicitly initiate a file export (CSV or diagnostic JSONL) via the Android system share sheet.
 
 ---
@@ -19,9 +19,9 @@
 - **Storage:** Environmental readings (CO₂, PM2.5, PM10, temperature, humidity, battery percentage, and BLE RSSI) are stored locally in a fixed-size, 14-day circular ring buffer (`device_1.aqlring`) inside the app's private internal storage directory. When optional **`🛠️ Developer Mode`** is explicitly enabled in **Settings** (off by default), AndroidAQL also writes nearby BLE advertisement metadata (`BLE_ADV_NON_FDCD` MAC addresses, device names, RSSI, service UUIDs, and raw payloads) and raw monitor frames to the local `hw_bringup_trace.jsonl` diagnostic log for hardware debugging.
 
 ### B. Location & Connected Wi-Fi (`ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION`, `ACCESS_BACKGROUND_LOCATION`, `FOREGROUND_SERVICE_LOCATION`, `ACCESS_WIFI_STATE`)
-- **Prominent Disclosure:** AndroidAQL accesses location and connected Wi-Fi information in the foreground and background (while the foreground collector service is active) for two strictly local purposes:
-  1. **Saved Wi-Fi Place Detection (Automatic GPS Off):** Android requires Location permission to read the connected Wi-Fi network SSID/BSSID. When your phone is connected to a user-configured "Saved Place" Wi-Fi network (such as *Home*), AndroidAQL automatically disables GPS collection to save battery and protect indoor privacy.
-  2. **Field Excursion Movement Speed:** When your Qingping air quality monitor is actively broadcasting outside of a Saved Wi-Fi Place, AndroidAQL calculates instantaneous movement speed (meters per second / mph) and horizontal GPS accuracy (meters) alongside your air quality readings so you can distinguish transit segments from stationary indoor destinations on the Trip Slicer chart.
+- **Prominent Disclosure:** AndroidAQL accesses location and connected Wi-Fi information in the foreground and background (while the foreground service is active) for two strictly local on-device purposes:
+  1. **Explicit User Activation & Saved Wi-Fi Place Detection (Automatic GPS Off):** Android requires Location permission to read the connected Wi-Fi network SSID/BSSID. Out of the box, GPS and step sensing remain disabled until you either configure a Saved Wi-Fi Place or explicitly tap **`🚶 Start Trip Manually`**—and whenever your phone is connected to a user-configured "Saved Place" Wi-Fi network (such as *Home*), AndroidAQL automatically disables GPS and step polling to save battery and protect indoor privacy.
+  2. **Field Excursion Movement Speed:** When you explicitly tap **`🚶 Start Trip Manually`** or your Qingping air quality monitor is actively broadcasting outside of a configured Saved Wi-Fi Place, AndroidAQL calculates instantaneous movement speed (meters per second / mph) and horizontal GPS accuracy (meters) locally on-device alongside your air quality readings so you can distinguish transit segments from stationary indoor destinations on the Trip Slicer chart.
 - **No Raw Coordinates Persisted:** By default, AndroidAQL converts GPS updates into scalar movement speed (m/s) and horizontal accuracy (m) in memory and **does not store raw latitude or longitude coordinates to disk**.
 
 ### C. Physical Activity (`ACTIVITY_RECOGNITION`)

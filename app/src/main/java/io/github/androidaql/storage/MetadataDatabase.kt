@@ -5,13 +5,6 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
-enum class SliceCategory {
-    TRANSIT,
-    DESTINATION,
-    OUTDOOR_WALK,
-    OTHER
-}
-
 enum class BleCollectionMode(val displayName: String, val description: String) {
     PERIODIC_GATT_KEEPALIVE(
         "Automatic Offline Setup & Keep-Awake (Default)",
@@ -48,7 +41,6 @@ data class SegmentPreset(
     val id: Long,
     val label: String,
     val iconEmoji: String,
-    val defaultCategory: SliceCategory,
     val sortOrder: Int
 )
 
@@ -67,9 +59,7 @@ data class SessionSliceRecord(
     val excursionId: Long,
     val startEpochSec: Long,
     val endEpochSec: Long,
-    val isPinned: Boolean,
     val includeInExport: Boolean,
-    val category: SliceCategory,
     val label: String,
     val notes: String
 )
@@ -79,8 +69,8 @@ data class SessionSliceRecord(
  * metadata: devices, multi-network Saved Places, customizable Segment Presets, Excursions,
  * shared-divider Session Slices, and Pinned Slice binary blobs.
  */
-class MetadataDatabase(context: Context) :
-    SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
+class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
+    SQLiteOpenHelper(context, dbName, null, DB_VERSION) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -122,7 +112,6 @@ class MetadataDatabase(context: Context) :
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 label TEXT NOT NULL,
                 icon_emoji TEXT NOT NULL,
-                default_category TEXT NOT NULL,
                 sort_order INTEGER NOT NULL
             )
             """.trimIndent()
@@ -149,9 +138,7 @@ class MetadataDatabase(context: Context) :
                 excursion_id INTEGER NOT NULL,
                 start_epoch_sec INTEGER NOT NULL,
                 end_epoch_sec INTEGER NOT NULL,
-                is_pinned INTEGER NOT NULL DEFAULT 0,
                 include_in_export INTEGER NOT NULL DEFAULT 1,
-                category TEXT NOT NULL,
                 label TEXT NOT NULL,
                 notes TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY(excursion_id) REFERENCES excursion(id) ON DELETE CASCADE
@@ -181,19 +168,18 @@ class MetadataDatabase(context: Context) :
 
     private fun seedDefaultSegmentPresets(db: SQLiteDatabase) {
         val defaults = listOf(
-            Triple("Bus", "🚌", SliceCategory.TRANSIT),
-            Triple("Train / L", "🚇", SliceCategory.TRANSIT),
-            Triple("Cab / Car", "🚕", SliceCategory.TRANSIT),
-            Triple("Waiting Room", "🏥", SliceCategory.DESTINATION),
-            Triple("Exam Room", "🩺", SliceCategory.DESTINATION),
-            Triple("Indoor Visit", "🏢", SliceCategory.DESTINATION),
-            Triple("Outdoor Walk", "🚶", SliceCategory.OUTDOOR_WALK)
+            "Bus" to "🚌",
+            "Train / L" to "🚇",
+            "Cab / Car" to "🚕",
+            "Waiting Room" to "🏥",
+            "Exam Room" to "🩺",
+            "Indoor Visit" to "🏢",
+            "Outdoor Walk" to "🚶"
         )
         for ((idx, item) in defaults.withIndex()) {
             val cv = ContentValues().apply {
                 put("label", item.first)
                 put("icon_emoji", item.second)
-                put("default_category", item.third.name)
                 put("sort_order", idx)
             }
             db.insert("segment_preset", null, cv)
@@ -319,28 +305,26 @@ class MetadataDatabase(context: Context) :
     fun getSegmentPresets(): List<SegmentPreset> {
         val out = mutableListOf<SegmentPreset>()
         readableDatabase.rawQuery(
-            "SELECT id, label, icon_emoji, default_category, sort_order FROM segment_preset ORDER BY sort_order ASC, id ASC",
+            "SELECT id, label, icon_emoji, sort_order FROM segment_preset ORDER BY sort_order ASC, id ASC",
             null
         ).use { c ->
             while (c.moveToNext()) {
-                val cat = runCatching { SliceCategory.valueOf(c.getString(3)) }.getOrDefault(SliceCategory.OTHER)
-                out.add(SegmentPreset(c.getLong(0), c.getString(1), c.getString(2), cat, c.getInt(4)))
+                out.add(SegmentPreset(c.getLong(0), c.getString(1), c.getString(2), c.getInt(3)))
             }
         }
         return out
     }
 
-    fun addSegmentPreset(label: String, iconEmoji: String, category: SliceCategory): SegmentPreset {
+    fun addSegmentPreset(label: String, iconEmoji: String): SegmentPreset {
         val db = writableDatabase
         val nextOrder = getSegmentPresets().size
         val cv = ContentValues().apply {
             put("label", label.trim())
             put("icon_emoji", iconEmoji.ifBlank { "🏷️" })
-            put("default_category", category.name)
             put("sort_order", nextOrder)
         }
         val id = db.insert("segment_preset", null, cv)
-        return SegmentPreset(id, label.trim(), iconEmoji.ifBlank { "🏷️" }, category, nextOrder)
+        return SegmentPreset(id, label.trim(), iconEmoji.ifBlank { "🏷️" }, nextOrder)
     }
 
     fun startExcursion(deviceId: Long, startEpochSec: Long, title: String): ExcursionRecord {
@@ -365,7 +349,12 @@ class MetadataDatabase(context: Context) :
                 val prevPinned = c.getInt(3) != 0
                 val prevTitle = c.getString(4)
                 val prevNotes = c.getString(5)
-                if (prevEnd == null || (startEpochSec >= prevStart && (startEpochSec - prevEnd) <= 90L)) {
+                val prevSlices = getSlicesForExcursion(prevId)
+                val isUntouchedDefault = prevSlices.size == 1 &&
+                    prevSlices[0].label == "Unlabeled Trip Span" &&
+                    prevSlices[0].notes.isBlank() &&
+                    prevSlices[0].startEpochSec == prevStart
+                if (prevEnd == null || (isUntouchedDefault && startEpochSec >= prevStart && (startEpochSec - prevEnd) <= 90L)) {
                     val reopenCv = ContentValues().apply { putNull("end_epoch_sec") }
                     db.update("excursion", reopenCv, "id = ?", arrayOf(prevId.toString()))
                     updateOngoingExcursionEnd(prevId, maxOf(startEpochSec, prevEnd ?: startEpochSec), closeExcursion = false)
@@ -388,9 +377,7 @@ class MetadataDatabase(context: Context) :
             put("excursion_id", excursionId)
             put("start_epoch_sec", startEpochSec)
             put("end_epoch_sec", startEpochSec + 15)
-            put("is_pinned", 0)
             put("include_in_export", 1)
-            put("category", SliceCategory.OTHER.name)
             put("label", "Unlabeled Trip Span")
             put("notes", "")
         }
@@ -403,7 +390,10 @@ class MetadataDatabase(context: Context) :
      * an elevator shaft or hallway), removes standalone unpinned `< 30s` Wi-Fi blips, and ensures
      * `knownPlaceId = 0` in [ringStore] across all confirmed excursion windows (`>= 60s`).
      */
-    fun coalesceMicroExcursionsAndRestoreRingPlaceIds(ringStore: AqlRingBufferStore) {
+    fun coalesceMicroExcursionsAndRestoreRingPlaceIds(
+        ringStore: AqlRingBufferStore,
+        nowSec: Long = System.currentTimeMillis() / 1000L
+    ) {
         val db = writableDatabase
         val chronological = getExcursions().sortedWith(compareBy<ExcursionRecord> { it.startEpochSec }.thenBy { it.id })
         if (chronological.isEmpty()) return
@@ -413,7 +403,22 @@ class MetadataDatabase(context: Context) :
             val next = chronological[i]
             val currEnd = current.endEpochSec ?: next.startEpochSec
             val gapSec = next.startEpochSec - currEnd
-            if (current.deviceId == next.deviceId && gapSec <= 90L) {
+            val nextSlices = getSlicesForExcursion(next.id)
+            val nextHasCustomSlices = nextSlices.size > 1 || nextSlices.any { it.label != "Unlabeled Trip Span" || it.notes.isNotBlank() }
+
+            if (current.deviceId == next.deviceId && gapSec < 0L) {
+                val nextEnd = next.endEpochSec ?: Long.MAX_VALUE
+                if (next.startEpochSec >= current.startEpochSec && nextEnd <= currEnd && !nextHasCustomSlices) {
+                    val mergedPinned = current.isPinned || next.isPinned
+                    deleteExcursion(next.id)
+                    if (mergedPinned) {
+                        setExcursionPinned(current.id, true, ringStore)
+                    }
+                    current = current.copy(isPinned = mergedPinned)
+                } else {
+                    current = if (nextEnd > currEnd) next else current
+                }
+            } else if (current.deviceId == next.deviceId && gapSec in 0L..90L) {
                 val mergedEnd = if (next.endEpochSec == null) null else maxOf(currEnd, next.endEpochSec)
                 val mergedPinned = current.isPinned || next.isPinned
                 // Prefer the title of whichever excursion was longer
@@ -431,8 +436,6 @@ class MetadataDatabase(context: Context) :
                 db.update("excursion", cv, "id = ?", arrayOf(current.id.toString()))
 
                 // If next had custom slices (> 1 slice or labeled), re-parent them; otherwise extend current's last slice
-                val nextSlices = getSlicesForExcursion(next.id)
-                val nextHasCustomSlices = nextSlices.size > 1 || nextSlices.any { it.label != "Unlabeled Trip Span" || it.notes.isNotBlank() }
                 if (nextHasCustomSlices) {
                     val currSlices = getSlicesForExcursion(current.id)
                     val lastCurrSlice = currSlices.lastOrNull()
@@ -443,39 +446,61 @@ class MetadataDatabase(context: Context) :
                     val reparentCv = ContentValues().apply { put("excursion_id", current.id) }
                     db.update("session_slice", reparentCv, "excursion_id = ?", arrayOf(next.id.toString()))
                 } else {
-                    db.delete("session_slice", "excursion_id = ?", arrayOf(next.id.toString()))
                     updateOngoingExcursionEnd(current.id, mergedEnd ?: next.startEpochSec, closeExcursion = false)
                 }
-                db.delete("excursion", "id = ?", arrayOf(next.id.toString()))
+                deleteExcursion(next.id)
                 current = current.copy(
                     endEpochSec = mergedEnd,
                     isPinned = mergedPinned,
                     title = mergedTitle,
                     notes = mergedNotes
                 )
+                if (mergedPinned) {
+                    setExcursionPinned(current.id, true, ringStore)
+                }
             } else {
                 current = next
             }
         }
 
-        // Clean up any standalone unpinned < 30s Wi-Fi blips that closed more than 90s ago,
-        // and restore knownPlaceId = 0 in ringStore for all confirmed excursions (>= 60s).
-        val nowSec = System.currentTimeMillis() / 1000L
+        // Clean up standalone unpinned < 30s Wi-Fi blips that closed > 90s ago,
+        // prune expired or rotated-out unpinned excursions, restore knownPlaceId = 0 in ringStore
+        // across confirmed excursions (>= 60s), and ensure pinned excursions hold their full span.
+        val retentionWindowSec = ringStore.getArchiveWindowSec(0)
         for (exc in getExcursions()) {
             val endSec = exc.endEpochSec
             if (endSec != null) {
                 val duration = endSec - exc.startEpochSec
-                if (!exc.isPinned && duration < 30L && (nowSec - endSec) > 90L) {
-                    db.delete("session_slice", "excursion_id = ?", arrayOf(exc.id.toString()))
-                    db.delete("excursion", "id = ?", arrayOf(exc.id.toString()))
-                } else if (duration >= 60L) {
+                if (!exc.isPinned) {
+                    val closedBlip = duration < 30L && (nowSec - endSec) > 90L
+                    val expiredByClock = (nowSec - endSec) > retentionWindowSec
+                    val rotatedOutOfRing = (nowSec - endSec) > 90L &&
+                        ringStore.queryRange(0, exc.startEpochSec, endSec).isEmpty()
+                    if (closedBlip || expiredByClock || rotatedOutOfRing) {
+                        deleteExcursion(exc.id)
+                        continue
+                    }
+                }
+                if (duration >= 60L) {
                     ringStore.clearKnownPlaceInRange(exc.startEpochSec, endSec)
+                }
+            }
+            if (exc.isPinned) {
+                val pinnedCount = getPinnedSlotsForExcursion(exc.id)?.size ?: 0
+                val resolvedSlots = resolveSlotsForExcursion(exc.id, ringStore)
+                if (resolvedSlots.size > pinnedCount) {
+                    setExcursionPinned(exc.id, true, ringStore)
                 }
             }
         }
     }
 
-    fun updateOngoingExcursionEnd(excursionId: Long, latestEpochSec: Long, closeExcursion: Boolean) {
+    fun updateOngoingExcursionEnd(
+        excursionId: Long,
+        latestEpochSec: Long,
+        closeExcursion: Boolean,
+        ringStore: AqlRingBufferStore? = null
+    ) {
         val db = writableDatabase
         if (closeExcursion) {
             val cv = ContentValues().apply { put("end_epoch_sec", latestEpochSec) }
@@ -493,6 +518,15 @@ class MetadataDatabase(context: Context) :
                     val sliceCv = ContentValues().apply { put("end_epoch_sec", latestEpochSec) }
                     db.update("session_slice", sliceCv, "id = ?", arrayOf(sliceId.toString()))
                 }
+            }
+        }
+        if (closeExcursion && ringStore != null) {
+            val isPinned = readableDatabase.rawQuery(
+                "SELECT is_pinned FROM excursion WHERE id = ? LIMIT 1",
+                arrayOf(excursionId.toString())
+            ).use { c -> c.moveToFirst() && c.getInt(0) != 0 }
+            if (isPinned) {
+                setExcursionPinned(excursionId, true, ringStore)
             }
         }
     }
@@ -525,7 +559,7 @@ class MetadataDatabase(context: Context) :
         val list = mutableListOf<SessionSliceRecord>()
         readableDatabase.rawQuery(
             """
-            SELECT id, excursion_id, start_epoch_sec, end_epoch_sec, is_pinned, include_in_export, category, label, notes
+            SELECT id, excursion_id, start_epoch_sec, end_epoch_sec, include_in_export, label, notes
             FROM session_slice
             WHERE excursion_id = ?
             ORDER BY start_epoch_sec ASC, id ASC
@@ -533,18 +567,15 @@ class MetadataDatabase(context: Context) :
             arrayOf(excursionId.toString())
         ).use { c ->
             while (c.moveToNext()) {
-                val cat = runCatching { SliceCategory.valueOf(c.getString(6)) }.getOrDefault(SliceCategory.OTHER)
                 list.add(
                     SessionSliceRecord(
                         id = c.getLong(0),
                         excursionId = c.getLong(1),
                         startEpochSec = c.getLong(2),
                         endEpochSec = c.getLong(3),
-                        isPinned = c.getInt(4) != 0,
-                        includeInExport = c.getInt(5) != 0,
-                        category = cat,
-                        label = c.getString(7),
-                        notes = c.getString(8)
+                        includeInExport = c.getInt(4) != 0,
+                        label = c.getString(5),
+                        notes = c.getString(6)
                     )
                 )
             }
@@ -556,17 +587,20 @@ class MetadataDatabase(context: Context) :
      * Shared-Divider Split: Splits `sliceId` at `splitEpochSec` into two contiguous adjacent slices
      * (`[start, splitEpochSec]` and `[splitEpochSec, end]`).
      */
-    fun splitSliceAt(sliceId: Long, splitEpochSec: Long): Boolean {
+    fun splitSliceAt(
+        sliceId: Long,
+        splitEpochSec: Long,
+        @Suppress("UNUSED_PARAMETER") ringStore: AqlRingBufferStore? = null
+    ): Boolean {
         val db = writableDatabase
         val target = readableDatabase.rawQuery(
-            "SELECT id, excursion_id, start_epoch_sec, end_epoch_sec, is_pinned, include_in_export, category, label, notes FROM session_slice WHERE id = ?",
+            "SELECT id, excursion_id, start_epoch_sec, end_epoch_sec, include_in_export, label, notes FROM session_slice WHERE id = ?",
             arrayOf(sliceId.toString())
         ).use { c ->
             if (!c.moveToFirst()) return false
-            val cat = runCatching { SliceCategory.valueOf(c.getString(6)) }.getOrDefault(SliceCategory.OTHER)
             SessionSliceRecord(
                 c.getLong(0), c.getLong(1), c.getLong(2), c.getLong(3),
-                c.getInt(4) != 0, c.getInt(5) != 0, cat, c.getString(7), c.getString(8)
+                c.getInt(4) != 0, c.getString(5), c.getString(6)
             )
         }
         val alignedSplit = (splitEpochSec / 15L) * 15L
@@ -587,25 +621,28 @@ class MetadataDatabase(context: Context) :
                 put("excursion_id", target.excursionId)
                 put("start_epoch_sec", alignedSplit)
                 put("end_epoch_sec", target.endEpochSec)
-                put("is_pinned", if (target.isPinned) 1 else 0)
                 put("include_in_export", if (target.includeInExport) 1 else 0)
-                put("category", SliceCategory.DESTINATION.name)
                 put("label", "Segment ${existingCount + 1}")
                 put("notes", "")
             }
             db.insert("session_slice", null, insertCv)
             db.setTransactionSuccessful()
-            return true
         } finally {
             db.endTransaction()
         }
+        return true
     }
 
     /**
      * Shared-Divider Boundary Nudge/Drag: Moves the shared boundary between `leftSliceId` and `rightSliceId`
      * to `newBoundaryEpochSec` while preserving strict non-overlapping contiguity.
      */
-    fun moveSharedDivider(leftSliceId: Long, rightSliceId: Long, newBoundaryEpochSec: Long): Boolean {
+    fun moveSharedDivider(
+        leftSliceId: Long,
+        rightSliceId: Long,
+        newBoundaryEpochSec: Long,
+        @Suppress("UNUSED_PARAMETER") ringStore: AqlRingBufferStore? = null
+    ): Boolean {
         val aligned = (newBoundaryEpochSec / 15L) * 15L
         val db = writableDatabase
         val slices = readableDatabase.rawQuery(
@@ -629,115 +666,248 @@ class MetadataDatabase(context: Context) :
             db.update("session_slice", leftCv, "id = ?", arrayOf(leftSliceId.toString()))
             db.update("session_slice", rightCv, "id = ?", arrayOf(rightSliceId.toString()))
             db.setTransactionSuccessful()
-            return true
         } finally {
             db.endTransaction()
         }
+        return true
     }
 
     /**
      * Merges `leftSliceId` and `rightSliceId` back into a single contiguous slice.
      */
-    fun mergeAdjacentSlices(leftSliceId: Long, rightSliceId: Long): Boolean {
+    fun mergeAdjacentSlices(
+        leftSliceId: Long,
+        rightSliceId: Long,
+        @Suppress("UNUSED_PARAMETER") ringStore: AqlRingBufferStore? = null
+    ): Boolean {
         val db = writableDatabase
-        val rightEnd = readableDatabase.rawQuery(
-            "SELECT end_epoch_sec FROM session_slice WHERE id = ?",
-            arrayOf(rightSliceId.toString())
+        val endMap = readableDatabase.rawQuery(
+            "SELECT id, end_epoch_sec FROM session_slice WHERE id IN (?, ?)",
+            arrayOf(leftSliceId.toString(), rightSliceId.toString())
         ).use { c ->
-            if (!c.moveToFirst()) return false
-            c.getLong(0)
+            val map = mutableMapOf<Long, Long>()
+            while (c.moveToNext()) {
+                map[c.getLong(0)] = c.getLong(1)
+            }
+            map
         }
+        if (!endMap.containsKey(leftSliceId)) return false
+        val rightEnd = endMap[rightSliceId] ?: return false
+
         db.beginTransaction()
         try {
-            val cv = ContentValues().apply { put("end_epoch_sec", rightEnd) }
+            val cv = ContentValues().apply {
+                put("end_epoch_sec", rightEnd)
+            }
             db.update("session_slice", cv, "id = ?", arrayOf(leftSliceId.toString()))
             db.delete("session_slice", "id = ?", arrayOf(rightSliceId.toString()))
             db.setTransactionSuccessful()
-            return true
         } finally {
             db.endTransaction()
         }
+        return true
+    }
+
+    /**
+     * Trims the start of `excursionId` forward to `newStartEpochSec` (15s-aligned), deleting any slices
+     * that ended at or before `newStartEpochSec` and clamping any slice that spans across it.
+     */
+    fun trimExcursionStart(
+        excursionId: Long,
+        newStartEpochSec: Long,
+        ringStore: AqlRingBufferStore? = null
+    ): Boolean = trimExcursionBoundary(excursionId, newStartEpochSec, isStart = true, ringStore = ringStore)
+
+    /**
+     * Trims the end of `excursionId` backward to `newEndEpochSec` (15s-aligned), deleting any slices
+     * that started at or after `newEndEpochSec` and clamping any slice that spans across it.
+     */
+    fun trimExcursionEnd(
+        excursionId: Long,
+        newEndEpochSec: Long,
+        ringStore: AqlRingBufferStore? = null
+    ): Boolean = trimExcursionBoundary(excursionId, newEndEpochSec, isStart = false, ringStore = ringStore)
+
+    private fun trimExcursionBoundary(
+        excursionId: Long,
+        boundaryEpochSec: Long,
+        isStart: Boolean,
+        ringStore: AqlRingBufferStore?
+    ): Boolean {
+        val aligned = (boundaryEpochSec / 15L) * 15L
+        val exc = getExcursions().firstOrNull { it.id == excursionId } ?: return false
+        val slices = getSlicesForExcursion(excursionId)
+        val effectiveEnd = exc.endEpochSec ?: slices.lastOrNull()?.endEpochSec ?: return false
+        if (aligned <= exc.startEpochSec || aligned >= effectiveEnd) return false
+
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            for (s in slices) {
+                val dropSlice = if (isStart) (s.endEpochSec <= aligned) else (s.startEpochSec >= aligned)
+                val clampSlice = if (isStart) (s.startEpochSec < aligned) else (s.endEpochSec > aligned)
+                if (dropSlice) {
+                    db.delete("session_slice", "id = ?", arrayOf(s.id.toString()))
+                } else if (clampSlice) {
+                    val field = if (isStart) "start_epoch_sec" else "end_epoch_sec"
+                    val cv = ContentValues().apply { put(field, aligned) }
+                    db.update("session_slice", cv, "id = ?", arrayOf(s.id.toString()))
+                }
+            }
+            val excField = if (isStart) "start_epoch_sec" else "end_epoch_sec"
+            val excCv = ContentValues().apply { put(excField, aligned) }
+            db.update("excursion", excCv, "id = ?", arrayOf(excursionId.toString()))
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        if (ringStore != null && exc.isPinned) {
+            setExcursionPinned(excursionId, true, ringStore)
+        }
+        return true
     }
 
     fun updateSliceMetadata(
         sliceId: Long,
         label: String,
-        category: SliceCategory,
         notes: String,
-        isPinned: Boolean,
-        includeInExport: Boolean,
-        ringStore: AqlRingBufferStore? = null
+        includeInExport: Boolean = true
     ) {
         val db = writableDatabase
         val cv = ContentValues().apply {
             put("label", label)
-            put("category", category.name)
             put("notes", notes)
-            put("is_pinned", if (isPinned) 1 else 0)
             put("include_in_export", if (includeInExport) 1 else 0)
         }
         db.update("session_slice", cv, "id = ?", arrayOf(sliceId.toString()))
+    }
 
-        if (ringStore != null) {
-            readableDatabase.rawQuery(
-                "SELECT excursion_id, start_epoch_sec, end_epoch_sec FROM session_slice WHERE id = ?",
-                arrayOf(sliceId.toString())
-            ).use { c ->
-                if (c.moveToFirst()) {
-                    val excId = c.getLong(0)
-                    val startSec = c.getLong(1)
-                    val endSec = c.getLong(2)
-                    db.delete("pinned_slice_data", "slice_id = ?", arrayOf(sliceId.toString()))
-                    if (isPinned) {
-                        val blob = ringStore.extractPinnedBlob(startSec, endSec)
-                        val pinCv = ContentValues().apply {
-                            put("excursion_id", excId)
-                            put("slice_id", sliceId)
-                            put("start_epoch_sec", startSec)
-                            put("end_epoch_sec", endSec)
-                            put("raw_samples_payload", blob)
-                        }
-                        db.insert("pinned_slice_data", null, pinCv)
-                    }
-                }
-            }
+    private fun insertPinnedBlob(
+        db: SQLiteDatabase,
+        excursionId: Long,
+        sliceId: Long?,
+        startSec: Long,
+        endSec: Long,
+        blob: ByteArray
+    ) {
+        val pinCv = ContentValues().apply {
+            put("excursion_id", excursionId)
+            if (sliceId == null) putNull("slice_id") else put("slice_id", sliceId)
+            put("start_epoch_sec", startSec)
+            put("end_epoch_sec", endSec)
+            put("raw_samples_payload", blob)
         }
+        db.insert("pinned_slice_data", null, pinCv)
     }
 
     fun setExcursionPinned(excursionId: Long, isPinned: Boolean, ringStore: AqlRingBufferStore? = null) {
         val db = writableDatabase
         val cv = ContentValues().apply { put("is_pinned", if (isPinned) 1 else 0) }
         db.update("excursion", cv, "id = ?", arrayOf(excursionId.toString()))
-        db.delete("pinned_slice_data", "excursion_id = ? AND slice_id IS NULL", arrayOf(excursionId.toString()))
         if (isPinned && ringStore != null) {
             val exc = getExcursions().firstOrNull { it.id == excursionId } ?: return
             val endSec = exc.endEpochSec ?: (System.currentTimeMillis() / 1000L)
-            val blob = ringStore.extractPinnedBlob(exc.startEpochSec, endSec)
-            val pinCv = ContentValues().apply {
-                put("excursion_id", excursionId)
-                putNull("slice_id")
-                put("start_epoch_sec", exc.startEpochSec)
-                put("end_epoch_sec", endSec)
-                put("raw_samples_payload", blob)
-            }
-            db.insert("pinned_slice_data", null, pinCv)
+            val merged = resolveSlotsForExcursion(excursionId, ringStore)
+                .filter { it.bucketEpochSec in exc.startEpochSec..endSec }
+            val blob = AqlRingBufferStore.encodePinnedBlob(merged)
+            db.delete("pinned_slice_data", "excursion_id = ?", arrayOf(excursionId.toString()))
+            insertPinnedBlob(db, excursionId, null, exc.startEpochSec, endSec, blob)
+        } else {
+            db.delete("pinned_slice_data", "excursion_id = ?", arrayOf(excursionId.toString()))
         }
     }
 
-    fun getPinnedSlotsForSlice(sliceId: Long): List<AqlRingBufferStore.RingSlotRecord>? {
+    fun renameExcursion(excursionId: Long, newTitle: String) {
+        val clean = newTitle.trim().ifEmpty { "Trip" }
+        val cv = ContentValues().apply { put("title", clean) }
+        writableDatabase.update("excursion", cv, "id = ?", arrayOf(excursionId.toString()))
+    }
+
+    fun deleteExcursion(excursionId: Long) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("pinned_slice_data", "excursion_id = ?", arrayOf(excursionId.toString()))
+            db.delete("session_slice", "excursion_id = ?", arrayOf(excursionId.toString()))
+            db.delete("excursion", "id = ?", arrayOf(excursionId.toString()))
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun getPinnedSlotsForExcursion(excursionId: Long): List<AqlRingBufferStore.RingSlotRecord>? {
+        val mergedByEpoch = mutableMapOf<Long, AqlRingBufferStore.RingSlotRecord>()
+        var found = false
         readableDatabase.rawQuery(
-            "SELECT raw_samples_payload FROM pinned_slice_data WHERE slice_id = ? LIMIT 1",
-            arrayOf(sliceId.toString())
+            "SELECT raw_samples_payload FROM pinned_slice_data WHERE excursion_id = ? ORDER BY id ASC",
+            arrayOf(excursionId.toString())
         ).use { c ->
-            if (c.moveToFirst()) {
-                return AqlRingBufferStore.decodePinnedBlob(c.getBlob(0))
+            while (c.moveToNext()) {
+                found = true
+                AqlRingBufferStore.decodePinnedBlob(c.getBlob(0)).forEach { slot ->
+                    mergedByEpoch[slot.bucketEpochSec] = slot
+                }
             }
         }
-        return null
+        return if (found) mergedByEpoch.values.sortedBy { it.bucketEpochSec } else null
+    }
+
+    fun isExcursionOutsideRingWindow(
+        exc: ExcursionRecord,
+        ringStore: AqlRingBufferStore,
+        nowEpochSec: Long = System.currentTimeMillis() / 1000L
+    ): Boolean {
+        val retentionWindowSec = ringStore.getArchiveWindowSec(0)
+        val endSec = exc.endEpochSec ?: nowEpochSec
+        val ringCutoffSec = nowEpochSec - retentionWindowSec
+        if (exc.startEpochSec < ringCutoffSec) return true
+        val pinnedSlots = getPinnedSlotsForExcursion(exc.id).orEmpty()
+        if (pinnedSlots.isNotEmpty()) {
+            val liveRingSlots = ringStore.queryRange(0, exc.startEpochSec, endSec)
+            if (liveRingSlots.size < pinnedSlots.size) return true
+        }
+        return false
+    }
+
+    fun resolveSlotsForExcursion(
+        excursionId: Long,
+        ringStore: AqlRingBufferStore
+    ): List<AqlRingBufferStore.RingSlotRecord> {
+        val exc = getExcursions().firstOrNull { it.id == excursionId } ?: return emptyList()
+        val endSec = exc.endEpochSec ?: (System.currentTimeMillis() / 1000L)
+        val mergedByEpoch = mutableMapOf<Long, AqlRingBufferStore.RingSlotRecord>()
+
+        if (exc.isPinned) {
+            getPinnedSlotsForExcursion(excursionId)?.forEach { slot ->
+                if (slot.bucketEpochSec in exc.startEpochSec..endSec) {
+                    mergedByEpoch[slot.bucketEpochSec] = slot
+                }
+            }
+        }
+        ringStore.queryRange(0, exc.startEpochSec, endSec).forEach { slot ->
+            mergedByEpoch[slot.bucketEpochSec] = slot
+        }
+        return mergedByEpoch.values.sortedBy { it.bucketEpochSec }
     }
 
     companion object {
         const val DB_NAME = "android_aql_metadata.db"
         const val DB_VERSION = 1
+
+        fun resolveSelectedExcursionId(
+            excursions: List<ExcursionRecord>,
+            currentSelectedId: Long?,
+            lastSeenLatestId: Long?,
+            isTripEditMode: Boolean
+        ): Pair<Long?, Long?> {
+            if (excursions.isEmpty()) return null to null
+            val newestId = excursions.first().id
+            if (lastSeenLatestId != null && newestId != lastSeenLatestId && !isTripEditMode) {
+                return newestId to newestId
+            }
+            val picked = excursions.firstOrNull { it.id == currentSelectedId } ?: excursions.first()
+            return picked.id to newestId
+        }
     }
 }

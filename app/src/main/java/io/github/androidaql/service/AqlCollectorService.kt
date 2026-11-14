@@ -57,7 +57,6 @@ import io.github.androidaql.storage.AqlRingBufferStore
 import io.github.androidaql.storage.BleCollectionMode
 import io.github.androidaql.storage.KnownPlace
 import io.github.androidaql.storage.MetadataDatabase
-import io.github.androidaql.storage.SliceCategory
 import io.github.androidaql.ui.MainActivity
 import io.github.androidaql.util.HardwareDiagnosticLogger
 import io.github.androidaql.util.TemperatureUnitFormatter
@@ -166,6 +165,7 @@ class AqlCollectorService : Service() {
         val connectedWifiSsid: String?,
         val connectedWifiBssid: String?,
         val matchedKnownPlace: KnownPlace?,
+        val hasConfiguredKnownPlaces: Boolean = true,
         val activeExcursionId: Long?,
         val lastFrame: QingpingBleParser.DecodedQingpingFrame?,
         val interPacketDeltaMs: Long?,
@@ -238,8 +238,10 @@ class AqlCollectorService : Service() {
 
     private var connectivityManager: ConnectivityManager? = null
     private var wifiNetworkCallback: ConnectivityManager.NetworkCallback? = null
-    private var currentWifiSsid: String? = null
+    private var rawWifiSsid: String? = null
     private var currentWifiBssid: String? = null
+    var fakeWifiSsidOverride: String? = null
+        private set
     private var manualKnownPlaceOverrideId: Int = 0
 
     private var locationManager: LocationManager? = null
@@ -352,6 +354,10 @@ class AqlCollectorService : Service() {
         ringStore = AqlRingBufferStore(ringFile, deviceId = 1L)
         metadataDb.coalesceMicroExcursionsAndRestoreRingPlaceIds(ringStore)
         devConfig = loadDevKeepAliveConfig()
+        fakeWifiSsidOverride = getSharedPreferences("aql_dev_keepalive", Context.MODE_PRIVATE)
+            .getString("fake_wifi_ssid", null)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
         hwLogger = HardwareDiagnosticLogger(File(filesDir, "hw_bringup_trace.jsonl")).apply {
             configHeaderProvider = { devConfig.toLogMap() }
         }
@@ -510,6 +516,9 @@ class AqlCollectorService : Service() {
     }
 
     private fun handleDevCommandIntent(intent: Intent) {
+        if (intent.hasExtra("fake_wifi_ssid")) {
+            setFakeWifiSsidOverride(intent.getStringExtra("fake_wifi_ssid"))
+        }
         intent.getStringExtra("note")?.let { logDeveloperNote(it) }
         val hasCfgChange = intent.hasExtra("strategy") ||
             intent.hasExtra("interval_sec") ||
@@ -694,8 +703,60 @@ class AqlCollectorService : Service() {
         refreshWifiAndPlaceState()
     }
 
+    fun isManualKnownPlaceOverrideActive(): Boolean = manualKnownPlaceOverrideId > 0
+
+    fun detachActiveExcursionIfMatching(excursionId: Long) {
+        if (activeExcursionId == excursionId) {
+            activeExcursionId = null
+        }
+    }
+
+    fun startManualExcursion(): Long? {
+        val nowSec = System.currentTimeMillis() / 1000L
+        val transition = stateMachine.onManualTripStart(nowSec)
+        applyStateTransition(transition, nowSec)
+        updateOngoingForegroundNotification()
+        notifyListeners()
+        return activeExcursionId
+    }
+
+    fun endManualExcursion() {
+        val nowSec = System.currentTimeMillis() / 1000L
+        val transition = stateMachine.onManualTripEnd(nowSec)
+        applyStateTransition(transition, nowSec)
+        updateOngoingForegroundNotification()
+        notifyListeners()
+    }
+
+    private fun effectiveWifiSsid(): String? =
+        if (!rawWifiSsid.isNullOrBlank()) (fakeWifiSsidOverride ?: rawWifiSsid) else null
+
+    private fun resolveMatchedKnownPlace(knownPlaces: List<KnownPlace> = metadataDb.getKnownPlaces()): KnownPlace? {
+        if (manualKnownPlaceOverrideId > 0) {
+            return knownPlaces.firstOrNull { it.id == manualKnownPlaceOverrideId }
+        }
+        val effSsid = effectiveWifiSsid()
+        return metadataDb.matchKnownPlaceByWifi(effSsid, currentWifiBssid)
+            ?: if (effSsid != rawWifiSsid) metadataDb.matchKnownPlaceByWifi(rawWifiSsid, currentWifiBssid) else null
+    }
+
+    fun setFakeWifiSsidOverride(ssid: String?) {
+        val normalized = ssid?.trim()?.takeIf {
+            it.isNotEmpty() && !it.equals("clear", ignoreCase = true) && !it.equals("none", ignoreCase = true)
+        }
+        fakeWifiSsidOverride = normalized
+        val editor = getSharedPreferences("aql_dev_keepalive", Context.MODE_PRIVATE).edit()
+        if (normalized != null) {
+            editor.putString("fake_wifi_ssid", normalized)
+        } else {
+            editor.remove("fake_wifi_ssid")
+        }
+        editor.apply()
+        refreshWifiAndPlaceState()
+    }
+
     fun refreshWifiAndPlaceState() {
-        if (currentWifiSsid.isNullOrBlank() &&
+        if (rawWifiSsid.isNullOrBlank() &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
             PackageManager.PERMISSION_GRANTED
         ) {
@@ -703,13 +764,15 @@ class AqlCollectorService : Service() {
             registerWifiCallback()
         }
         readFallbackWifiInfoIfNeeded()
-        val matchedPlace = if (manualKnownPlaceOverrideId > 0) {
-            metadataDb.getKnownPlaces().firstOrNull { it.id == manualKnownPlaceOverrideId }
-        } else {
-            metadataDb.matchKnownPlaceByWifi(currentWifiSsid, currentWifiBssid)
-        }
+        val knownPlaces = metadataDb.getKnownPlaces()
+        val hasPlaces = knownPlaces.isNotEmpty()
+        val matchedPlace = resolveMatchedKnownPlace(knownPlaces)
         val nowSec = System.currentTimeMillis() / 1000L
-        val transition = stateMachine.onWifiContextChanged(nowSec, matchedPlace?.id ?: 0)
+        val transition = stateMachine.onWifiContextChanged(
+            timestampEpochSec = nowSec,
+            connectedKnownPlaceId = matchedPlace?.id ?: 0,
+            hasConfiguredKnownPlaces = hasPlaces
+        )
         applyStateTransition(transition, nowSec)
         updateOngoingForegroundNotification()
         notifyListeners()
@@ -1138,15 +1201,17 @@ class AqlCollectorService : Service() {
         metadataDb.upsertMonitorDevice(decoded.macAddress, decoded.productName, "Qingping ${decoded.productName}")
 
         readFallbackWifiInfoIfNeeded()
-        val matchedPlace = if (manualKnownPlaceOverrideId > 0) {
-            metadataDb.getKnownPlaces().firstOrNull { it.id == manualKnownPlaceOverrideId }
-        } else {
-            metadataDb.matchKnownPlaceByWifi(currentWifiSsid, currentWifiBssid)
-        }
+        val knownPlaces = metadataDb.getKnownPlaces()
+        val hasPlaces = knownPlaces.isNotEmpty()
+        val matchedPlace = resolveMatchedKnownPlace(knownPlaces)
         val knownPlaceId = matchedPlace?.id ?: 0
 
         val nowSec = decoded.timestampMs / 1000L
-        val transition = stateMachine.onBleAdvertisement(nowSec, knownPlaceId)
+        val transition = stateMachine.onBleAdvertisement(
+            timestampEpochSec = nowSec,
+            connectedKnownPlaceId = knownPlaceId,
+            hasConfiguredKnownPlaces = hasPlaces
+        )
         applyStateTransition(transition, nowSec)
 
         // Write sample to constant-size .aqlring binary buffer once NDIR CO2 warmup is complete
@@ -1191,12 +1256,7 @@ class AqlCollectorService : Service() {
 
     private fun isCurrentlyAtSavedWifiPlace(): Boolean {
         readFallbackWifiInfoIfNeeded()
-        val matched = if (manualKnownPlaceOverrideId > 0) {
-            metadataDb.getKnownPlaces().firstOrNull { it.id == manualKnownPlaceOverrideId }
-        } else {
-            metadataDb.matchKnownPlaceByWifi(currentWifiSsid, currentWifiBssid)
-        }
-        return matched != null
+        return resolveMatchedKnownPlace() != null
     }
 
     private fun applyStateTransition(
@@ -1220,7 +1280,12 @@ class AqlCollectorService : Service() {
                 lastPeriodicGattPokeMs = 0L
             }
         } else if (transition.closedExcursion && activeExcursionId != null) {
-            metadataDb.updateOngoingExcursionEnd(activeExcursionId!!, nowEpochSec, closeExcursion = true)
+            metadataDb.updateOngoingExcursionEnd(
+                activeExcursionId!!,
+                nowEpochSec,
+                closeExcursion = true,
+                ringStore = ringStore
+            )
             metadataDb.coalesceMicroExcursionsAndRestoreRingPlaceIds(ringStore)
             activeExcursionId = null
         }
@@ -2277,7 +2342,7 @@ class AqlCollectorService : Service() {
                     val ssid = wifiInfo?.ssid?.removeSurrounding("\"")?.takeIf { it != "<unknown ssid>" }
                     val bssid = wifiInfo?.bssid?.takeIf { it != "02:00:00:00:00:00" }
                     mainHandler.post {
-                        currentWifiSsid = ssid
+                        rawWifiSsid = ssid
                         currentWifiBssid = bssid
                         refreshWifiAndPlaceState()
                     }
@@ -2285,7 +2350,7 @@ class AqlCollectorService : Service() {
 
                 override fun onLost(network: Network) {
                     mainHandler.post {
-                        currentWifiSsid = null
+                        rawWifiSsid = null
                         currentWifiBssid = null
                         refreshWifiAndPlaceState()
                     }
@@ -2299,14 +2364,14 @@ class AqlCollectorService : Service() {
 
     @Suppress("DEPRECATION")
     private fun readFallbackWifiInfoIfNeeded() {
-        if (!currentWifiSsid.isNullOrBlank()) return
+        if (!rawWifiSsid.isNullOrBlank()) return
         try {
             val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
             val info = wm.connectionInfo ?: return
             val ssid = info.ssid?.removeSurrounding("\"")?.takeIf { it.isNotBlank() && it != "<unknown ssid>" }
             val bssid = info.bssid?.takeIf { it.isNotBlank() && it != "02:00:00:00:00:00" }
             if (ssid != null) {
-                currentWifiSsid = ssid
+                rawWifiSsid = ssid
                 currentWifiBssid = bssid
             }
         } catch (_: Exception) {
@@ -2381,7 +2446,11 @@ class AqlCollectorService : Service() {
         val matchedPlace = metadataDb.getKnownPlaces().firstOrNull { it.id == stateMachine.currentKnownPlaceId }
         val contextTitle = when (stateMachine.currentState) {
             ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP ->
-                "🏠 At ${matchedPlace?.label ?: "Saved Place"} (GPS Off)"
+                if (matchedPlace != null) {
+                    "🏠 At ${matchedPlace.label} (GPS Off)"
+                } else {
+                    "📡 Monitoring (GPS Off • No Saved Place)"
+                }
             ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE -> when {
                 isLocationActive -> "🚶 On a Trip (GPS Movement Active)"
                 isStepSensorActive -> "🚶 On a Trip (Step Sensor Active • GPS Off)"
@@ -2495,6 +2564,13 @@ class AqlCollectorService : Service() {
         }
         notifyListeners()
         return isDemoStreamRunning
+    }
+
+    fun stopDemoStream() {
+        if (!isDemoStreamRunning) return
+        isDemoStreamRunning = false
+        mainHandler.removeCallbacks(demoStreamRunnable)
+        notifyListeners()
     }
 
     private fun emitSyntheticDemoFrame() {
@@ -2622,10 +2698,10 @@ class AqlCollectorService : Service() {
 
             val finalSlices = metadataDb.getSlicesForExcursion(exc.id)
             if (finalSlices.size == 4) {
-                metadataDb.updateSliceMetadata(finalSlices[0].id, "CTA Bus #22", SliceCategory.TRANSIT, "Outbound bus", false, true, ringStore)
-                metadataDb.updateSliceMetadata(finalSlices[1].id, "Waiting Room (10th Fl)", SliceCategory.DESTINATION, "Crowded waiting area", true, true, ringStore)
-                metadataDb.updateSliceMetadata(finalSlices[2].id, "Exam Room #3", SliceCategory.DESTINATION, "HEPA purifier running", true, true, ringStore)
-                metadataDb.updateSliceMetadata(finalSlices[3].id, "Return Cab", SliceCategory.TRANSIT, "Windows cracked", false, false, ringStore)
+                metadataDb.updateSliceMetadata(finalSlices[0].id, "CTA Bus #22", "Outbound bus", true)
+                metadataDb.updateSliceMetadata(finalSlices[1].id, "Waiting Room (10th Fl)", "Crowded waiting area", true)
+                metadataDb.updateSliceMetadata(finalSlices[2].id, "Exam Room #3", "HEPA purifier running", true)
+                metadataDb.updateSliceMetadata(finalSlices[3].id, "Return Cab", "Windows cracked", false)
             }
         }
 
@@ -2644,11 +2720,8 @@ class AqlCollectorService : Service() {
     }
 
     fun buildSnapshot(): LiveTelemetrySnapshot {
-        val matchedPlace = if (manualKnownPlaceOverrideId > 0) {
-            metadataDb.getKnownPlaces().firstOrNull { it.id == manualKnownPlaceOverrideId }
-        } else {
-            metadataDb.matchKnownPlaceByWifi(currentWifiSsid, currentWifiBssid)
-        }
+        val knownPlaces = metadataDb.getKnownPlaces()
+        val matchedPlace = resolveMatchedKnownPlace(knownPlaces)
         val stateTransition = stateMachine.onTimerTick(System.currentTimeMillis() / 1000L)
         return LiveTelemetrySnapshot(
             collectorState = stateTransition.currentState,
@@ -2656,9 +2729,10 @@ class AqlCollectorService : Service() {
             userExcursionBleMode = stateMachine.userExcursionBleMode,
             strictFdcdFilterEnabled = strictFdcdFilterEnabled,
             devConfig = devConfig,
-            connectedWifiSsid = currentWifiSsid,
+            connectedWifiSsid = effectiveWifiSsid(),
             connectedWifiBssid = currentWifiBssid,
             matchedKnownPlace = matchedPlace,
+            hasConfiguredKnownPlaces = knownPlaces.isNotEmpty(),
             activeExcursionId = activeExcursionId,
             lastFrame = lastSampledFrame,
             interPacketDeltaMs = lastInterPacketDeltaMs,
@@ -2703,6 +2777,10 @@ class AqlCollectorService : Service() {
         fun isDeveloperModeEnabled(context: Context): Boolean =
             context.getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
                 .getBoolean("developer_mode", false)
+
+        fun isDemoDataEnabled(context: Context): Boolean =
+            context.getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
+                .getBoolean("demo_data_enabled", false)
 
         fun isDevCommandAuthorized(context: Context): Boolean =
             (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0 ||

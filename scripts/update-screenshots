@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""
+Automated debug-mode screenshot rebuild helper for AndroidAQL.
+
+Safely backs up existing app data (SQLite database, ring buffer, shared prefs) and
+rotation settings on a connected Android device/emulator, runs deterministic debug
+UI presets via `DEV_COMMAND` intents, encodes crisp WebP screenshots under
+`docs/screenshots/`, and restores live device data + orientation in `finally`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import io
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+from pathlib import Path
+
+PACKAGE_ID = "net.dyfis.androidaql"
+ACTIVITY_COMPONENT = f"{PACKAGE_ID}/io.github.androidaql.ui.MainActivity"
+DEV_COMMAND_ACTION = f"{PACKAGE_ID}.DEV_COMMAND"
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def find_binary(name: str, extra_candidates: list[Path]) -> str:
+    env_override = os.environ.get(f"ANDROID_AQL_{name.upper()}")
+    if env_override:
+        return env_override
+    found = shutil.which(name)
+    if found:
+        return found
+    for candidate in extra_candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    raise RuntimeError(
+        f"Required tool '{name}' not found on PATH or standard install locations: "
+        + ", ".join(str(p) for p in extra_candidates)
+    )
+
+
+def resolve_adb() -> str:
+    sdk_root = (
+        os.environ.get("ANDROID_HOME")
+        or os.environ.get("ANDROID_SDK_ROOT")
+        or str(Path.home() / "Library" / "Android" / "sdk")
+    )
+    return find_binary(
+        "adb",
+        [
+            Path(sdk_root) / "platform-tools" / "adb",
+            Path.home() / "Android" / "Sdk" / "platform-tools" / "adb",
+        ],
+    )
+
+
+def resolve_ffmpeg() -> str:
+    return find_binary(
+        "ffmpeg",
+        [
+            Path.home() / ".nix-profile" / "bin" / "ffmpeg",
+            Path("/opt/homebrew/bin/ffmpeg"),
+            Path("/usr/local/bin/ffmpeg"),
+            Path("/usr/bin/ffmpeg"),
+        ],
+    )
+
+
+def run_cmd(
+    args: list[str],
+    *,
+    input_bytes: bytes | None = None,
+    capture: bool = True,
+    check: bool = True,
+) -> subprocess.CompletedProcess[bytes]:
+    proc = subprocess.run(
+        args,
+        input=input_bytes,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+        check=False,
+    )
+    if check and proc.returncode != 0:
+        stderr_txt = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
+        stdout_txt = (proc.stdout or b"").decode("utf-8", errors="replace").strip()
+        detail = stderr_txt or stdout_txt or f"exit code {proc.returncode}"
+        raise RuntimeError(f"Command failed: {' '.join(args)}\n{detail}")
+    return proc
+
+
+def resolve_device_serial(adb: str, explicit_serial: str | None) -> str:
+    if explicit_serial:
+        return explicit_serial
+    out = run_cmd([adb, "devices"]).stdout.decode("utf-8", errors="replace")
+    devices: list[str] = []
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
+            devices.append(parts[0])
+    if len(devices) == 1:
+        return devices[0]
+    if not devices:
+        raise RuntimeError("No connected Android device/emulator in 'device' state found via adb.")
+    raise RuntimeError(
+        f"Multiple adb devices found ({', '.join(devices)}); pass --serial <id>."
+    )
+
+
+def adb_base(adb: str, serial: str) -> list[str]:
+    return [adb, "-s", serial]
+
+
+def get_setting(adb: str, serial: str, namespace: str, key: str, default: str) -> str:
+    res = run_cmd(
+        [*adb_base(adb, serial), "shell", "settings", "get", namespace, key],
+        check=False,
+    )
+    val = res.stdout.decode("utf-8", errors="replace").strip()
+    if not val or val == "null":
+        return default
+    return val
+
+
+def set_rotation(adb: str, serial: str, accel: str, user_rot: str) -> None:
+    run_cmd([*adb_base(adb, serial), "shell", "settings", "put", "system", "accelerometer_rotation", accel])
+    run_cmd([*adb_base(adb, serial), "shell", "settings", "put", "system", "user_rotation", user_rot])
+
+
+def backup_app_data(adb: str, serial: str) -> bytes:
+    """Force-stop app to flush SQLite WAL, then tar databases/files/shared_prefs via run-as."""
+    run_cmd([*adb_base(adb, serial), "shell", "am", "force-stop", PACKAGE_ID])
+    res = run_cmd(
+        [
+            *adb_base(adb, serial),
+            "exec-out",
+            "run-as",
+            PACKAGE_ID,
+            "sh",
+            "-c",
+            'dirs=""; for d in databases files shared_prefs; do [ -e "$d" ] && dirs="$dirs $d"; done; '
+            'if [ -n "$dirs" ]; then tar -cf - $dirs; fi',
+        ]
+    )
+    data = res.stdout
+    if data:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tf:
+            members = tf.getnames()
+        print(f"Backed up live app state ({len(data):,} bytes, {len(members)} entries).")
+    else:
+        print("No existing app data directories found; nothing to back up.")
+    return data
+
+
+def restore_app_data(adb: str, serial: str, backup_bytes: bytes) -> None:
+    run_cmd([*adb_base(adb, serial), "shell", "am", "force-stop", PACKAGE_ID])
+    run_cmd(
+        [
+            *adb_base(adb, serial),
+            "shell",
+            "run-as",
+            PACKAGE_ID,
+            "rm",
+            "-rf",
+            "databases",
+            "files",
+            "shared_prefs",
+        ]
+    )
+    if backup_bytes:
+        run_cmd(
+            [
+                *adb_base(adb, serial),
+                "shell",
+                "run-as",
+                PACKAGE_ID,
+                "tar",
+                "-xf",
+                "-",
+            ],
+            input_bytes=backup_bytes,
+        )
+        print("Restored original app data cleanly.")
+    # Relaunch MainActivity so the UI and foreground collector service resume normal operation.
+    run_cmd([*adb_base(adb, serial), "shell", "am", "start", "-n", ACTIVITY_COMPONENT])
+
+
+def clear_demo_databases_and_files(adb: str, serial: str) -> None:
+    """Reset DB + ring buffer while keeping shared_prefs so runtime disclosure isn't re-prompted."""
+    run_cmd([*adb_base(adb, serial), "shell", "am", "force-stop", PACKAGE_ID])
+    run_cmd(
+        [
+            *adb_base(adb, serial),
+            "shell",
+            "run-as",
+            PACKAGE_ID,
+            "rm",
+            "-rf",
+            "databases",
+            "files",
+        ]
+    )
+
+
+def send_screenshot_preset(adb: str, serial: str, preset: str, wait_sec: float) -> None:
+    print(f"Applying preset '{preset}'...")
+    run_cmd(
+        [
+            *adb_base(adb, serial),
+            "shell",
+            "am",
+            "start",
+            "--activity-single-top",
+            "-a",
+            DEV_COMMAND_ACTION,
+            "-n",
+            ACTIVITY_COMPONENT,
+            "--es",
+            "screenshot_preset",
+            preset,
+        ]
+    )
+    time.sleep(wait_sec)
+
+
+def capture_webp(adb: str, serial: str, ffmpeg: str, tmp_dir: Path, out_path: Path) -> None:
+    png_bytes = run_cmd([*adb_base(adb, serial), "exec-out", "screencap", "-p"]).stdout
+    if not png_bytes.startswith(b"\x89PNG"):
+        raise RuntimeError(f"screencap did not return valid PNG data for {out_path.name}")
+    tmp_png = tmp_dir / f"{out_path.stem}.png"
+    tmp_png.write_bytes(png_bytes)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    run_cmd(
+        [
+            ffmpeg,
+            "-y",
+            "-loglevel",
+            "error",
+            "-i",
+            str(tmp_png),
+            "-c:v",
+            "libwebp",
+            "-lossless",
+            "0",
+            "-compression_level",
+            "6",
+            "-q:v",
+            "85",
+            str(out_path),
+        ]
+    )
+    print(f"Saved {out_path} ({out_path.stat().st_size:,} bytes)")
+
+
+def verify_dimensions(paths: list[Path]) -> None:
+    sips = shutil.which("sips")
+    if not sips:
+        return
+    res = run_cmd([sips, "-g", "pixelWidth", "-g", "pixelHeight", *(str(p) for p in paths)])
+    print(res.stdout.decode("utf-8", errors="replace").strip())
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Regenerate AndroidAQL WebP screenshots cleanly via debug DEV_COMMAND presets."
+    )
+    parser.add_argument("--serial", help="Target adb device serial (optional when only 1 device connected)")
+    parser.add_argument(
+        "--include-real-trip",
+        action="store_true",
+        help="Also capture docs/screenshots/real_trip_overview.webp from the device's real trip history",
+    )
+    parser.add_argument(
+        "--install-debug",
+        action="store_true",
+        help="Install app/build/outputs/apk/debug/app-debug.apk onto the device before capturing",
+    )
+    args = parser.parse_args()
+
+    root = repo_root()
+    screenshots_dir = root / "docs" / "screenshots"
+    adb = resolve_adb()
+    ffmpeg = resolve_ffmpeg()
+    serial = resolve_device_serial(adb, args.serial)
+    print(f"Using adb device: {serial}")
+
+    if args.install_debug:
+        apk_path = root / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
+        if not apk_path.is_file():
+            raise RuntimeError(f"Debug APK not found at {apk_path}. Run './gradlew assembleDebug' first.")
+        print(f"Installing {apk_path}...")
+        run_cmd([*adb_base(adb, serial), "install", "-r", str(apk_path)], capture=False)
+
+    orig_accel = get_setting(adb, serial, "system", "accelerometer_rotation", "0")
+    orig_rot = get_setting(adb, serial, "system", "user_rotation", "0")
+    backup_bytes = backup_app_data(adb, serial)
+    emergency_backup_path: Path | None = None
+    captured_paths: list[Path] = []
+
+    try:
+        # Ensure device screen is awake & portrait
+        run_cmd([*adb_base(adb, serial), "shell", "input", "keyevent", "KEYCODE_WAKEUP"], check=False)
+        set_rotation(adb, serial, "0", "0")
+        time.sleep(1.0)
+
+        with tempfile.TemporaryDirectory(prefix="aql_shots_") as td:
+            tmp_dir = Path(td)
+
+            if args.include_real_trip:
+                send_screenshot_preset(adb, serial, "real_trip_overview", wait_sec=3.0)
+                real_path = screenshots_dir / "real_trip_overview.webp"
+                capture_webp(adb, serial, ffmpeg, tmp_dir, real_path)
+                captured_paths.append(real_path)
+
+            clear_demo_databases_and_files(adb, serial)
+
+            send_screenshot_preset(adb, serial, "seed_demo_view", wait_sec=3.0)
+            p_view = screenshots_dir / "trips_view_mode.webp"
+            capture_webp(adb, serial, ffmpeg, tmp_dir, p_view)
+            captured_paths.append(p_view)
+
+            send_screenshot_preset(adb, serial, "demo_edit_divider", wait_sec=2.0)
+            p_edit = screenshots_dir / "trips_edit_mode.webp"
+            capture_webp(adb, serial, ffmpeg, tmp_dir, p_edit)
+            captured_paths.append(p_edit)
+
+            send_screenshot_preset(adb, serial, "demo_segment_modal", wait_sec=2.0)
+            p_modal = screenshots_dir / "trips_segment_edit.webp"
+            capture_webp(adb, serial, ffmpeg, tmp_dir, p_modal)
+            captured_paths.append(p_modal)
+
+            set_rotation(adb, serial, "0", "1")
+            time.sleep(2.0)
+            send_screenshot_preset(adb, serial, "demo_landscape_edit", wait_sec=2.5)
+            p_land = screenshots_dir / "trips_landscape.webp"
+            capture_webp(adb, serial, ffmpeg, tmp_dir, p_land)
+            captured_paths.append(p_land)
+
+        verify_dimensions(captured_paths)
+        return 0
+    finally:
+        try:
+            set_rotation(adb, serial, orig_accel, orig_rot)
+        except Exception as exc:
+            print(f"Warning: failed to restore rotation settings: {exc}", file=sys.stderr)
+        try:
+            restore_app_data(adb, serial, backup_bytes)
+        except Exception as exc:
+            if backup_bytes:
+                fd, path_str = tempfile.mkstemp(prefix="aql_live_backup_", suffix=".tar")
+                os.close(fd)
+                emergency_backup_path = Path(path_str)
+                emergency_backup_path.write_bytes(backup_bytes)
+            print(
+                f"ERROR: failed to restore app data cleanly: {exc}\n"
+                + (
+                    f"Saved emergency backup tarball at: {emergency_backup_path}"
+                    if emergency_backup_path
+                    else ""
+                ),
+                file=sys.stderr,
+            )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

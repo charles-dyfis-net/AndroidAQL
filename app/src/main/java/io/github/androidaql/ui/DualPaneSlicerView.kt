@@ -11,7 +11,6 @@ import android.view.MotionEvent
 import android.view.View
 import io.github.androidaql.storage.AqlRingBufferStore
 import io.github.androidaql.storage.SessionSliceRecord
-import io.github.androidaql.storage.SliceCategory
 import io.github.androidaql.util.TemperatureUnitFormatter
 import java.time.Instant
 import java.time.ZoneId
@@ -48,10 +47,8 @@ class DualPaneSlicerView(context: Context) : View(context) {
         }
 
     var cursorEpochSec: Long = 0L
-        private set
 
     var selectedDividerIndex: Int = -1
-        private set
 
     var isEditMode: Boolean = false
         set(value) {
@@ -272,6 +269,49 @@ class DualPaneSlicerView(context: Context) : View(context) {
         style = Paint.Style.FILL
     }
     private var draggingDividerIdx: Int = -1
+    private var downX: Float = 0f
+    private var downY: Float = 0f
+    private var downDividerWasAlreadySelected: Boolean = false
+
+    private data class PaneLayout(
+        val topPaneTop: Float,
+        val topPaneBot: Float,
+        val midPaneTop: Float,
+        val midPaneBot: Float,
+        val botPaneTop: Float,
+        val botPaneBot: Float,
+        val topPaneH: Float,
+        val midPaneH: Float,
+        val botPaneH: Float,
+        val hasSegmentStrip: Boolean
+    )
+
+    private fun computePaneLayout(): PaneLayout {
+        val hasSegmentStrip = slices.isNotEmpty()
+        val effectivePadBottom = if (hasSegmentStrip) 48f * density else padBottom
+        val totalPlotH = max(1f, height - padTop - effectivePadBottom - 2f * paneGap)
+        val topPaneH = totalPlotH * 0.42f
+        val midPaneH = totalPlotH * 0.29f
+        val botPaneH = totalPlotH * 0.29f
+        val topPaneTop = padTop
+        val topPaneBot = topPaneTop + topPaneH
+        val midPaneTop = topPaneBot + paneGap
+        val midPaneBot = midPaneTop + midPaneH
+        val botPaneTop = midPaneBot + paneGap
+        val botPaneBot = botPaneTop + botPaneH
+        return PaneLayout(
+            topPaneTop = topPaneTop,
+            topPaneBot = topPaneBot,
+            midPaneTop = midPaneTop,
+            midPaneBot = midPaneBot,
+            botPaneTop = botPaneTop,
+            botPaneBot = botPaneBot,
+            topPaneH = topPaneH,
+            midPaneH = midPaneH,
+            botPaneH = botPaneH,
+            hasSegmentStrip = hasSegmentStrip
+        )
+    }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val desiredH = (desiredHeightDp * density).toInt()
@@ -304,20 +344,17 @@ class DualPaneSlicerView(context: Context) : View(context) {
         val minTs = fixedWindowStartEpochSec ?: slots.first().bucketEpochSec
         val maxTs = max(minTs + 15L, fixedWindowEndEpochSec ?: slots.last().bucketEpochSec)
         val plotW = max(1f, width - padLeft - padRight)
-        val hasSegmentStrip = slices.isNotEmpty()
-        val effectivePadBottom = if (hasSegmentStrip) 48f * density else padBottom
-        val totalPlotH = max(1f, height - padTop - effectivePadBottom - 2f * paneGap)
-
-        val topPaneH = totalPlotH * 0.42f
-        val midPaneH = totalPlotH * 0.29f
-        val botPaneH = totalPlotH * 0.29f
-
-        val topPaneTop = padTop
-        val topPaneBot = topPaneTop + topPaneH
-        val midPaneTop = topPaneBot + paneGap
-        val midPaneBot = midPaneTop + midPaneH
-        val botPaneTop = midPaneBot + paneGap
-        val botPaneBot = botPaneTop + botPaneH
+        val layout = computePaneLayout()
+        val hasSegmentStrip = layout.hasSegmentStrip
+        val topPaneH = layout.topPaneH
+        val midPaneH = layout.midPaneH
+        val botPaneH = layout.botPaneH
+        val topPaneTop = layout.topPaneTop
+        val topPaneBot = layout.topPaneBot
+        val midPaneTop = layout.midPaneTop
+        val midPaneBot = layout.midPaneBot
+        val botPaneTop = layout.botPaneTop
+        val botPaneBot = layout.botPaneBot
 
         fun tsToX(ts: Long): Float {
             val ratio = (ts - minTs).toFloat() / (maxTs - minTs).toFloat()
@@ -328,11 +365,11 @@ class DualPaneSlicerView(context: Context) : View(context) {
         for ((idx, slice) in slices.withIndex()) {
             val x1 = tsToX(slice.startEpochSec)
             val x2 = tsToX(slice.endEpochSec)
-            bgPaint.color = when (slice.category) {
-                SliceCategory.TRANSIT -> Color.parseColor("#1E3A8A33")
-                SliceCategory.DESTINATION -> Color.parseColor("#065F4633")
-                SliceCategory.OUTDOOR_WALK -> Color.parseColor("#713F1233")
-                SliceCategory.OTHER -> if (idx % 2 == 0) Color.parseColor("#1E293B66") else Color.parseColor("#33415555")
+            bgPaint.color = when (idx % 4) {
+                0 -> Color.parseColor("#1E3A8A33")
+                1 -> Color.parseColor("#065F4633")
+                2 -> Color.parseColor("#713F1233")
+                else -> Color.parseColor("#33415555")
             }
             canvas.drawRect(x1, topPaneTop, x2, topPaneBot, bgPaint)
             canvas.drawRect(x1, midPaneTop, x2, midPaneBot, bgPaint)
@@ -594,11 +631,11 @@ class DualPaneSlicerView(context: Context) : View(context) {
                 val barW = x2 - x1
                 if (barW <= 2f * density) continue
                 val isCursorInside = cursorEpochSec in slice.startEpochSec..slice.endEpochSec
-                segmentStripFillPaint.color = when (slice.category) {
-                    SliceCategory.TRANSIT -> Color.parseColor("#1E3A8A")
-                    SliceCategory.DESTINATION -> Color.parseColor("#065F46")
-                    SliceCategory.OUTDOOR_WALK -> Color.parseColor("#78350F")
-                    SliceCategory.OTHER -> if (idx % 2 == 0) Color.parseColor("#1E293B") else Color.parseColor("#334155")
+                segmentStripFillPaint.color = when (idx % 4) {
+                    0 -> Color.parseColor("#1E3A8A")
+                    1 -> Color.parseColor("#065F46")
+                    2 -> Color.parseColor("#78350F")
+                    else -> Color.parseColor("#334155")
                 }
                 segmentStripBorderPaint.color = if (isCursorInside) {
                     Color.parseColor("#38BDF8")
@@ -838,24 +875,44 @@ class DualPaneSlicerView(context: Context) : View(context) {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 parent?.requestDisallowInterceptTouchEvent(true)
+                val layout = computePaneLayout()
+                val inPillBand = event.y in (layout.topPaneBot - 20f * density)..(layout.midPaneTop + 20f * density)
+                val inSegmentStrip = layout.hasSegmentStrip && event.y >= (layout.botPaneBot - 6f * density)
                 var hitDivider = -1
                 if (isEditMode) {
-                    var bestDist = 28f * density
+                    var bestDist = Float.MAX_VALUE
                     for (i in 0 until slices.size - 1) {
-                        val dx = abs(event.x - tsToX(slices[i].endEpochSec))
-                        if (dx <= bestDist) {
+                        val boundaryTs = slices[i].endEpochSec
+                        val allowedDist = when {
+                            inPillBand -> 28f * density
+                            inSegmentStrip -> 20f * density
+                            i == selectedDividerIndex && cursorEpochSec == boundaryTs ->
+                                // Co-located cyan cursor inside Panes 1/2/3: let user drag cursor away freely
+                                -1f
+                            else -> 9f * density
+                        }
+                        if (allowedDist <= 0f) continue
+                        val dx = abs(event.x - tsToX(boundaryTs))
+                        if (dx <= allowedDist && dx < bestDist) {
                             bestDist = dx
                             hitDivider = i
                         }
                     }
                 }
+                downX = event.x
+                downY = event.y
+                downDividerWasAlreadySelected = (hitDivider >= 0 && hitDivider == selectedDividerIndex)
                 if (isEditMode && hitDivider >= 0) {
                     draggingDividerIdx = hitDivider
                     selectedDividerIndex = hitDivider
                     onDividerSelected?.invoke(hitDivider)
                 } else {
+                    val wasSelected = selectedDividerIndex >= 0
                     draggingDividerIdx = -1
                     selectedDividerIndex = -1
+                    if (wasSelected) {
+                        onDividerSelected?.invoke(-1)
+                    }
                     cursorEpochSec = xToTs(event.x)
                     onCursorChanged?.invoke(cursorEpochSec)
                 }
@@ -879,7 +936,16 @@ class DualPaneSlicerView(context: Context) : View(context) {
                 return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (event.actionMasked == MotionEvent.ACTION_UP &&
+                    downDividerWasAlreadySelected &&
+                    abs(event.x - downX) < 6f * density &&
+                    abs(event.y - downY) < 6f * density
+                ) {
+                    selectedDividerIndex = -1
+                    onDividerSelected?.invoke(-1)
+                }
                 draggingDividerIdx = -1
+                downDividerWasAlreadySelected = false
                 parent?.requestDisallowInterceptTouchEvent(false)
                 invalidate()
                 return true

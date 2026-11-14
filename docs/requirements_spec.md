@@ -86,7 +86,7 @@ erDiagram
     KNOWN_PLACE ||--o{ RRD_RING_BUFFER : "known_place_id slot tag"
     EXCURSION ||--o{ SESSION_SLICE : "contains"
     SESSION_SLICE }o--|| SEGMENT_PRESET : "optional quick-tag"
-    EXCURSION ||--o{ PINNED_SLICE_DATA : "freezes raw data for pinned slices/trip"
+    EXCURSION ||--o{ PINNED_SLICE_DATA : "freezes raw data for pinned trip"
     
     MONITOR_DEVICE {
         long id PK
@@ -147,7 +147,6 @@ erDiagram
         long excursion_id FK
         long start_ts
         long end_ts
-        boolean is_pinned "True = Retain this specific slice indefinitely"
         string category "TRANSIT | DESTINATION | OUTDOOR_WALK | OTHER"
         string label "From SEGMENT_PRESET or custom free-text"
         string notes
@@ -156,7 +155,7 @@ erDiagram
     PINNED_SLICE_DATA {
         long id PK
         long excursion_id FK
-        long slice_id FK "Nullable if whole un-sliced excursion is pinned"
+        long slice_id FK "Optional slice reference (null for whole-trip pinned payload)"
         long start_ts
         long end_ts
         blob raw_samples_payload "Immutable full-resolution sensor + movement records"
@@ -186,11 +185,11 @@ erDiagram
 
 ## 4. Tiered Retention & Rollup Policy (Fixed-Size Multi-Archive Ring)
 
-### 4.1 Protection Rules ("Pin Trip for Later Slicing" vs. "Pin Specific Slices for Advocacy")
-* **14-Day Archive 0 Grace Window:** Because Archive 0 holds 14 days of raw 15-second slots in a fixed circular buffer, all excursions and stationary readings automatically retain full fidelity for 14 days without user action.
-* **Two-Level Pinning (`EXCURSION.is_pinned` and `SESSION_SLICE.is_pinned`):**
-  1. **Whole-Trip Bookmark ("Keep for Later Slicing"):** Toggling `EXCURSION.is_pinned = true` (e.g., from the notification button or trip list when the user doesn't have time to slice within 14 days) freezes the entire excursion's raw Archive 0 data into `PINNED_SLICE_DATA`.
-  2. **Per-Slice Advocacy Pinning:** Once a user splits an excursion into segments (e.g., *Outbound Bus*, *Clinic Waiting Room*, *Exam Room*, *Return Bus*), they can pin **individual slices** (`SESSION_SLICE.is_pinned = true`) and unpin the parent excursion—retaining high-resolution data indefinitely *only* for the relevant segments (e.g., the clinic visit) while letting unneeded transit segments age out cleanly.
+### 4.1 Protection Rules (Trip-Level Pinning & Start/End Trimming)
+* **14-Day Archive 0 Grace Window:** Because Archive 0 holds 14 days of raw 15-second slots in a fixed circular buffer, all auto-recorded excursions and stationary readings automatically retain full fidelity for 14 days without user action. Auto-recorded trips are **not** kept beyond 14 days unless explicitly pinned (`EXCURSION.is_pinned = true`).
+* **Whole-Trip Pinning & Trimming (`EXCURSION.is_pinned`):**
+  1. **Whole-Trip Retention:** Toggling `EXCURSION.is_pinned = true` (from the trip header pill `⏳ 14d • 📌 Pin`, **Manage Trip**, or the ongoing notification `"Bookmark Trip"` action) freezes the trip's raw Archive 0 data into `PINNED_SLICE_DATA` (`AQLP`). Manually carved trips from **`14d Window`** are automatically pinned (`is_pinned = true`) on creation, and renaming an unpinned auto-recorded trip pre-selects pinning. Unpinning a trip whose raw data has already rolled out of the 14-day ring buffer warns and deletes through the same confirmation flow as trip deletion.
+  2. **Boundary Trimming Instead of Per-Slice Pinning:** Rather than pinning individual segments, unwanted leading or trailing spans (such as dead time at Home or a post-outing buffer) can be dropped cleanly via **`🗑️ Drop #1`** / **`🗑️ Drop #N`**, which updates `[excursion.start_ts, excursion.end_ts]` and re-extracts `PINNED_SLICE_DATA` if pinned so only the desired excursion span is kept.
 
 ### 4.2 Default Multi-Archive Ring Specification
 Each `MONITOR_DEVICE` ring buffer file is pre-allocated with three consolidation archives (preserving `mean`, `min`, and `max` across rollups):
@@ -215,7 +214,7 @@ To allow an external desktop/CLI tool to generate rich PDF advocacy reports dire
 | :--- | :--- |
 | **Time & Resolution** | `timestamp_iso8601` (with local timezone offset), `timestamp_epoch_ms`, `resolution_sec`, `sample_count` |
 | **Device Metadata** | `device_nickname`, `device_model`, `source_type` (`BLE_ADV`) |
-| **Context & Slice Metadata** | `excursion_id`, `excursion_title`, `slice_id`, `slice_category` (`TRANSIT`, `DESTINATION`, etc.), `slice_label` (e.g., `"Waiting Room"`), `slice_notes`, `known_place_label` |
+| **Context & Slice Metadata** | `excursion_id`, `excursion_title`, `slice_id`, `slice_label` (e.g., `"Waiting Room"`), `slice_notes`, `known_place_label` |
 | **Air Quality Metrics** | `co2_ppm_mean`, `co2_ppm_min`, `co2_ppm_max`, `pm25_ugm3_mean`, `pm25_ugm3_max`, `pm10_ugm3_mean`, `pm10_ugm3_max`, `temp_c`, `humidity_pct` |
 | **Movement & Signal** | `speed_mps`, `delta_distance_m`, `gps_accuracy_m`, `activity_type`, `rssi_dbm`, `battery_pct` (+ `latitude`, `longitude` only if opt-in enabled and user checks *"Include coordinates in export"*) |
 
@@ -339,13 +338,13 @@ flowchart TD
    * Rather than compressing the entire 14-day Archive 0 ring buffer into the width of a phone screen, Portrait mode provides a **`🗓️ 14d Window`** selector dialog.
    * Users select a Day (`Today`, `Yesterday`, `-2d` … `-13d`), Start Time (30-minute increments), and Window Duration (`30m` to `6h`) to either **Preview Window Only** on the 3-pane chart or **Carve as New Trip** (creating an `EXCURSION` over `[start_ts, end_ts]` ready for slicing).
 4. **Clean Segment Cards & Focused Segment Edit Modal (`✏️ Edit`):**
-   * Rather than cluttering every segment card with an inline row of fixed preset buttons, each segment card shows only the segment title, time span, summary stats, `Pin Forever`, `Include in CSV`, and an **`✏️ Edit`** button.
+   * Rather than cluttering every segment card with an inline row of fixed preset buttons or per-segment retention checkboxes, each segment card shows only the segment title, time span, trim (`🗑️ Drop #1` / `#N`) when applicable, **`✏️ Edit`**, summary stats, and **`📤 Export CSV`** — while trip retention (**`⏳ 14d • 📌 Pin`** / **`📌 Pinned`**) and trip renaming/deletion live at the trip level.
    * Tapping **`✏️ Edit`** opens the **Edit Segment Modal**, which provides:
      * A **freeform Segment Label `EditText`** (so one-time labels like *"Dr. Smith Exam Room 4B"* or *" Friend's Car"* can be typed directly without creating a reusable preset),
-     * A **Category** dropdown (`TRANSIT`, `DESTINATION`, `OUTDOOR_WALK`, `OTHER`),
-     * Optional **Quick-Fill Preset Chips** inside the modal that populate the label and category fields when tapped,
-     * A **freeform Notes `EditText`**, and
-     * A **Merge with Next ↓** action (when an adjacent segment follows).
+     * Optional **Quick-Fill Preset Chips** inside the modal that populate the label field when tapped,
+     * A **freeform Notes `EditText`**,
+     * A **Merge with Next ↓** action (when an adjacent segment follows), and
+     * A **Drop First/Last Segment** action (to trim the start or end of the trip cleanly).
 5. **Android 15+ Edge-to-Edge Window Insets:**
    * Uses `Theme.MaterialComponents.DayNight.NoActionBar` and applies `WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()` padding on the root view so neither the top header nor the bottom navigation bar overlaps the system status bar, camera cutout, or gesture navigation bar.
 

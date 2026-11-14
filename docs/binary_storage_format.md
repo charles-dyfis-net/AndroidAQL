@@ -93,5 +93,5 @@ When a sample arrives at `ts_sec`, the writer updates each archive $i \in \{0, 1
 
 ---
 
-## 6. Pinned Slice Binary Payload Format (`PINNED_SLICE_DATA`)
-When an excursion or session slice is pinned (`is_pinned = true`), the contiguous sequence of valid 32-byte slots from Archive 0 within `[start_ts_sec, end_ts_sec]` is extracted verbatim into a compact blob prefixed with an 8-byte header (`magic = "AQLP"`, `uint32 slot_count`), followed by `slot_count * 32` bytes using the identical Section 4 slot layout.
+## 6. Pinned Trip Binary Payload Format (`PINNED_SLICE_DATA`)
+When an excursion (trip) is pinned (`is_pinned = true`), the contiguous sequence of valid 32-byte slots from Archive 0 within `[start_ts_sec, end_ts_sec]` is extracted verbatim into a compact blob prefixed with an 8-byte header (`magic = "AQLP"`, `uint32 slot_count`), followed by `slot_count * 32` bytes using the identical Section 4 slot layout.

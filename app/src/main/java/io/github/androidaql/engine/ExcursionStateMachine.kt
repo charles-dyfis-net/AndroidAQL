@@ -40,25 +40,65 @@ class ExcursionStateMachine(
     var currentKnownPlaceId: Int = 0
         private set
 
+    var hasConfiguredKnownPlaces: Boolean = true
+        private set
+
+    var isManualExcursionOverride: Boolean = false
+        private set
+
+    private var manualStartSuppressedPlaceId: Int = 0
+    private var manualEndHoldUntilKnownPlaceOrBleTimeout: Boolean = false
+
     var userExcursionBleMode: BleCollectionMode = BleCollectionMode.PERIODIC_GATT_KEEPALIVE
 
     @Synchronized
     fun onBleAdvertisement(
         timestampEpochSec: Long,
-        connectedKnownPlaceId: Int
+        connectedKnownPlaceId: Int,
+        hasConfiguredKnownPlaces: Boolean = this.hasConfiguredKnownPlaces
     ): TransitionOutput {
         lastBlePacketEpochSec = max(lastBlePacketEpochSec, timestampEpochSec)
+        if (connectedKnownPlaceId != manualStartSuppressedPlaceId) {
+            manualStartSuppressedPlaceId = 0
+        }
         currentKnownPlaceId = connectedKnownPlaceId
+        this.hasConfiguredKnownPlaces = hasConfiguredKnownPlaces
         return evaluate(timestampEpochSec)
     }
 
     @Synchronized
     fun onWifiContextChanged(
         timestampEpochSec: Long,
-        connectedKnownPlaceId: Int
+        connectedKnownPlaceId: Int,
+        hasConfiguredKnownPlaces: Boolean = this.hasConfiguredKnownPlaces
     ): TransitionOutput {
+        if (connectedKnownPlaceId != manualStartSuppressedPlaceId) {
+            manualStartSuppressedPlaceId = 0
+        }
         currentKnownPlaceId = connectedKnownPlaceId
+        this.hasConfiguredKnownPlaces = hasConfiguredKnownPlaces
         return evaluate(timestampEpochSec)
+    }
+
+    @Synchronized
+    fun onManualTripStart(timestampEpochSec: Long): TransitionOutput {
+        isManualExcursionOverride = true
+        manualEndHoldUntilKnownPlaceOrBleTimeout = false
+        manualStartSuppressedPlaceId = currentKnownPlaceId
+        if (lastBlePacketEpochSec < 0L || (timestampEpochSec - lastBlePacketEpochSec) > excursionCloseTimeoutSec) {
+            lastBlePacketEpochSec = timestampEpochSec - gpsPauseTimeoutSec - 1L
+        }
+        return evaluate(timestampEpochSec)
+    }
+
+    @Synchronized
+    fun onManualTripEnd(timestampEpochSec: Long): TransitionOutput {
+        isManualExcursionOverride = false
+        manualStartSuppressedPlaceId = 0
+        if (currentKnownPlaceId == 0) {
+            manualEndHoldUntilKnownPlaceOrBleTimeout = true
+        }
+        return evaluate(timestampEpochSec, forceClose = true)
     }
 
     @Synchronized
@@ -66,11 +106,22 @@ class ExcursionStateMachine(
         return evaluate(timestampEpochSec)
     }
 
-    private fun evaluate(nowEpochSec: Long): TransitionOutput {
+    private fun evaluate(nowEpochSec: Long, forceClose: Boolean = false): TransitionOutput {
         val prev = currentState
         val bleAgeSec = if (lastBlePacketEpochSec < 0L) Long.MAX_VALUE else (nowEpochSec - lastBlePacketEpochSec)
         val isBleFresh = bleAgeSec <= gpsPauseTimeoutSec
-        val isAtKnownAp = currentKnownPlaceId > 0
+        if (!forceClose && (currentKnownPlaceId > 0 || !isBleFresh)) {
+            manualEndHoldUntilKnownPlaceOrBleTimeout = false
+        }
+        val effectiveKnownPlaceId = if (currentKnownPlaceId > 0 && currentKnownPlaceId != manualStartSuppressedPlaceId) {
+            currentKnownPlaceId
+        } else {
+            0
+        }
+        val isStationaryOrUnconfigured = forceClose ||
+            (effectiveKnownPlaceId > 0) ||
+            (!hasConfiguredKnownPlaces && !isManualExcursionOverride) ||
+            manualEndHoldUntilKnownPlaceOrBleTimeout
 
         var startedExcursion = false
         var closedExcursion = false
@@ -78,8 +129,15 @@ class ExcursionStateMachine(
         val next = when (prev) {
             CollectorState.IDLE_OUT_OF_RANGE -> {
                 when {
-                    !isBleFresh -> CollectorState.IDLE_OUT_OF_RANGE
-                    isAtKnownAp -> CollectorState.STATIONARY_KNOWN_AP
+                    !isBleFresh -> {
+                        if (isManualExcursionOverride && bleAgeSec <= excursionCloseTimeoutSec && !isStationaryOrUnconfigured) {
+                            startedExcursion = true
+                            CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED
+                        } else {
+                            CollectorState.IDLE_OUT_OF_RANGE
+                        }
+                    }
+                    isStationaryOrUnconfigured -> CollectorState.STATIONARY_KNOWN_AP
                     else -> {
                         startedExcursion = true
                         CollectorState.FIELD_EXCURSION_ACTIVE
@@ -88,8 +146,15 @@ class ExcursionStateMachine(
             }
             CollectorState.STATIONARY_KNOWN_AP -> {
                 when {
-                    !isBleFresh -> CollectorState.IDLE_OUT_OF_RANGE
-                    isAtKnownAp -> CollectorState.STATIONARY_KNOWN_AP
+                    !isBleFresh -> {
+                        if (isManualExcursionOverride && bleAgeSec <= excursionCloseTimeoutSec && !isStationaryOrUnconfigured) {
+                            startedExcursion = true
+                            CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED
+                        } else {
+                            CollectorState.IDLE_OUT_OF_RANGE
+                        }
+                    }
+                    isStationaryOrUnconfigured -> CollectorState.STATIONARY_KNOWN_AP
                     else -> {
                         startedExcursion = true
                         CollectorState.FIELD_EXCURSION_ACTIVE
@@ -98,7 +163,7 @@ class ExcursionStateMachine(
             }
             CollectorState.FIELD_EXCURSION_ACTIVE -> {
                 when {
-                    isAtKnownAp -> {
+                    isStationaryOrUnconfigured -> {
                         closedExcursion = true
                         if (isBleFresh) CollectorState.STATIONARY_KNOWN_AP else CollectorState.IDLE_OUT_OF_RANGE
                     }
@@ -112,7 +177,7 @@ class ExcursionStateMachine(
             }
             CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED -> {
                 when {
-                    isAtKnownAp -> {
+                    isStationaryOrUnconfigured -> {
                         closedExcursion = true
                         if (isBleFresh) CollectorState.STATIONARY_KNOWN_AP else CollectorState.IDLE_OUT_OF_RANGE
                     }
@@ -124,6 +189,11 @@ class ExcursionStateMachine(
                     }
                 }
             }
+        }
+
+        if (closedExcursion) {
+            isManualExcursionOverride = false
+            manualStartSuppressedPlaceId = 0
         }
 
         currentState = next
@@ -146,7 +216,7 @@ class ExcursionStateMachine(
             currentState = next,
             shouldRunGps = shouldRunGps,
             effectiveBleMode = effectiveBleMode,
-            activeKnownPlaceId = if (next == CollectorState.STATIONARY_KNOWN_AP) currentKnownPlaceId else 0,
+            activeKnownPlaceId = if (next == CollectorState.STATIONARY_KNOWN_AP && effectiveKnownPlaceId > 0) effectiveKnownPlaceId else 0,
             startedNewExcursion = startedExcursion,
             closedExcursion = closedExcursion
         )

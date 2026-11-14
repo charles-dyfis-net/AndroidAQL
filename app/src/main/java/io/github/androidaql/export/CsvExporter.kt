@@ -11,7 +11,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
- * Generates RFC 4180 CSV exports conforming to `docs/csv_export_schema.md` (27 columns).
+ * Generates RFC 4180 CSV exports conforming to `docs/csv_export_schema.md` (26 columns).
  * Self-contained so external PDF/advocacy report generators can reconstruct trip slices,
  * air quality stats, and GPS confidence bands directly from a single CSV file.
  */
@@ -29,7 +29,6 @@ object CsvExporter {
         "excursion_id",
         "excursion_title",
         "slice_id",
-        "slice_category",
         "slice_label",
         "slice_notes",
         "co2_ppm_mean",
@@ -97,7 +96,6 @@ object CsvExporter {
                 excursion.id.toString(),
                 escapeCsv(excursion.title),
                 matchingSlice?.id?.toString() ?: "",
-                matchingSlice?.category?.name ?: "",
                 escapeCsv(matchingSlice?.label ?: ""),
                 escapeCsv(matchingSlice?.notes ?: ""),
                 slot.co2PpmMean.toString(),
@@ -117,6 +115,35 @@ object CsvExporter {
             sb.append(row.joinToString(",")).append('\n')
         }
         return sb.toString()
+    }
+
+    /**
+     * Generates a self-contained RFC 4180 time-series CSV for a single [SessionSliceRecord],
+     * including every sample slot inside `[slice.startEpochSec, slice.endEpochSec]` in
+     * chronological order for downstream charting and reporting tools.
+     */
+    fun exportSliceCsv(
+        device: MonitorDevice,
+        excursion: ExcursionRecord,
+        slice: SessionSliceRecord,
+        slots: List<AqlRingBufferStore.RingSlotRecord>,
+        knownPlacesById: Map<Int, KnownPlace> = emptyMap(),
+        resolutionSec: Int = 15,
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): String {
+        val sliceSlots = slots
+            .filter { it.bucketEpochSec in slice.startEpochSec..slice.endEpochSec }
+            .sortedBy { it.bucketEpochSec }
+        return exportExcursionCsv(
+            device = device,
+            excursion = excursion,
+            slices = listOf(slice),
+            slots = sliceSlots,
+            knownPlacesById = knownPlacesById,
+            resolutionSec = resolutionSec,
+            onlySelectedForExport = false,
+            zoneId = zoneId
+        )
     }
 
     fun escapeCsv(value: String): String {
