@@ -1,6 +1,6 @@
 # Privacy Policy for AndroidAQL (`net.dyfis.androidaql`)
 
-**Effective Date:** November 11, 2026  
+**Effective Date:** November 13, 2026  
 **Developer:** Charles Duffy (`charles-dyfis-net` / `dyfis.net`)
 
 ## 1. Overview — 100% Local On-Device Operation
@@ -24,7 +24,11 @@
   2. **Field Excursion Movement Speed:** When your Qingping air quality monitor is actively broadcasting outside of a Saved Wi-Fi Place, AndroidAQL calculates instantaneous movement speed (meters per second / mph) and horizontal GPS accuracy (meters) alongside your air quality readings so you can distinguish transit segments from stationary indoor destinations on the Trip Slicer chart.
 - **No Raw Coordinates Persisted:** By default, AndroidAQL converts GPS updates into scalar movement speed (m/s) and horizontal accuracy (m) in memory and **does not store raw latitude or longitude coordinates to disk**.
 
-### C. Notifications (`POST_NOTIFICATIONS`)
+### C. Physical Activity (`ACTIVITY_RECOGNITION`)
+- **Purpose:** Used strictly on-device during active Field Excursions to read Android's hardware step detector / step counter so walking pace remains visible on the movement chart when indoor or urban-canyon GPS accuracy is weak (> 50 m) or temporarily obscured.
+- **Storage & Privacy:** Step events are kept only in a short-lived (~10-second) in-memory sliding window to estimate walking speed (m/s) alongside your air quality readings. Cumulative step counts are never stored to disk, logged, or transmitted.
+
+### D. Notifications (`POST_NOTIFICATIONS`)
 - **Purpose:** Used to display the ongoing foreground collector status notification (showing live CO₂ and PM2.5 levels) and optional user-configurable high-CO₂, high-PM2.5, or low-battery alerts.
 
 ---

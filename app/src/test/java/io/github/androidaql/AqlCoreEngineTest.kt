@@ -695,4 +695,153 @@ class AqlCoreEngineTest {
         assertTrue("Expected walking >= 0.35 of pane on 12m/s scale, was $walkRatioCity", walkRatioCity >= 0.35f)
         assertTrue(bikeRatioCity > walkRatioCity + 0.25f)
     }
+
+    @Test
+    fun testStepMovementEstimatorAndWeakGpsFusion() {
+        val estimator = io.github.androidaql.engine.StepMovementEstimator()
+        val t0 = 100_000L
+
+        // Fewer than 3 steps should not trigger false walking
+        estimator.onStepDetected(t0)
+        estimator.onStepDetected(t0 + 600L)
+        assertNull(estimator.estimateSpeedMps(t0 + 700L))
+
+        // Steady ~1.8 steps/sec walk produces ~1.4 m/s
+        for (i in 2..10) {
+            estimator.onStepDetected(t0 + i * 550L)
+        }
+        val walkingSpeed = estimator.estimateSpeedMps(t0 + 5_800L)
+        assertNotNull(walkingSpeed)
+        assertTrue("Expected walking speed in [1.1, 1.8], got $walkingSpeed", walkingSpeed!! in 1.1f..1.8f)
+
+        // Decays cleanly to null after >4s without steps
+        assertNull(estimator.estimateSpeedMps(t0 + 10_500L))
+
+        // Step counter batch fallback ignores boot baseline and estimates delta cleanly
+        estimator.reset()
+        estimator.onStepCounterTotal(totalStepsSinceBoot = 4_200L, timestampMs = t0)
+        assertNull(estimator.estimateSpeedMps(t0 + 100L))
+        estimator.onStepCounterTotal(totalStepsSinceBoot = 4_210L, timestampMs = t0 + 6_000L)
+        val counterWalk = estimator.estimateSpeedMps(t0 + 6_500L)
+        assertNotNull(counterWalk)
+        assertTrue("Expected step counter walk in [0.8, 2.0], got $counterWalk", counterWalk!! in 0.8f..2.0f)
+
+        // Fusion rules:
+        // 1. Weak GPS (±100m, even with a coarse 4.5 m/s AP snap) + walking steps -> STEP_CADENCE wins
+        val weakGpsWalking = io.github.androidaql.engine.StepMovementEstimator.fuseMovementSpeed(
+            gpsSpeedMps = 4.5f,
+            gpsAccuracyM = 100f,
+            stepSpeedMps = 1.35f,
+            isStepSensorActive = true
+        )
+        assertEquals(1.35f, weakGpsWalking.speedMps!!, 1e-4f)
+        assertEquals(io.github.androidaql.engine.StepMovementEstimator.SpeedSource.STEP_CADENCE, weakGpsWalking.source)
+
+        // 2. Healthy GPS (±25m) meandering slowly (0.35 m/s net anchor displacement) + brisk steps -> max() picks 1.40 m/s
+        val outdoorMeander = io.github.androidaql.engine.StepMovementEstimator.fuseMovementSpeed(
+            gpsSpeedMps = 0.35f,
+            gpsAccuracyM = 25f,
+            stepSpeedMps = 1.40f,
+            isStepSensorActive = true
+        )
+        assertEquals(1.40f, outdoorMeander.speedMps!!, 1e-4f)
+        assertEquals(io.github.androidaql.engine.StepMovementEstimator.SpeedSource.STEP_CADENCE, outdoorMeander.source)
+
+        // 3. Strong GPS driving/transit (8.5 m/s, ±8m) -> max() picks 8.5 m/s
+        val strongGpsDriving = io.github.androidaql.engine.StepMovementEstimator.fuseMovementSpeed(
+            gpsSpeedMps = 8.5f,
+            gpsAccuracyM = 8f,
+            stepSpeedMps = 1.2f,
+            isStepSensorActive = true
+        )
+        assertEquals(8.5f, strongGpsDriving.speedMps!!, 1e-4f)
+        assertEquals(io.github.androidaql.engine.StepMovementEstimator.SpeedSource.GPS, strongGpsDriving.source)
+
+        // 4. Weak GPS (±100m, 0.0 m/s) + stationary (null steps) -> 0.0 m/s GPS
+        val weakGpsStill = io.github.androidaql.engine.StepMovementEstimator.fuseMovementSpeed(
+            gpsSpeedMps = 0f,
+            gpsAccuracyM = 100f,
+            stepSpeedMps = null,
+            isStepSensorActive = true
+        )
+        assertEquals(0f, weakGpsStill.speedMps!!, 1e-4f)
+        assertEquals(io.github.androidaql.engine.StepMovementEstimator.SpeedSource.GPS, weakGpsStill.source)
+
+        // 5. GPS Off + step sensor active while stationary -> 0f (continuous curve, not null / "GPS Off")
+        val gpsOffStepStill = io.github.androidaql.engine.StepMovementEstimator.fuseMovementSpeed(
+            gpsSpeedMps = null,
+            gpsAccuracyM = null,
+            stepSpeedMps = null,
+            isStepSensorActive = true
+        )
+        assertEquals(0f, gpsOffStepStill.speedMps!!, 1e-4f)
+        assertEquals(io.github.androidaql.engine.StepMovementEstimator.SpeedSource.STEP_CADENCE, gpsOffStepStill.source)
+
+        // 6. Both GPS Off and step sensor off -> null (NONE -> "GPS Off")
+        val bothOff = io.github.androidaql.engine.StepMovementEstimator.fuseMovementSpeed(
+            gpsSpeedMps = null,
+            gpsAccuracyM = null,
+            stepSpeedMps = null,
+            isStepSensorActive = false
+        )
+        assertNull(bothOff.speedMps)
+        assertEquals(io.github.androidaql.engine.StepMovementEstimator.SpeedSource.NONE, bothOff.source)
+
+        // 7. Ring buffer clears stale weak-GPS accuracy when a step-estimated sample supersedes it
+        val tmpDir = kotlin.io.path.createTempDirectory("aql_step_ring_test").toFile()
+        try {
+            val store = AqlRingBufferStore(File(tmpDir, "step_test.aqlring"))
+            val bucketBaseSec = 1_700_000_010L
+            // First packet: stationary weak GPS
+            store.writeSample(
+                AqlRingBufferStore.RawSampleInput(
+                    timestampEpochSec = bucketBaseSec,
+                    knownPlaceId = 0,
+                    co2Ppm = 780,
+                    pm25Ugm3 = 2,
+                    pm10Ugm3 = 3,
+                    tempC = 21.0f,
+                    humidityPct = 42.0f,
+                    speedMps = 0.0f,
+                    gpsAccuracyM = 100.0f
+                )
+            )
+            // Second packet in same 15s bucket: step-derived walking (null GPS accuracy)
+            store.writeSample(
+                AqlRingBufferStore.RawSampleInput(
+                    timestampEpochSec = bucketBaseSec + 3,
+                    knownPlaceId = 0,
+                    co2Ppm = 785,
+                    pm25Ugm3 = 2,
+                    pm10Ugm3 = 3,
+                    tempC = 21.0f,
+                    humidityPct = 42.0f,
+                    speedMps = 1.4f,
+                    gpsAccuracyM = null
+                )
+            )
+            // Third packet in same 15s bucket: user pauses (GPS emits 0.0 m/s with 11.5m accuracy)
+            // Must NOT overwrite the step-estimated bucket back into a GPS-attributed bucket.
+            store.writeSample(
+                AqlRingBufferStore.RawSampleInput(
+                    timestampEpochSec = bucketBaseSec + 4,
+                    knownPlaceId = 0,
+                    co2Ppm = 786,
+                    pm25Ugm3 = 2,
+                    pm10Ugm3 = 3,
+                    tempC = 21.0f,
+                    humidityPct = 42.0f,
+                    speedMps = 0.0f,
+                    gpsAccuracyM = 11.5f
+                )
+            )
+            val slots = store.queryRange(0, bucketBaseSec - 15, bucketBaseSec + 15)
+            assertEquals(1, slots.size)
+            assertNull("Expected gpsAccuracyM cleared to null for step-estimated bucket", slots[0].gpsAccuracyM)
+            assertTrue("Expected positive step-derived speed, got ${slots[0].speedMps}", (slots[0].speedMps ?: 0f) > 0.3f)
+            store.close()
+        } finally {
+            tmpDir.deleteRecursively()
+        }
+    }
 }

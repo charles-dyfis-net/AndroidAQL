@@ -25,6 +25,10 @@ import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
@@ -39,6 +43,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelUuid
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import io.github.androidaql.R
@@ -47,6 +52,7 @@ import io.github.androidaql.ble.QingpingFrameAssembler
 import io.github.androidaql.engine.AlertEvaluator
 import io.github.androidaql.engine.ExcursionStateMachine
 import io.github.androidaql.engine.GpsMovementFilter
+import io.github.androidaql.engine.StepMovementEstimator
 import io.github.androidaql.storage.AqlRingBufferStore
 import io.github.androidaql.storage.BleCollectionMode
 import io.github.androidaql.storage.KnownPlace
@@ -170,7 +176,9 @@ class AqlCollectorService : Service() {
         val mergedHumidityPct: Float,
         val mergedBatteryPct: Int,
         val isGpsActive: Boolean,
+        val isStepSensorActive: Boolean,
         val currentSpeedMps: Float?,
+        val currentSpeedSource: StepMovementEstimator.SpeedSource,
         val currentGpsAccuracyM: Float?,
         val gattConnectionStatus: String,
         val gattDiscoveredServicesLog: List<String>,
@@ -190,6 +198,7 @@ class AqlCollectorService : Service() {
     val stateMachine = ExcursionStateMachine()
     val alertEvaluator = AlertEvaluator()
     val gpsMovementFilter = GpsMovementFilter()
+    val stepMovementEstimator = StepMovementEstimator()
     private val frameAssembler = QingpingFrameAssembler()
 
     private var bluetoothAdapter: BluetoothAdapter? = null
@@ -236,8 +245,14 @@ class AqlCollectorService : Service() {
     private var locationManager: LocationManager? = null
     private var isLocationActive = false
     private var lastLocationFix: Location? = null
+    private var latestGpsFilteredSpeedMps: Float? = null
     private var latestSpeedMps: Float? = null
+    private var latestSpeedSource: StepMovementEstimator.SpeedSource = StepMovementEstimator.SpeedSource.NONE
     private var latestGpsAccuracyM: Float? = null
+
+    private var sensorManager: SensorManager? = null
+    private var activeStepSensor: Sensor? = null
+    private var isStepSensorActive = false
 
     private var activeExcursionId: Long? = null
     private var lastSampledFrame: QingpingBleParser.DecodedQingpingFrame? = null
@@ -269,6 +284,7 @@ class AqlCollectorService : Service() {
             val nowSec = System.currentTimeMillis() / 1000L
             val transition = stateMachine.onTimerTick(nowSec)
             applyStateTransition(transition, nowSec)
+            refreshEffectiveSpeed()
             restartScanIfStalled()
             updateOngoingForegroundNotification()
             notifyListeners()
@@ -349,6 +365,7 @@ class AqlCollectorService : Service() {
         bleScanner = bluetoothAdapter?.bluetoothLeScanner
         connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
 
         createNotificationChannels()
         registerWifiCallback()
@@ -636,6 +653,7 @@ class AqlCollectorService : Service() {
         stopBleScan()
         disconnectGatt()
         stopGpsCollection()
+        stopStepCollection()
         unregisterWifiCallback()
         ringStore.close()
         metadataDb.close()
@@ -1133,6 +1151,18 @@ class AqlCollectorService : Service() {
 
         // Write sample to constant-size .aqlring binary buffer once NDIR CO2 warmup is complete
         if (decoded.hasEnvironmentalMetrics && latestCo2Ppm > 0) {
+            refreshEffectiveSpeed()
+            val recordSpeed = transition.activeKnownPlaceId == 0 &&
+                (transition.shouldRunGps || latestSpeedSource == StepMovementEstimator.SpeedSource.STEP_CADENCE)
+            val recordedGpsAccuracy = if (
+                recordSpeed &&
+                transition.shouldRunGps &&
+                latestSpeedSource != StepMovementEstimator.SpeedSource.STEP_CADENCE
+            ) {
+                latestGpsAccuracyM
+            } else {
+                null
+            }
             ringStore.writeSample(
                 AqlRingBufferStore.RawSampleInput(
                     timestampEpochSec = nowSec,
@@ -1144,8 +1174,8 @@ class AqlCollectorService : Service() {
                     humidityPct = latestHumidityPct,
                     batteryPct = latestBatteryPct,
                     rssiDbm = decoded.rssiDbm,
-                    speedMps = if (transition.shouldRunGps) latestSpeedMps else null,
-                    gpsAccuracyM = if (transition.shouldRunGps) latestGpsAccuracyM else null
+                    speedMps = if (recordSpeed) latestSpeedMps else null,
+                    gpsAccuracyM = recordedGpsAccuracy
                 )
             )
             activeExcursionId?.let { excId ->
@@ -1199,6 +1229,12 @@ class AqlCollectorService : Service() {
             startGpsCollection()
         } else {
             stopGpsCollection()
+        }
+
+        if (transition.currentState == ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE) {
+            startStepCollection()
+        } else {
+            stopStepCollection()
         }
 
         if (transition.currentState == ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE) {
@@ -2106,8 +2142,9 @@ class AqlCollectorService : Service() {
             isLocationActive = false
             lastLocationFix = null
             gpsMovementFilter.reset()
-            latestSpeedMps = null
+            latestGpsFilteredSpeedMps = null
             latestGpsAccuracyM = null
+            refreshEffectiveSpeed()
             startForegroundWithCurrentType()
         }
     }
@@ -2123,10 +2160,109 @@ class AqlCollectorService : Service() {
             dopplerSpeedMps = dopplerSpd
         )
         latestGpsAccuracyM = filtered.horizontalAccuracyM
-        latestSpeedMps = filtered.speedMps
+        latestGpsFilteredSpeedMps = filtered.speedMps
         lastLocationFix = location
+        refreshEffectiveSpeed()
         // Note: Raw latitude & longitude are intentionally not persisted to disk by default.
         notifyListeners()
+    }
+
+    fun refreshStepSensorRegistration() {
+        val nowSec = System.currentTimeMillis() / 1000L
+        val transition = stateMachine.onTimerTick(nowSec)
+        if (transition.currentState == ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE) {
+            startStepCollection()
+        } else {
+            stopStepCollection()
+        }
+        refreshEffectiveSpeed()
+        updateOngoingForegroundNotification()
+        notifyListeners()
+    }
+
+    private fun startStepCollection() {
+        if (isStepSensorActive) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        val sm = sensorManager ?: return
+        val sensor = sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
+            ?: sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
+            ?: return
+        try {
+            stepMovementEstimator.reset()
+            val registered = sm.registerListener(
+                stepSensorListener,
+                sensor,
+                SensorManager.SENSOR_DELAY_NORMAL,
+                0,
+                mainHandler
+            )
+            if (registered) {
+                activeStepSensor = sensor
+                isStepSensorActive = true
+            }
+        } catch (_: SecurityException) {
+            isStepSensorActive = false
+            activeStepSensor = null
+        } catch (_: Exception) {
+            isStepSensorActive = false
+            activeStepSensor = null
+        }
+    }
+
+    private fun stopStepCollection() {
+        if (isStepSensorActive) {
+            try {
+                sensorManager?.unregisterListener(stepSensorListener)
+            } catch (_: Exception) {
+            }
+        }
+        isStepSensorActive = false
+        activeStepSensor = null
+        stepMovementEstimator.reset()
+        refreshEffectiveSpeed()
+    }
+
+    private fun refreshEffectiveSpeed() {
+        val stepSpd = if (isStepSensorActive) {
+            stepMovementEstimator.estimateSpeedMps(SystemClock.elapsedRealtime())
+        } else {
+            null
+        }
+        val fused = StepMovementEstimator.fuseMovementSpeed(
+            gpsSpeedMps = latestGpsFilteredSpeedMps,
+            gpsAccuracyM = latestGpsAccuracyM,
+            stepSpeedMps = stepSpd,
+            isStepSensorActive = isStepSensorActive
+        )
+        latestSpeedMps = fused.speedMps
+        latestSpeedSource = fused.source
+    }
+
+    private val stepSensorListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            val nowElapsedMs = SystemClock.elapsedRealtime()
+            val rawEventElapsedMs = event.timestamp / 1_000_000L
+            val deltaMs = kotlin.math.abs(nowElapsedMs - rawEventElapsedMs)
+            val tsMs = if (rawEventElapsedMs > 0L && deltaMs <= 60_000L) rawEventElapsedMs else nowElapsedMs
+            when (event.sensor.type) {
+                Sensor.TYPE_STEP_DETECTOR -> {
+                    val count = event.values.size.coerceAtLeast(1)
+                    stepMovementEstimator.onStepDetected(tsMs, count)
+                }
+                Sensor.TYPE_STEP_COUNTER -> {
+                    val totalSteps = event.values.firstOrNull()?.toLong() ?: return
+                    stepMovementEstimator.onStepCounterTotal(totalSteps, tsMs)
+                }
+            }
+            refreshEffectiveSpeed()
+            notifyListeners()
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
     }
 
     private fun registerWifiCallback() {
@@ -2246,8 +2382,11 @@ class AqlCollectorService : Service() {
         val contextTitle = when (stateMachine.currentState) {
             ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP ->
                 "🏠 At ${matchedPlace?.label ?: "Saved Place"} (GPS Off)"
-            ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE ->
-                if (isLocationActive) "🚶 On a Trip (GPS Movement Active)" else "🚶 On a Trip (GPS Off)"
+            ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE -> when {
+                isLocationActive -> "🚶 On a Trip (GPS Movement Active)"
+                isStepSensorActive -> "🚶 On a Trip (Step Sensor Active • GPS Off)"
+                else -> "🚶 On a Trip (GPS Off)"
+            }
             ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED ->
                 "⏸️ Trip Paused (Waiting for Monitor BLE)"
             ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE ->
@@ -2530,7 +2669,9 @@ class AqlCollectorService : Service() {
             mergedHumidityPct = latestHumidityPct,
             mergedBatteryPct = latestBatteryPct,
             isGpsActive = isLocationActive,
+            isStepSensorActive = isStepSensorActive,
             currentSpeedMps = latestSpeedMps,
+            currentSpeedSource = latestSpeedSource,
             currentGpsAccuracyM = latestGpsAccuracyM,
             gattConnectionStatus = gattStatusText,
             gattDiscoveredServicesLog = gattServicesLog.toList(),

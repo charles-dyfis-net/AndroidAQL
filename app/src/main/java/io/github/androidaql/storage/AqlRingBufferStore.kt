@@ -268,8 +268,20 @@ class AqlRingBufferStore(
                 speedX100 != SENTINEL_UINT16 -> speedX100
                 else -> existing.speedMpsX100
             }
+            val existingWasStepEstimated =
+                existing.speedMpsX100 != SENTINEL_UINT16 &&
+                    existing.speedMpsX100 > 0 &&
+                    existing.gpsAccuracyMX10 == SENTINEL_UINT16
             val mergedAcc = when {
                 sample.knownPlaceId > 0 -> SENTINEL_UINT16
+                speedX100 != SENTINEL_UINT16 && accX10 == SENTINEL_UINT16 &&
+                    (existing.speedMpsX100 == SENTINEL_UINT16 || speedX100 >= existing.speedMpsX100) ->
+                    // Step-estimated speed supersedes weak/absent GPS accuracy in the same 15s bucket
+                    SENTINEL_UINT16
+                existingWasStepEstimated && accX10 != SENTINEL_UINT16 &&
+                    (speedX100 == SENTINEL_UINT16 || speedX100 < 25) ->
+                    // Do not let a trailing stationary GPS sample overwrite step-derived bucket attribution
+                    SENTINEL_UINT16
                 accX10 != SENTINEL_UINT16 && existing.gpsAccuracyMX10 != SENTINEL_UINT16 ->
                     avg(existing.gpsAccuracyMX10, accX10)
                 accX10 != SENTINEL_UINT16 -> accX10

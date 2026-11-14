@@ -142,6 +142,15 @@ class DualPaneSlicerView(context: Context) : View(context) {
         strokeWidth = 2.2f * density
         style = Paint.Style.STROKE
     }
+    private val stepSpeedLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#FBBF24")
+        strokeWidth = 2.2f * density
+        style = Paint.Style.STROKE
+    }
+    private val stepSpeedBandPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#1AFBBF24")
+        style = Paint.Style.FILL
+    }
     private val speedRefPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#475569")
         strokeWidth = 1f * density
@@ -250,6 +259,7 @@ class DualPaneSlicerView(context: Context) : View(context) {
     private val tempPath = Path()
     private val humidityPath = Path()
     private val speedPath = Path()
+    private val stepSpeedPath = Path()
     private val co2InterpPath = Path()
     private val pm25InterpPath = Path()
     private val tempInterpPath = Path()
@@ -508,8 +518,9 @@ class DualPaneSlicerView(context: Context) : View(context) {
         }
         flushGpsNotCollectedSpan(slots.lastIndex)
 
-        // 5b. Render active Speed curve and Weak GPS (>50m) bands only where location is collected
+        // 5b. Render active Speed curve (Green = GPS, Amber = Step-estimated without GPS) and Weak GPS (>50m) bands
         speedPath.reset()
+        stepSpeedPath.reset()
         speedInterpPath.reset()
         var hasPrevCollectedSpeed = false
         var prevCollectedTs = 0L
@@ -521,7 +532,16 @@ class DualPaneSlicerView(context: Context) : View(context) {
                 continue
             }
             val acc = s.gpsAccuracyM
-            if (acc != null && acc > 50f) {
+            val isStepEstimated = (acc == null)
+            if (isStepEstimated) {
+                canvas.drawRect(
+                    x - stepWidthPx / 2f,
+                    botPaneTop + headerBandPx,
+                    x + stepWidthPx / 2f,
+                    botPaneBot,
+                    stepSpeedBandPaint
+                )
+            } else if (acc!! > 50f) {
                 canvas.drawRect(
                     x - stepWidthPx / 2f,
                     botPaneTop,
@@ -532,17 +552,19 @@ class DualPaneSlicerView(context: Context) : View(context) {
             }
             val spd = s.speedMps ?: 0f
             val ySpd = speedToY(spd)
+            val targetPath = if (isStepEstimated) stepSpeedPath else speedPath
             if (!hasPrevCollectedSpeed) {
-                speedPath.moveTo(x, ySpd)
+                targetPath.moveTo(x, ySpd)
                 hasPrevCollectedSpeed = true
             } else {
                 val gapSec = s.bucketEpochSec - prevCollectedTs
                 if (gapSec > dropoutGracePeriodSec) {
                     speedInterpPath.moveTo(prevX, prevYSpd)
                     speedInterpPath.lineTo(x, ySpd)
-                    speedPath.moveTo(x, ySpd)
+                    targetPath.moveTo(x, ySpd)
                 } else {
-                    speedPath.lineTo(x, ySpd)
+                    targetPath.moveTo(prevX, prevYSpd)
+                    targetPath.lineTo(x, ySpd)
                 }
             }
             prevX = x
@@ -551,6 +573,7 @@ class DualPaneSlicerView(context: Context) : View(context) {
         }
         canvas.drawPath(speedInterpPath, speedInterpPaint)
         canvas.drawPath(speedPath, speedLinePaint)
+        canvas.drawPath(stepSpeedPath, stepSpeedLinePaint)
 
         textPaint.textAlign = Paint.Align.RIGHT
         canvas.drawText(String.format(Locale.US, "%.0fm/s", maxSpeed), padLeft - 4f * density, botPaneTop + 10f * density, textPaint)
@@ -559,7 +582,7 @@ class DualPaneSlicerView(context: Context) : View(context) {
         }
         canvas.drawText("0", padLeft - 4f * density, botPaneBot, textPaint)
         textPaint.textAlign = Paint.Align.LEFT
-        canvas.drawText("Speed (log m/s) • Slate = GPS Off • Red = Weak GPS", padLeft + 4f * density, botPaneTop + 11f * density, textPaint)
+        canvas.drawText("Speed (log) • Green=GPS • Amber=Steps • Red=Weak", padLeft + 4f * density, botPaneTop + 11f * density, textPaint)
 
         // 5c. Segment Strip beneath Pane 3 (shows numbered intervals #1, #2, ... and their boundaries)
         val segTop = botPaneBot + 4f * density
@@ -710,14 +733,14 @@ class DualPaneSlicerView(context: Context) : View(context) {
                 )
                 if (isLocationCollected(nearest)) {
                     val acc = nearest.gpsAccuracyM
-                    val spdBadge = if (acc != null && acc > 50f) {
-                        String.format(Locale.US, "%.1fm/s (±%.0fm)", spd, acc)
-                    } else {
-                        String.format(Locale.US, "%.1fm/s", spd)
+                    val (spdBadge, badgeColor) = when {
+                        acc == null -> String.format(Locale.US, "%.1fm/s (Steps)", spd) to Color.parseColor("#FBBF24")
+                        acc > 50f -> String.format(Locale.US, "%.1fm/s (±%.0fm)", spd, acc) to Color.parseColor("#34D399")
+                        else -> String.format(Locale.US, "%.1fm/s", spd) to Color.parseColor("#34D399")
                     }
                     drawIntersectionCallout(
                         canvas, cx, ySpd, ySpd.coerceIn(botPaneTop + badgeMarginPx, botPaneBot - badgeMarginPx),
-                        spdBadge, Color.parseColor("#34D399"), placeLeft
+                        spdBadge, badgeColor, placeLeft
                     )
                 } else {
                     val gpsOffBadge = if (nearest.knownPlaceId > 0) "🏠 GPS Off (Saved Place)" else "GPS Off"

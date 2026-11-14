@@ -35,6 +35,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import io.github.androidaql.engine.ExcursionStateMachine
+import io.github.androidaql.engine.StepMovementEstimator
 import io.github.androidaql.export.CsvExporter
 import io.github.androidaql.service.AqlCollectorService
 import io.github.androidaql.storage.AqlRingBufferStore
@@ -107,6 +108,7 @@ class MainActivity : AppCompatActivity() {
     ) {
         collectorService?.startBleScan()
         collectorService?.refreshWifiAndPlaceState()
+        collectorService?.refreshStepSensorRegistration()
     }
 
     private val serviceListener: (AqlCollectorService.LiveTelemetrySnapshot) -> Unit = { snap ->
@@ -167,8 +169,16 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            setMovementDisclosureChoice(acceptedLocationAndActivity = true)
+        }
         collectorService?.startBleScan()
         collectorService?.refreshWifiAndPlaceState()
+        collectorService?.refreshStepSensorRegistration()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -240,22 +250,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun hasAcceptedLocationDisclosure(): Boolean =
-        getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE).getBoolean("location_disclosure_accepted", false)
+    private fun hasCompletedMovementDisclosure(): Boolean {
+        val prefs = getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
+        return prefs.getInt("movement_disclosure_version", 0) >= 2
+    }
 
-    private fun setLocationDisclosureAccepted(accepted: Boolean) {
+    private fun isBleOnlyModeChosen(): Boolean =
+        getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
+            .getBoolean("ble_only_mode_chosen", false)
+
+    private fun setMovementDisclosureChoice(acceptedLocationAndActivity: Boolean) {
         getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
             .edit()
-            .putBoolean("location_disclosure_accepted", accepted)
+            .putBoolean("location_disclosure_accepted", acceptedLocationAndActivity)
+            .putBoolean("ble_only_mode_chosen", !acceptedLocationAndActivity)
+            .putInt("movement_disclosure_version", 2)
             .apply()
     }
 
-    private fun requestRuntimePermissionsIfNeeded() {
+    private fun requestRuntimePermissionsIfNeeded(forcePrompt: Boolean = false) {
         val allPerms = listOf(
             Manifest.permission.BLUETOOTH_SCAN,
             Manifest.permission.BLUETOOTH_CONNECT,
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION,
+            Manifest.permission.ACTIVITY_RECOGNITION,
             Manifest.permission.POST_NOTIFICATIONS
         )
         val missing = allPerms.filter {
@@ -263,22 +282,37 @@ class MainActivity : AppCompatActivity() {
         }
         if (missing.isEmpty()) return
 
-        val missingLocation = missing.contains(Manifest.permission.ACCESS_FINE_LOCATION) ||
-            missing.contains(Manifest.permission.ACCESS_COARSE_LOCATION)
+        val missingLocationOrActivity = missing.contains(Manifest.permission.ACCESS_FINE_LOCATION) ||
+            missing.contains(Manifest.permission.ACCESS_COARSE_LOCATION) ||
+            missing.contains(Manifest.permission.ACTIVITY_RECOGNITION)
 
-        if (missingLocation && !hasAcceptedLocationDisclosure()) {
+        if (!forcePrompt && hasCompletedMovementDisclosure() && isBleOnlyModeChosen()) {
+            val bleOnlyPerms = missing.filter {
+                it != Manifest.permission.ACCESS_FINE_LOCATION &&
+                    it != Manifest.permission.ACCESS_COARSE_LOCATION &&
+                    it != Manifest.permission.ACTIVITY_RECOGNITION
+            }
+            if (bleOnlyPerms.isNotEmpty()) {
+                permissionLauncher.launch(bleOnlyPerms.toTypedArray())
+            }
+            return
+        }
+
+        if (missingLocationOrActivity && (forcePrompt || !hasCompletedMovementDisclosure())) {
             showProminentLocationDisclosureDialog(
                 onAccept = {
-                    setLocationDisclosureAccepted(true)
+                    setMovementDisclosureChoice(acceptedLocationAndActivity = true)
                     permissionLauncher.launch(missing.toTypedArray())
                 },
                 onDeclineLocation = {
-                    val nonLocationPerms = missing.filter {
+                    setMovementDisclosureChoice(acceptedLocationAndActivity = false)
+                    val bleOnlyPerms = missing.filter {
                         it != Manifest.permission.ACCESS_FINE_LOCATION &&
-                            it != Manifest.permission.ACCESS_COARSE_LOCATION
+                            it != Manifest.permission.ACCESS_COARSE_LOCATION &&
+                            it != Manifest.permission.ACTIVITY_RECOGNITION
                     }
-                    if (nonLocationPerms.isNotEmpty()) {
-                        permissionLauncher.launch(nonLocationPerms.toTypedArray())
+                    if (bleOnlyPerms.isNotEmpty()) {
+                        permissionLauncher.launch(bleOnlyPerms.toTypedArray())
                     }
                 }
             )
@@ -292,14 +326,15 @@ class MainActivity : AppCompatActivity() {
         onDeclineLocation: (() -> Unit)? = null
     ) {
         val message = buildString {
-            append("AndroidAQL collects location data and connected Wi-Fi network information to enable automatic Trip Mode and Saved Place detection, even when the app is in the background or your screen is off:\n\n")
-            append("• Saved Wi-Fi Places (GPS Off): Location permission is required by Android to read your connected Wi-Fi SSID (e.g., \"Home\") so AndroidAQL can automatically keep GPS off while you are stationary indoors.\n\n")
-            append("• Field Excursion Movement Speed: When your Qingping air monitor is actively broadcasting outside of a Saved Wi-Fi Place, AndroidAQL records movement speed (mph / m/s) alongside CO₂ and PM2.5 readings so you can distinguish transit segments from indoor destinations.\n\n")
-            append("• 100% Local & Private: Raw GPS latitude/longitude coordinates are never stored to disk, and no telemetry or location data is ever transmitted to any cloud server or third party. Data leaves your phone only when you explicitly share a CSV or diagnostic log.")
+            append("AndroidAQL accesses location, connected Wi-Fi, and physical activity step data on-device to enable automatic Trip Mode and Saved Place detection, even when the app is in the background or your screen is off:\n\n")
+            append("• Saved Wi-Fi Places (GPS Off): Location permission is required by Android to read your connected Wi-Fi SSID (e.g., \"Home\") so AndroidAQL can automatically keep GPS and step sensing off while you are stationary indoors.\n\n")
+            append("• Field Excursion Movement Speed (GPS): When your Qingping air monitor is actively broadcasting outside of a Saved Wi-Fi Place, AndroidAQL records movement speed (m/s) alongside CO₂ and PM2.5 readings so you can distinguish transit segments from indoor destinations.\n\n")
+            append("• Weak-GPS Walking Fallback (Physical Activity): During trips where indoor or urban-canyon GPS accuracy is weak (> 50 m) or suppressed inside an uncertainty window, AndroidAQL uses the low-power hardware step detector over a rolling ~10-second memory window to keep walking pace visible on the graph.\n\n")
+            append("• 100% Local & Private: Raw GPS coordinates and cumulative step counts are never persisted to disk, and no telemetry, location, or activity data is ever transmitted to any cloud server or third party. Data leaves your phone only when you explicitly share a CSV or diagnostic log.")
         }
 
         val builder = AlertDialog.Builder(this)
-            .setTitle("📍 Location & Privacy Disclosure")
+            .setTitle("📍 Location, Activity & Privacy Disclosure")
             .setMessage(message)
             .setCancelable(onAccept == null)
 
@@ -1006,8 +1041,13 @@ class MainActivity : AppCompatActivity() {
             ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP ->
                 "🏠 At ${snap.matchedKnownPlace?.label ?: "Saved Place"} • GPS Off • BLE: $bleShortLabel"
             ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE -> {
-                val gpsBadge = if (snap.isGpsActive) "GPS Active" else "GPS Off"
-                "🚶 On a Trip • $gpsBadge • BLE: $bleShortLabel"
+                val movementBadge = when {
+                    snap.isGpsActive && snap.isStepSensorActive -> "GPS + Steps Active"
+                    snap.isGpsActive -> "GPS Active"
+                    snap.isStepSensorActive -> "Steps Active • GPS Off"
+                    else -> "GPS Off"
+                }
+                "🚶 On a Trip • $movementBadge • BLE: $bleShortLabel"
             }
             ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED ->
                 "⏸️ Trip Paused (>90s BLE dropout; GPS paused)"
@@ -1064,13 +1104,24 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             val batStr = if (snap.mergedBatteryPct in 0..100) "${snap.mergedBatteryPct}%" else "External Power / —"
-            val spdStr = snap.currentSpeedMps?.let {
-                String.format(Locale.US, "%.1f m/s (±%.0fm)", it, snap.currentGpsAccuracyM ?: 0f)
-            } ?: "Off"
+            val spdStr = when {
+                snap.currentSpeedMps != null && snap.currentSpeedSource == StepMovementEstimator.SpeedSource.STEP_CADENCE -> {
+                    val accSuffix = when {
+                        snap.currentGpsAccuracyM != null -> String.format(Locale.US, "Steps • GPS ±%.0fm", snap.currentGpsAccuracyM)
+                        !snap.isGpsActive -> "Steps • GPS Off"
+                        else -> "Steps"
+                    }
+                    String.format(Locale.US, "%.1f m/s (%s)", snap.currentSpeedMps, accSuffix)
+                }
+                snap.currentSpeedMps != null ->
+                    String.format(Locale.US, "%.1f m/s (±%.0fm)", snap.currentSpeedMps, snap.currentGpsAccuracyM ?: 0f)
+                snap.isStepSensorActive && !snap.isGpsActive -> "Steps Standby (GPS Off)"
+                else -> "Off"
+            }
             val tempStr = TemperatureUnitFormatter.format(snap.mergedTempC, useF, decimals = 1)
             secondaryMetricsView.text = String.format(
                 Locale.US,
-                "PM2.5: %d µg/m³  •  PM10: %d µg/m³\nTemp: %s  •  Humidity: %.1f%%  •  Battery: %s\nMovement GPS: %s",
+                "PM2.5: %d µg/m³  •  PM10: %d µg/m³\nTemp: %s  •  Humidity: %.1f%%  •  Battery: %s\nMovement: %s",
                 snap.mergedPm25Ugm3,
                 snap.mergedPm10Ugm3,
                 tempStr,
@@ -1737,12 +1788,26 @@ class MainActivity : AppCompatActivity() {
         col.addView(shareLogBtn)
 
         val privacyBtn = Button(this).apply {
-            text = "🔒 View Location & Privacy Disclosure"
+            text = "🔒 View Location, Activity & Privacy Disclosure"
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setOnClickListener { showProminentLocationDisclosureDialog() }
         }
         col.addView(privacyBtn)
+
+        val missingLocationOrActivity = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED
+        if (missingLocationOrActivity) {
+            val enableLocationBtn = Button(this).apply {
+                text = "📍 Enable Location & Step Tracking"
+                isAllCaps = false
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setOnClickListener {
+                    requestRuntimePermissionsIfNeeded(forcePrompt = true)
+                }
+            }
+            col.addView(enableLocationBtn)
+        }
 
         val devModeCheck = CheckBox(this).apply {
             text = "🛠️ Developer Mode (Show HW Test Tab & Demo Controls)"
