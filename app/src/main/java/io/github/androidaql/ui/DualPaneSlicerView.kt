@@ -18,6 +18,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 
@@ -26,7 +27,7 @@ import kotlin.math.min
  * - Pane 1 (Top, 42%): CO₂ (ppm, blue) & PM2.5 (µg/m³, purple) with 1000 ppm reference threshold.
  * - Pane 2 (Middle, 29%): Temperature (°C, orange) & Relative Humidity (%, cyan) to highlight
  *   indoor/outdoor HVAC transitions when GPS is degraded indoors.
- * - Pane 3 (Bottom, 29%): Movement Speed (m/s, green) with shaded "Weak GPS (>50m Urban Canyon)" bands.
+ * - Pane 3 (Bottom, 29%): Movement Speed (m/s, log-scaled green) with 1.5 m/s walking reference and shaded "Weak GPS (>50m Urban Canyon)" bands.
  * - Supports thumb-dragging shared dividers between adjacent segments and tapping/scrubbing a cursor timestamp.
  */
 class DualPaneSlicerView(context: Context) : View(context) {
@@ -140,6 +141,12 @@ class DualPaneSlicerView(context: Context) : View(context) {
         color = Color.parseColor("#34D399")
         strokeWidth = 2.2f * density
         style = Paint.Style.STROKE
+    }
+    private val speedRefPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#475569")
+        strokeWidth = 1f * density
+        style = Paint.Style.STROKE
+        pathEffect = DashPathEffect(floatArrayOf(4f * density, 4f * density), 0f)
     }
     private val interpDashEffect = DashPathEffect(floatArrayOf(5f * density, 4f * density), 0f)
     private val co2InterpPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -458,12 +465,14 @@ class DualPaneSlicerView(context: Context) : View(context) {
         textPaint.textAlign = Paint.Align.LEFT
         canvas.drawText("Temp ($unitSym, orange) & RH (%, cyan)", padLeft + 4f * density, midPaneTop + 11f * density, textPaint)
 
-        // 5. Pane 3 (Bottom): Speed (m/s) + Weak GPS (>50m accuracy) + Location Not Collected (Saved Place / GPS Off)
+        // 5. Pane 3 (Bottom): Speed (m/s, shifted log scale) + Weak GPS (>50m accuracy) + Location Not Collected (Saved Place / GPS Off)
         val maxSpeed = max(12f, (slots.mapNotNull { if (it.knownPlaceId == 0) it.speedMps else null }.maxOrNull() ?: 5f) + 2f)
         fun speedToY(spd: Float): Float {
-            val r = (spd / maxSpeed).coerceIn(0f, 1f)
+            val r = normalizeLogSpeed(spd, maxSpeed)
             return botPaneBot - r * max(1f, botPaneH - headerBandPx)
         }
+        val yWalkRef = speedToY(1.5f)
+        canvas.drawLine(padLeft, yWalkRef, width - padRight, yWalkRef, speedRefPaint)
         fun isLocationCollected(s: AqlRingBufferStore.RingSlotRecord): Boolean =
             s.knownPlaceId == 0 && s.speedMps != null
 
@@ -545,9 +554,12 @@ class DualPaneSlicerView(context: Context) : View(context) {
 
         textPaint.textAlign = Paint.Align.RIGHT
         canvas.drawText(String.format(Locale.US, "%.0fm/s", maxSpeed), padLeft - 4f * density, botPaneTop + 10f * density, textPaint)
+        if (yWalkRef > botPaneTop + 20f * density && yWalkRef < botPaneBot - 10f * density) {
+            canvas.drawText("1.5", padLeft - 4f * density, yWalkRef + 3f * density, textPaint)
+        }
         canvas.drawText("0", padLeft - 4f * density, botPaneBot, textPaint)
         textPaint.textAlign = Paint.Align.LEFT
-        canvas.drawText("Speed (green) • Slate = GPS Off • Red = Weak GPS", padLeft + 4f * density, botPaneTop + 11f * density, textPaint)
+        canvas.drawText("Speed (log m/s) • Slate = GPS Off • Red = Weak GPS", padLeft + 4f * density, botPaneTop + 11f * density, textPaint)
 
         // 5c. Segment Strip beneath Pane 3 (shows numbered intervals #1, #2, ... and their boundaries)
         val segTop = botPaneBot + 4f * density
@@ -900,6 +912,22 @@ class DualPaneSlicerView(context: Context) : View(context) {
             }
 
             return if (aIsUpper) (upper to lower) else (lower to upper)
+        }
+
+        const val SPEED_LOG_SCALE_KNEE_MPS = 0.5f
+
+        /**
+         * Maps movement speed [0, maxSpeedMps] onto [0, 1] using a shifted logarithmic scale
+         * `ln(1 + v / k) / ln(1 + max / k)` so walking paces (~1.0–1.8 m/s) remain clearly
+         * visible above 0 even when transit/highway speeds (10–30+ m/s) appear in the same trip.
+         */
+        fun normalizeLogSpeed(speedMps: Float, maxSpeedMps: Float): Float {
+            val clampedMax = max(12f, maxSpeedMps)
+            val clampedSpd = speedMps.coerceIn(0f, clampedMax)
+            if (clampedSpd <= 0f) return 0f
+            val denom = ln(1f + clampedMax / SPEED_LOG_SCALE_KNEE_MPS)
+            if (denom <= 0f) return 0f
+            return (ln(1f + clampedSpd / SPEED_LOG_SCALE_KNEE_MPS) / denom).coerceIn(0f, 1f)
         }
     }
 }

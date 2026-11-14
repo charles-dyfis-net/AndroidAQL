@@ -671,4 +671,28 @@ class AqlCoreEngineTest {
             BleCollectionMode.entries
         )
     }
+
+    @Test
+    fun testLogSpeedScaleMakesWalkingVisibleWhilePreservingFastSeparation() {
+        val norm = io.github.androidaql.ui.DualPaneSlicerView.Companion::normalizeLogSpeed
+
+        assertEquals(0f, norm(0f, 30f), 1e-5f)
+        assertEquals(0f, norm(-2f, 30f), 1e-5f)
+        assertEquals(1f, norm(30f, 30f), 1e-5f)
+        assertEquals(1f, norm(50f, 30f), 1e-5f)
+
+        // Walking pace (~1.3 m/s) should sit well above 0 (over 25% height) even on a 30 m/s highway trip
+        val walkRatioHighway = norm(1.3f, 30f)
+        val busRatioHighway = norm(10.0f, 30f)
+        val highwayRatio = norm(30.0f, 30f)
+        assertTrue("Expected walking >= 0.25 of pane on 30m/s scale, was $walkRatioHighway", walkRatioHighway >= 0.25f)
+        assertTrue(busRatioHighway > walkRatioHighway + 0.30f)
+        assertTrue(highwayRatio > busRatioHighway + 0.20f)
+
+        // On default 12 m/s max scale, walking (~1.3 m/s) is clearly visible and distinct from 5 m/s / 12 m/s
+        val walkRatioCity = norm(1.3f, 12f)
+        val bikeRatioCity = norm(5.0f, 12f)
+        assertTrue("Expected walking >= 0.35 of pane on 12m/s scale, was $walkRatioCity", walkRatioCity >= 0.35f)
+        assertTrue(bikeRatioCity > walkRatioCity + 0.25f)
+    }
 }
