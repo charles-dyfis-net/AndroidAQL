@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- BLE Scanning & GATT Connection (Note: Do NOT set neverForLocation on BLUETOOTH_SCAN, as Android filters out BLE sensor beacons when neverForLocation is set) -->
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <!-- BLE Scanning & GATT Connection (neverForLocation allows BLE air-quality scanning without requiring Location permission) -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
     <!-- Network & Wi-Fi state for Saved Place SSID/BSSID detection -->

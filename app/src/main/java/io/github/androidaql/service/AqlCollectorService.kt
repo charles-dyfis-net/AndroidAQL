@@ -1,5 +1,6 @@
 package io.github.androidaql.service
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
@@ -22,6 +23,7 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.location.Location
 import android.location.LocationListener
@@ -38,6 +40,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelUuid
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import io.github.androidaql.R
 import io.github.androidaql.ble.QingpingBleParser
 import io.github.androidaql.ble.QingpingFrameAssembler
@@ -166,6 +169,7 @@ class AqlCollectorService : Service() {
         val mergedTempC: Float,
         val mergedHumidityPct: Float,
         val mergedBatteryPct: Int,
+        val isGpsActive: Boolean,
         val currentSpeedMps: Float?,
         val currentGpsAccuracyM: Float?,
         val gattConnectionStatus: String,
@@ -756,6 +760,12 @@ class AqlCollectorService : Service() {
 
     @SuppressLint("MissingPermission")
     fun startBleScan() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            hwLogger.logEvent("BLE_SCAN_PERMISSION_DEFERRED", emptyMap())
+            return
+        }
         val scanner = bleScanner ?: run {
             bluetoothAdapter = (getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
             bluetoothAdapter?.bluetoothLeScanner?.also { bleScanner = it }
@@ -801,10 +811,14 @@ class AqlCollectorService : Service() {
     }
 
     @SuppressLint("MissingPermission")
-    fun stopBleScan() {
-        if (!isScanning) return
+    fun stopBleScan(force: Boolean = false) {
+        if (!isScanning && !force) return
         try {
-            bleScanner?.stopScan(bleScanCallback)
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) ==
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                bleScanner?.stopScan(bleScanCallback)
+            }
         } catch (_: Exception) {
         } finally {
             isScanning = false
@@ -815,9 +829,9 @@ class AqlCollectorService : Service() {
         override fun onScanFailed(errorCode: Int) {
             isScanning = false
             hwLogger.logEvent("BLE_SCAN_FAILED", mapOf("error_code" to errorCode))
-            // SCAN_FAILED_ALREADY_STARTED = 1: stop any stale registration and retry cleanly
+            // SCAN_FAILED_ALREADY_STARTED = 1: unconditionally clear any stale registration before retrying
             mainHandler.postDelayed({
-                stopBleScan()
+                stopBleScan(force = true)
                 startBleScan()
             }, 1_500L)
         }
@@ -2225,7 +2239,7 @@ class AqlCollectorService : Service() {
             ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP ->
                 "🏠 At ${matchedPlace?.label ?: "Saved Place"} (GPS Off)"
             ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE ->
-                "🚶 On a Trip (GPS Movement Active)"
+                if (isLocationActive) "🚶 On a Trip (GPS Movement Active)" else "🚶 On a Trip (GPS Off)"
             ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED ->
                 "⏸️ Trip Paused (Waiting for Monitor BLE)"
             ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE ->
@@ -2507,6 +2521,7 @@ class AqlCollectorService : Service() {
             mergedTempC = latestTempC,
             mergedHumidityPct = latestHumidityPct,
             mergedBatteryPct = latestBatteryPct,
+            isGpsActive = isLocationActive,
             currentSpeedMps = latestSpeedMps,
             currentGpsAccuracyM = latestGpsAccuracyM,
             gattConnectionStatus = gattStatusText,

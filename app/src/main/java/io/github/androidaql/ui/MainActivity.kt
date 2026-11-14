@@ -999,8 +999,10 @@ class MainActivity : AppCompatActivity() {
         contextPillView.text = when (snap.collectorState) {
             ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP ->
                 "🏠 At ${snap.matchedKnownPlace?.label ?: "Saved Place"} • GPS Off • BLE: $bleShortLabel"
-            ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE ->
-                "🚶 On a Trip • GPS Active • BLE: $bleShortLabel"
+            ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE -> {
+                val gpsBadge = if (snap.isGpsActive) "GPS Active" else "GPS Off"
+                "🚶 On a Trip • $gpsBadge • BLE: $bleShortLabel"
+            }
             ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED ->
                 "⏸️ Trip Paused (>90s BLE dropout; GPS paused)"
             ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE ->
