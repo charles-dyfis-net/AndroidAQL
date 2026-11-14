@@ -326,11 +326,10 @@ class MainActivity : AppCompatActivity() {
         onDeclineLocation: (() -> Unit)? = null
     ) {
         val message = buildString {
-            append("AndroidAQL accesses location, connected Wi-Fi, and physical activity step data on-device to enable automatic Trip Mode and Saved Place detection, even when the app is in the background or your screen is off:\n\n")
-            append("• Saved Wi-Fi Places (GPS Off): Location permission is required by Android to read your connected Wi-Fi SSID (e.g., \"Home\") so AndroidAQL can automatically keep GPS and step sensing off while you are stationary indoors.\n\n")
-            append("• Field Excursion Movement Speed (GPS): When your Qingping air monitor is actively broadcasting outside of a Saved Wi-Fi Place, AndroidAQL records movement speed (m/s) alongside CO₂ and PM2.5 readings so you can distinguish transit segments from indoor destinations.\n\n")
-            append("• Weak-GPS Walking Fallback (Physical Activity): During trips where indoor or urban-canyon GPS accuracy is weak (> 50 m) or suppressed inside an uncertainty window, AndroidAQL uses the low-power hardware step detector over a rolling ~10-second memory window to keep walking pace visible on the graph.\n\n")
-            append("• 100% Local & Private: Raw GPS coordinates and cumulative step counts are never persisted to disk, and no telemetry, location, or activity data is ever transmitted to any cloud server or third party. Data leaves your phone only when you explicitly share a CSV or diagnostic log.")
+            append("AndroidAQL accesses location, Wi-Fi, and physical activity step data on-device for Trip Mode and Saved Places, even in the background or with the screen off:\n\n")
+            append("• Saved Wi-Fi Places: Reads your Wi-Fi SSID (Location permission required) to keep GPS and step sensing off indoors.\n\n")
+            append("• Trip Movement (GPS + Steps): Outside Saved Places while your monitor is nearby, records scalar speed (m/s) using GPS and hardware step cadence (covering walking when GPS is weak, off, or slower to lock).\n\n")
+            append("• 100% Local & Private: Raw GPS coordinates and step counts are never saved to disk or sent to any server; data leaves your phone only when you explicitly share a CSV or diagnostic log.")
         }
 
         val builder = AlertDialog.Builder(this)

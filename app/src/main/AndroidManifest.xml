@@ -16,7 +16,7 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 
-    <!-- Activity Recognition strictly for hardware step cadence fallback during weak GPS (>50m) -->
+    <!-- Activity Recognition for on-device Trip Mode step-cadence speed (weak, absent, or slower GPS) -->
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
 
     <!-- Foreground Service & Stateful Threshold Alert Notifications -->

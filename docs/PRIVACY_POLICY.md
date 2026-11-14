@@ -25,8 +25,8 @@
 - **No Raw Coordinates Persisted:** By default, AndroidAQL converts GPS updates into scalar movement speed (m/s) and horizontal accuracy (m) in memory and **does not store raw latitude or longitude coordinates to disk**.
 
 ### C. Physical Activity (`ACTIVITY_RECOGNITION`)
-- **Purpose:** Used strictly on-device during active Field Excursions to read Android's hardware step detector / step counter so walking pace remains visible on the movement chart when indoor or urban-canyon GPS accuracy is weak (> 50 m) or temporarily obscured.
-- **Storage & Privacy:** Step events are kept only in a short-lived (~10-second) in-memory sliding window to estimate walking speed (m/s) alongside your air quality readings. Cumulative step counts are never stored to disk, logged, or transmitted.
+- **Purpose:** Used strictly on-device throughout active Field Excursions to read Android's hardware step detector / step counter so walking pace stays visible on the movement chart whenever GPS is unavailable, weak (> 50 m), or slower to respond than step cadence (for example, indoors, in urban canyons, during meandering walks, or before GPS anchor breakout). Automatically stopped at Saved Wi-Fi Places and when the monitor is out of range.
+- **Storage & Privacy:** Step events remain strictly in a short-lived (~10-second) in-memory sliding window to estimate scalar walking speed (m/s). Ring-buffer and CSV slots attributed to steps leave GPS accuracy unset (`gps_accuracy_m` blank), and cumulative step counts are never stored to disk, logged, or transmitted.
 
 ### D. Notifications (`POST_NOTIFICATIONS`)
 - **Purpose:** Used to display the ongoing foreground collector status notification (showing live CO₂ and PM2.5 levels) and optional user-configurable high-CO₂, high-PM2.5, or low-battery alerts.
