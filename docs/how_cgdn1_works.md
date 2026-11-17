@@ -102,11 +102,14 @@ If your monitor runs custom firmware such as **ESPHome** broadcasting **BTHome v
 | `0x0E` | PM10 | `uint16` LE (2 bytes) | `1 µg/m³` |
 | `0x12` | CO₂ | `uint16` LE (2 bytes) | `1 ppm` (`0` skipped as warmup) |
 
-To reproduce our hardware-tested ESPHome setup directly, check out the **`dev` branch** of [`charles-dyfis-net/esphome-qingping-cgdn1`](https://github.com/charles-dyfis-net/esphome-qingping-cgdn1/tree/dev) (forked from [`nemethhh/esphome-qingping-cgdn1`](https://github.com/nemethhh/esphome-qingping-cgdn1)) and compile with `-s portable true -s bthome true` to build a configuration tuned for `AirSlice` (rather than stationary Home Assistant / ESPHome server use):
+To use upstream ESPHome firmware with `AirSlice` directly, check out **`main`** of [`nemethhh/esphome-qingping-cgdn1`](https://github.com/nemethhh/esphome-qingping-cgdn1) (commit [`26642dcb3d324e5619563279f77eef4a0f239d46`](https://github.com/nemethhh/esphome-qingping-cgdn1/commit/26642dcb3d324e5619563279f77eef4a0f239d46) / 2026-11-17 or newer) and compile with `-s bthome true` (and optionally `-s portable true` to build a configuration tuned for portable `AirSlice` use rather than stationary Home Assistant / ESPHome server use):
 
 ```bash
-# Permanent build tuned for AirSlice (add `-s trial_mode true` for a reversible test build first):
-esphome -s portable true -s bthome true compile cgdn1.yaml
+# Permanent build with BTHome v2 enabled (optionally add `-s portable true` for portable AirSlice use,
+# and `-s trial_mode true` for a reversible test build first):
+esphome -s bthome true compile cgdn1.yaml
+# Or with portable mode enabled:
+esphome -s bthome true -s portable true compile cgdn1.yaml
 ```
 
 Alternatively, add the 5-second `interval:` block below to any custom ESPHome config that already enables `esp32_ble:` (`id: ble`) with sensors `battery_level`, `temp_comp`, `rh_comp`, `pm25`, `pm10`, and `co2`:
