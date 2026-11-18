@@ -1,0 +1,4 @@
+# This is an open-source app; preserve original class/method/field names so
+# crash stack traces remain directly readable while still benefiting from R8
+# dead-code elimination, optimization, and resource shrinking.
+-dontobfuscate
