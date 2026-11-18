@@ -1,6 +1,6 @@
 # How Trips, Segments, and Splits Work
 
-A recorded trip in `AirSlice` starts as a single continuous timeline from when recording begins until it ends. **Slicing** lets you divide that timeline into consecutive legs—called **Segments**—so you can label places (like a bus ride vs. a waiting room) and inspect air-quality and speed metrics for each interval on its own.
+A recorded trip in `AirSlice` starts as a single continuous timeline from when recording begins until it ends. **Slicing** lets you divide that timeline into consecutive legs—called **Segments**—so you can label places (like a bus ride vs. a coffee shop) and inspect air-quality and speed metrics for each interval on its own.
 
 ---
 
@@ -12,9 +12,9 @@ A recorded trip in `AirSlice` starts as a single continuous timeline from when r
 ```text
 Trip Start (4:59 PM)     ⇔ 1|2 (5:17 PM)      ⇔ 2|3               ⇔ 3|4        Trip End (6:14 PM)
 ├────────────────────────┼──────────────────┼─────────────────┼───────────────────────────────┤
-│  #1 CTA Bus #22 (18m)  │ #2 Waiting Room  │ #3 Exam Room #3 │  #4 Return Cab                │
-│  4:59 PM – 5:17 PM     │ (10th Fl) (27m)  │                 │                               │
-│                        │ 5:17 PM – 5:44 PM│                 │                               │
+│  #1 CTA Bus #22 (18m)  │ #2 Loop Coffee   │ #3 Bookshop    │  #4 Return Cab                │
+│  3:54 PM – 4:12 PM     │ Shop (27m)       │ (15m)          │  (15m)                        │
+│                        │ 4:12 PM – 4:39 PM│                │                               │
 ```
 
 * **`#1` always starts when the trip starts** and ends at the first divider (`⇔ 1|2`). Its metadata describes everything from the **start of the trip up to `⇔ 1|2`**.
@@ -45,7 +45,7 @@ Tap **`✏️ Edit Trip`** in the top bar (it turns orange as **`👁️ Done Ed
 ![AirSlice Trips tab in Edit Mode showing ⇔ divider handles, single-row split/nudge bar, and contextual helper hint](screenshots/trips_edit_mode.webp)
 
 * **Splitting a segment (`✂️ Split`):**
-  1. Tap or drag anywhere inside a segment to place the dashed cursor where your environment changed (for example, stepping off a bus or walking into a clinic room).
+  1. Tap or drag anywhere inside a segment to place the dashed cursor where your environment changed (for example, stepping off a bus or walking into a coffee shop).
   2. Use **`-1m` / `-15s` / `+15s` / `+1m`** before selecting a divider if you want to nudge the cursor timestamp first.
   3. Tap **`✂️ Split`**. That segment is divided at the cursor timestamp into two adjacent segments without altering any earlier or later boundaries.
 * **Adjusting a divider (`⇔ 1|2`, `⇔ 2|3`, ...):**
@@ -67,7 +67,7 @@ Tap **`✏️ Edit`** on any segment card to open **`Edit Segment #N (<start>–
 ![Edit Segment #1 dialog showing segment span header, label field, quick-fill presets, notes, Drop #1 trim button, and Merge #1 + #2](screenshots/trips_segment_edit.webp)
 
 * **Segment Label:** Enter any description (for example, `CTA Bus #22`) or tap a chip under **Quick-Fill from Saved Presets** (`Bus`, `Train / L`, `Cab / Car`, etc.) to populate the label in one tap.
-* **Notes:** Record extra context such as crowding, HVAC state, or portable filtration (`"Outbound bus"`, `"Crowded waiting area"`).
+* **Notes:** Record extra context such as crowding, HVAC state, or portable filtration (`"Outbound bus"`, `"Busy espresso bar"`).
 * **Merging adjacent segments (`MERGE #1 + #2 ↓`):** Combines the current segment with the segment immediately following it (`#1 + #2`), removing the divider between them while preserving the earlier segment's metadata.
 
 ---

@@ -23,10 +23,10 @@ The CSV export produced by `AirSlice` is designed to be **self-contained** so th
 | 7 | `context_state` | `string` | `FIELD_EXCURSION` | `STATIONARY_KNOWN_AP` or `FIELD_EXCURSION` |
 | 8 | `known_place_label` | `string` | `""` or `"Home"` | Populated when `context_state == STATIONARY_KNOWN_AP` |
 | 9 | `excursion_id` | `int64` | `42` | Parent excursion ID (empty if stationary) |
-| 10 | `excursion_title` | `string` | `"Northwestern Clinic Visit"` | User-assigned excursion title |
+| 10 | `excursion_title` | `string` | `"Loop Coffee Trip"` | User-assigned excursion title |
 | 11 | `slice_id` | `int64` | `108` | Session slice ID covering this timestamp |
-| 12 | `slice_label` | `string` | `"10th Floor Waiting Room"` | User-selected preset or custom segment label |
-| 13 | `slice_notes` | `string` | `"Crowded, windows sealed"` | Optional free-text notes on the segment |
+| 12 | `slice_label` | `string` | `"Loop Coffee Shop"` | User-selected preset or custom segment label |
+| 13 | `slice_notes` | `string` | `"Busy espresso bar"` | Optional free-text notes on the segment |
 | 14 | `co2_ppm_mean` | `uint16` | `1420` | Mean CO₂ concentration (`ppm`) |
 | 15 | `co2_ppm_min` | `uint16` | `1395` | Minimum CO₂ in bucket (`ppm`) |
 | 16 | `co2_ppm_max` | `uint16` | `1455` | Peak CO₂ in bucket (`ppm`) |

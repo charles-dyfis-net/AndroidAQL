@@ -6,6 +6,7 @@ import io.github.androidaql.engine.AlertEvaluator
 import io.github.androidaql.engine.ExcursionStateMachine
 import io.github.androidaql.engine.GpsMovementFilter
 import io.github.androidaql.export.CsvExporter
+import io.github.androidaql.export.CsvReplayImporter
 import io.github.androidaql.storage.AqlRingBufferStore
 import io.github.androidaql.storage.BleCollectionMode
 import io.github.androidaql.storage.ExcursionRecord
@@ -1232,5 +1233,77 @@ class AqlCoreEngineTest {
         assertTrue(hReturn.closedExcursion)
         assertFalse(hReturn.shouldRunGps)
         assertEquals(1, hReturn.activeKnownPlaceId)
+    }
+
+    @Test
+    fun testCsvReplayImporterRoundTripAndTimeShift() {
+        val device = MonitorDevice(1L, "58:2D:34:12:AB:CD", "CGDN1", "Travel Monitor", true)
+        val excursion = ExcursionRecord(7L, 1L, 1500L, 1545L, true, "Morning Walk, Loop", "")
+        val slices = listOf(
+            SessionSliceRecord(10L, 7L, 1500L, 1515L, true, "Walk Out", "Brisk"),
+            SessionSliceRecord(11L, 7L, 1515L, 1545L, true, "Coffee, Fl 2", "Quote \"test\"")
+        )
+        val slots = listOf(
+            AqlRingBufferStore.RingSlotRecord(1500L, 2, 0, 520, 510, 535, 84, 11, 122, 15, 215, 405, 90, -60, 145, 120),
+            AqlRingBufferStore.RingSlotRecord(1530L, 3, 0, 1180, 1150, 1210, 142, 19, 184, 24, 228, 445, 89, -58, 0, 850)
+        )
+
+        val csv = CsvExporter.exportExcursionCsv(
+            device = device,
+            excursion = excursion,
+            slices = slices,
+            slots = slots,
+            onlySelectedForExport = false,
+            zoneId = ZoneOffset.UTC
+        )
+        val parsed = CsvReplayImporter.parseCsvText(csv)
+        assertEquals(2, parsed.rows.size)
+        assertEquals("Morning Walk, Loop", parsed.excursionTitle)
+        assertEquals("58:2D:34:12:AB:CD", parsed.deviceMac)
+        assertEquals("Travel Monitor", parsed.deviceNickname)
+
+        val r0 = parsed.rows[0]
+        assertEquals(1500L, r0.slot.bucketEpochSec)
+        assertEquals(520, r0.slot.co2PpmMean)
+        assertEquals(510, r0.slot.co2PpmMin)
+        assertEquals(535, r0.slot.co2PpmMax)
+        assertEquals(84, r0.slot.pm25MeanX10)
+        assertEquals(11, r0.slot.pm25Max)
+        assertEquals(145, r0.slot.speedMpsX100)
+        assertEquals(120, r0.slot.gpsAccuracyMX10)
+        assertEquals("Walk Out", r0.sliceLabel)
+
+        val r1 = parsed.rows[1]
+        assertEquals("Coffee, Fl 2", r1.sliceLabel)
+        assertEquals("Quote \"test\"", r1.sliceNotes)
+
+        val shifted = parsed.timeShifted(targetEndEpochSec = 3000L)
+        assertEquals(2970L, shifted.rows[0].slot.bucketEpochSec)
+        assertEquals(3000L, shifted.rows[1].slot.bucketEpochSec)
+
+        val spans = CsvReplayImporter.extractSliceSpans(shifted.rows)
+        assertEquals(2, spans.size)
+        assertEquals(2970L, spans[0].startEpochSec)
+        assertEquals(3000L, spans[0].endEpochSec)
+        assertEquals("Walk Out", spans[0].label)
+        assertEquals(3000L, spans[1].startEpochSec)
+        assertEquals(3000L, spans[1].endEpochSec)
+        assertEquals("Coffee, Fl 2", spans[1].label)
+
+        // Verify AqlRingBufferStore.writeSlot preserves exact RingSlotRecord values
+        val tmpRing = Files.createTempFile("aql_replay_test_", ".aqlring").toFile()
+        try {
+            AqlRingBufferStore(tmpRing).use { store ->
+                shifted.rows.forEach { store.writeSlot(it.slot) }
+                val readBack = store.queryRange(0, 2970L, 3000L)
+                assertEquals(2, readBack.size)
+                assertEquals(510, readBack[0].co2PpmMin)
+                assertEquals(535, readBack[0].co2PpmMax)
+                assertEquals(84, readBack[0].pm25MeanX10)
+                assertEquals(145, readBack[0].speedMpsX100)
+            }
+        } finally {
+            tmpRing.delete()
+        }
     }
 }

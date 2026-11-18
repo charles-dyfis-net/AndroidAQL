@@ -53,6 +53,7 @@ import io.github.androidaql.engine.AlertEvaluator
 import io.github.androidaql.engine.ExcursionStateMachine
 import io.github.androidaql.engine.GpsMovementFilter
 import io.github.androidaql.engine.StepMovementEstimator
+import io.github.androidaql.export.CsvReplayImporter
 import io.github.androidaql.storage.AqlRingBufferStore
 import io.github.androidaql.storage.BleCollectionMode
 import io.github.androidaql.storage.KnownPlace
@@ -61,8 +62,10 @@ import io.github.androidaql.ui.MainActivity
 import io.github.androidaql.util.HardwareDiagnosticLogger
 import io.github.androidaql.util.TemperatureUnitFormatter
 import java.io.File
+import java.io.InputStream
 import java.time.Instant
 import java.time.ZoneId
+import kotlin.math.roundToInt
 import java.time.format.DateTimeFormatter
 import java.util.ArrayDeque
 import java.util.Locale
@@ -272,11 +275,12 @@ class AqlCollectorService : Service() {
     var isDemoStreamRunning: Boolean = false
         private set
     private var demoTickCounter: Int = 0
+    private var demoStreamRows: List<CsvReplayImporter.ParsedCsvRow> = emptyList()
 
     private val demoStreamRunnable = object : Runnable {
         override fun run() {
             if (!isDemoStreamRunning) return
-            emitSyntheticDemoFrame()
+            emitNextDemoReplayFrame()
             mainHandler.postDelayed(this, 3_000L)
         }
     }
@@ -2552,8 +2556,8 @@ class AqlCollectorService : Service() {
     }
 
     /**
-     * Generates a realistic 75-minute Downtown Chicago excursion (CTA Bus -> High-Rise Waiting Room
-     * with urban canyon GPS multipath -> Exam Room -> Return Transit) so the user can test
+     * Generates a realistic 75-minute Downtown Chicago excursion (CTA Bus -> Loop Coffee Shop
+     * with urban canyon GPS multipath -> Bookshop -> Return Transit) so the user can test
      * retrospective session slicing, shared dividers, and CSV export immediately.
      */
     fun toggleDemoStream(): Boolean {
@@ -2600,30 +2604,36 @@ class AqlCollectorService : Service() {
         )
     }
 
-    private fun emitSyntheticDemoFrame() {
-        demoTickCounter++
-        val co2 = 680 + ((demoTickCounter * 37) % 620)
-        val pm25 = 5 + (demoTickCounter % 14)
-        val pm10 = pm25 + 6
-        val tempX10 = 212 + (demoTickCounter % 18)
-        val humX10 = 405 + (demoTickCounter % 35)
-        val bat = 88
+    private fun ensureDemoStreamRows(): List<CsvReplayImporter.ParsedCsvRow> {
+        if (demoStreamRows.isEmpty()) {
+            demoStreamRows = assets.open("demo/sample_trip.csv").use { input ->
+                CsvReplayImporter.parseCsv(input).rows
+            }
+        }
+        return demoStreamRows
+    }
 
+    private fun emitNextDemoReplayFrame() {
+        val rows = ensureDemoStreamRows()
+        if (rows.isEmpty()) return
+        val row = rows[demoTickCounter % rows.size]
+        demoTickCounter++
+        val slot = row.slot
         val decoded = buildSyntheticCgdn1Frame(
-            co2Ppm = co2,
-            pm25Ugm3 = pm25,
-            pm10Ugm3 = pm10,
-            tempX10 = tempX10,
-            humX10 = humX10,
-            batteryPct = bat,
-            rssiDbm = -58 - (demoTickCounter % 7)
+            co2Ppm = slot.co2PpmMean,
+            pm25Ugm3 = slot.pm25Mean.roundToInt(),
+            pm10Ugm3 = slot.pm10Mean.roundToInt(),
+            tempX10 = slot.tempCMeanX10,
+            humX10 = slot.humidityMeanX10,
+            batteryPct = if (slot.batteryPctLast in 0..100) slot.batteryPctLast else 88,
+            rssiDbm = if (slot.rssiDbmLast > -128) slot.rssiDbmLast else -58
         ) ?: return
         handleDecodedFrame(decoded)
     }
 
     /**
      * Populates a deterministic, privacy-safe live "Now" dashboard state at Saved Place "Home"
-     * (`ChicagoHome-5G`) with 15 minutes of calm indoor telemetry for screenshot automation.
+     * (`ChicagoHome-5G`) by replaying `assets/demo/sample_now_stationary.csv` time-shifted to `now`.
      */
     fun seedDemoNowDashboard() {
         for (exc in metadataDb.getExcursions()) {
@@ -2642,147 +2652,63 @@ class AqlCollectorService : Service() {
 
         val nowMs = System.currentTimeMillis()
         val nowSec = (nowMs / 1000L / 15L) * 15L
-        val startSec = nowSec - 15L * 60L
-        for (i in 0 until 60) {
-            val ts = startSec + i * 15L
-            val co2 = 652 + ((i * 3) % 15)
-            ringStore.writeSample(
-                AqlRingBufferStore.RawSampleInput(
-                    timestampEpochSec = ts,
-                    knownPlaceId = homePlace.id,
-                    co2Ppm = co2,
-                    pm25Ugm3 = 0,
-                    pm10Ugm3 = 0,
-                    tempC = 22.3f,
-                    humidityPct = 51.3f,
-                    batteryPct = 100,
-                    rssiDbm = -54,
-                    speedMps = null,
-                    gpsAccuracyM = null
-                )
-            )
+        val parsed = assets.open("demo/sample_now_stationary.csv").use { input ->
+            CsvReplayImporter.parseCsv(input)
         }
-
+        val result = CsvReplayImporter.importIntoStore(
+            replay = parsed,
+            metadataDb = metadataDb,
+            ringStore = ringStore,
+            targetEndEpochSec = nowSec,
+            createExcursion = false,
+            defaultHomeSsid = "ChicagoHome-5G"
+        )
+        val lastSlot = result.lastRow?.slot ?: return
         val decoded = buildSyntheticCgdn1Frame(
-            co2Ppm = 664,
-            pm25Ugm3 = 0,
-            pm10Ugm3 = 0,
-            tempX10 = 223,
-            humX10 = 513,
-            batteryPct = 100,
-            rssiDbm = -54,
+            co2Ppm = lastSlot.co2PpmMean,
+            pm25Ugm3 = lastSlot.pm25Mean.roundToInt(),
+            pm10Ugm3 = lastSlot.pm10Mean.roundToInt(),
+            tempX10 = lastSlot.tempCMeanX10,
+            humX10 = lastSlot.humidityMeanX10,
+            batteryPct = if (lastSlot.batteryPctLast in 0..100) lastSlot.batteryPctLast else 100,
+            rssiDbm = if (lastSlot.rssiDbmLast > -128) lastSlot.rssiDbmLast else -54,
             timestampMs = nowMs
         ) ?: return
         handleDecodedFrame(decoded)
+    }
+
+    /**
+     * Imports a 26-column AirSlice CSV (either the bundled `assets/demo/sample_trip.csv` or an
+     * out-of-band CSV selected by a tester) time-shifted to end near `now`.
+     */
+    fun importExcursionFromCsv(input: InputStream, titleOverride: String? = null): Long? {
+        val parsed = CsvReplayImporter.parseCsv(input)
+        if (parsed.rows.isEmpty()) return null
+        if (parsed.rows.isNotEmpty()) {
+            demoStreamRows = parsed.rows
+            demoTickCounter = 0
+        }
+        val nowSec = ((System.currentTimeMillis() / 1000L / 15L) * 15L) - 15L
+        val result = CsvReplayImporter.importIntoStore(
+            replay = parsed,
+            metadataDb = metadataDb,
+            ringStore = ringStore,
+            targetEndEpochSec = nowSec,
+            createExcursion = true,
+            defaultHomeSsid = "ChicagoHome-5G",
+            titleOverride = titleOverride
+        )
+        notifyListeners()
+        return result.excursionId
     }
 
     fun seedDemoChicagoExcursion(): Long {
         if (metadataDb.getKnownPlaces().isEmpty()) {
             metadataDb.createKnownPlaceWithWifi("Home", "ChicagoHome-5G", "AA:BB:CC:11:22:33")
         }
-        val dev = metadataDb.upsertMonitorDevice("58:2D:34:12:AB:CD", "CGDN1 (0x0E)", "Qingping Air Monitor Lite")
-        val nowSec = (System.currentTimeMillis() / 1000L / 15L) * 15L
-        val startSec = nowSec - 75L * 60L // 75 minutes ago
-        val exc = metadataDb.startExcursion(dev.id, startSec, "Demo: Downtown Chicago Clinic Trip")
-
-        // Populate 300 slots (75 mins @ 15s step):
-        // - Mins 0..18: Outbound CTA Bus (speed ~6.5 m/s, good GPS accuracy ~8m, CO2 rises 550 -> 1180 ppm)
-        // - Mins 18..45: High-Rise Waiting Room (speed 0 m/s, except urban-canyon GPS noise spikes with accuracy ~85m, CO2 climbs to 1640 ppm)
-        // - Mins 45..60: Exam Room (speed 0 m/s, GPS accuracy ~110m, CO2 ~920 ppm, PM2.5 low)
-        // - Mins 60..75: Return Cab (speed ~9.2 m/s, GPS accuracy ~10m, CO2 ~810 ppm)
-        val totalSlots = 300
-        for (i in 0 until totalSlots) {
-            val ts = startSec + i * 15L
-            val minute = i / 4.0f
-            val co2: Int
-            val pm25: Int
-            val tempC: Float
-            val humidityPct: Float
-            val speed: Float
-            val gpsAcc: Float
-
-            when {
-                minute < 18f -> {
-                    co2 = (550 + (minute / 18f) * 630).toInt()
-                    pm25 = 11
-                    // Chilly outdoor walk to bus stop (7.5C, 66% RH) warming inside heated CTA bus (16.5C, 48% RH)
-                    tempC = 7.5f + (minute / 18f) * 9.0f
-                    humidityPct = 66.0f - (minute / 18f) * 18.0f
-                    speed = if (i % 12 in 0..2) 0.0f else 6.8f
-                    gpsAcc = 9.5f
-                }
-                minute < 45f -> {
-                    co2 = (1180 + ((minute - 18f) / 27f) * 460).toInt()
-                    pm25 = 16
-                    // Entering heated high-rise clinic waiting room (rises to 22.8C, dry 33% indoor RH)
-                    tempC = minOf(22.8f, 17.5f + ((minute - 18f) / 8f) * 5.3f)
-                    humidityPct = maxOf(33.0f, 46.0f - ((minute - 18f) / 8f) * 13.0f)
-                    // Simulate Chicago Loop skyscraper multipath spike at minute 30 with poor accuracy (95m)
-                    val isUrbanCanyonGlitch = minute in 29.0f..32.0f
-                    speed = if (isUrbanCanyonGlitch) 4.2f else 0.0f
-                    gpsAcc = if (isUrbanCanyonGlitch) 95.0f else 68.0f
-                }
-                minute < 60f -> {
-                    co2 = 920 + (i % 5) * 8
-                    pm25 = 4
-                    tempC = 21.4f
-                    humidityPct = 35.0f
-                    speed = 0.0f
-                    gpsAcc = 110.0f
-                }
-                else -> {
-                    co2 = (1050 - ((minute - 60f) / 15f) * 280).toInt()
-                    pm25 = 7
-                    // Stepping back outside to catch return cab (cools down toward 12C, RH rises)
-                    tempC = 21.0f - ((minute - 60f) / 15f) * 8.5f
-                    humidityPct = 36.0f + ((minute - 60f) / 15f) * 22.0f
-                    speed = 9.2f
-                    gpsAcc = 8.0f
-                }
-            }
-
-            ringStore.writeSample(
-                AqlRingBufferStore.RawSampleInput(
-                    timestampEpochSec = ts,
-                    knownPlaceId = 0,
-                    co2Ppm = co2,
-                    pm25Ugm3 = pm25,
-                    pm10Ugm3 = pm25 + 5,
-                    tempC = tempC,
-                    humidityPct = humidityPct,
-                    batteryPct = 92 - (i / 60),
-                    rssiDbm = -59,
-                    speedMps = speed,
-                    gpsAccuracyM = gpsAcc
-                )
-            )
+        return assets.open("demo/sample_trip.csv").use { input ->
+            importExcursionFromCsv(input) ?: 0L
         }
-        metadataDb.updateOngoingExcursionEnd(exc.id, nowSec - 15L, closeExcursion = true)
-
-        // Pre-split the demo trip into 4 realistic segments (Bus -> Waiting Room -> Exam Room -> Return Cab)
-        val initialSlices = metadataDb.getSlicesForExcursion(exc.id)
-        if (initialSlices.size == 1) {
-            val s0 = initialSlices[0]
-            val tBusEnd = startSec + 18L * 60L
-            val tWaitEnd = startSec + 45L * 60L
-            val tExamEnd = startSec + 60L * 60L
-            metadataDb.splitSliceAt(s0.id, tBusEnd)
-            val after1 = metadataDb.getSlicesForExcursion(exc.id)
-            if (after1.size >= 2) metadataDb.splitSliceAt(after1.last().id, tWaitEnd)
-            val after2 = metadataDb.getSlicesForExcursion(exc.id)
-            if (after2.size >= 3) metadataDb.splitSliceAt(after2.last().id, tExamEnd)
-
-            val finalSlices = metadataDb.getSlicesForExcursion(exc.id)
-            if (finalSlices.size == 4) {
-                metadataDb.updateSliceMetadata(finalSlices[0].id, "CTA Bus #22", "Outbound bus", true)
-                metadataDb.updateSliceMetadata(finalSlices[1].id, "Waiting Room (10th Fl)", "Crowded waiting area", true)
-                metadataDb.updateSliceMetadata(finalSlices[2].id, "Exam Room #3", "HEPA purifier running", true)
-                metadataDb.updateSliceMetadata(finalSlices[3].id, "Return Cab", "Windows cracked", false)
-            }
-        }
-
-        notifyListeners()
-        return exc.id
     }
 
     private fun appendRawFrameLog(entry: String) {

@@ -335,16 +335,8 @@ class AqlRingBufferStore(
         }
     }
 
-    private fun writeSampleToArchive(desc: ArchiveDescriptor, sample: RawSampleInput) {
+    private fun clearSkippedSlotsIfAdvancing(desc: ArchiveDescriptor, bucketSec: Long) {
         val step = desc.stepSec.toLong()
-        val bucketSec = (sample.timestampEpochSec / step) * step
-
-        if (desc.lastBucketSec >= 0L) {
-            val oldestValidBucketSec = desc.lastBucketSec - (desc.slotCount - 1L) * step
-            if (bucketSec < oldestValidBucketSec) return
-        }
-
-        // 1. Advance-and-clear skipped slots if time advanced forward
         if (desc.lastBucketSec >= 0L && bucketSec > desc.lastBucketSec) {
             val stepsElapsed = (bucketSec - desc.lastBucketSec) / step
             if (stepsElapsed >= desc.slotCount) {
@@ -363,6 +355,50 @@ class AqlRingBufferStore(
                 }
             }
         }
+    }
+
+    private fun updateLastBucketIfNewer(desc: ArchiveDescriptor, bucketSec: Long) {
+        if (bucketSec > desc.lastBucketSec) {
+            desc.lastBucketSec = bucketSec
+            val descLastBucketOffset = (HEADER_SIZE + desc.index * ARCHIVE_DESC_SIZE + 16).toLong()
+            val lbBuf = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putLong(bucketSec)
+            lbBuf.flip()
+            channel.write(lbBuf, descLastBucketOffset)
+        }
+    }
+
+    /**
+     * Writes a pre-aggregated [RingSlotRecord] directly into the archive (used by CSV replay/import
+     * to preserve exact intra-bucket min/max, tenths precision, and GPS/speed fields).
+     */
+    @Synchronized
+    fun writeSlot(record: RingSlotRecord, archiveIndex: Int = 0) {
+        val desc = descriptors.getOrNull(archiveIndex) ?: return
+        val step = desc.stepSec.toLong()
+        val bucketSec = (record.bucketEpochSec / step) * step
+        if (desc.lastBucketSec >= 0L) {
+            val oldestValidBucketSec = desc.lastBucketSec - (desc.slotCount - 1L) * step
+            if (bucketSec < oldestValidBucketSec) return
+        }
+        clearSkippedSlotsIfAdvancing(desc, bucketSec)
+        val slotIdx = ((bucketSec / step) % desc.slotCount).toInt()
+        val slotOffset = desc.dataOffsetBytes.toLong() + slotIdx.toLong() * SLOT_SIZE_BYTES
+        val normalized = if (record.bucketEpochSec == bucketSec) record else record.copy(bucketEpochSec = bucketSec)
+        writeSlotAtOffset(slotOffset, normalized)
+        updateLastBucketIfNewer(desc, bucketSec)
+    }
+
+    private fun writeSampleToArchive(desc: ArchiveDescriptor, sample: RawSampleInput) {
+        val step = desc.stepSec.toLong()
+        val bucketSec = (sample.timestampEpochSec / step) * step
+
+        if (desc.lastBucketSec >= 0L) {
+            val oldestValidBucketSec = desc.lastBucketSec - (desc.slotCount - 1L) * step
+            if (bucketSec < oldestValidBucketSec) return
+        }
+
+        // 1. Advance-and-clear skipped slots if time advanced forward
+        clearSkippedSlotsIfAdvancing(desc, bucketSec)
 
         val slotIdx = ((bucketSec / step) % desc.slotCount).toInt()
         val slotOffset = desc.dataOffsetBytes.toLong() + slotIdx.toLong() * SLOT_SIZE_BYTES
@@ -450,14 +486,7 @@ class AqlRingBufferStore(
         }
 
         writeSlotAtOffset(slotOffset, updated)
-
-        if (bucketSec > desc.lastBucketSec) {
-            desc.lastBucketSec = bucketSec
-            val descLastBucketOffset = (HEADER_SIZE + desc.index * ARCHIVE_DESC_SIZE + 16).toLong()
-            val lbBuf = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putLong(bucketSec)
-            lbBuf.flip()
-            channel.write(lbBuf, descLastBucketOffset)
-        }
+        updateLastBucketIfNewer(desc, bucketSec)
     }
 
     @Synchronized

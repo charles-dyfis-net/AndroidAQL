@@ -128,6 +128,30 @@ class MainActivity : AppCompatActivity() {
         collectorService?.refreshStepSensorRegistration()
     }
 
+    private val importCsvLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        val svc = collectorService ?: return@registerForActivityResult
+        if (uri == null) return@registerForActivityResult
+        try {
+            val importedId = contentResolver.openInputStream(uri)?.use { input ->
+                svc.importExcursionFromCsv(input)
+            }
+            if (importedId != null) {
+                customWindowStartEpochSec = null
+                customWindowEndEpochSec = null
+                selectedExcursionId = importedId
+                switchTab(1)
+                refreshTripsTab()
+                Toast.makeText(this, "Imported CSV trip for replay", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "No valid AirSlice rows found in CSV", Toast.LENGTH_LONG).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "CSV import failed: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private val serviceListener: (AqlCollectorService.LiveTelemetrySnapshot) -> Unit = { snap ->
         runOnUiThread {
             renderLiveSnapshot(snap)
@@ -175,6 +199,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         if (savedInstanceState != null) {
             activeTabIndex = savedInstanceState.getInt("activeTabIndex", 0)
+            pendingScreenshotPreset = savedInstanceState.getString("pendingScreenshotPreset")
             val savedExc = savedInstanceState.getLong("selectedExcursionId", -1L)
             if (savedExc > 0L) selectedExcursionId = savedExc
             val savedLatestExc = savedInstanceState.getLong("lastSeenLatestExcursionId", -1L)
@@ -233,6 +258,7 @@ class MainActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putInt("activeTabIndex", activeTabIndex)
+        pendingScreenshotPreset?.let { outState.putString("pendingScreenshotPreset", it) }
         outState.putLong("selectedExcursionId", selectedExcursionId ?: -1L)
         outState.putLong("lastSeenLatestExcursionId", lastSeenLatestExcursionId ?: -1L)
         outState.putBoolean("isTripEditMode", isTripEditMode)
@@ -812,13 +838,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
         demoStreamBtn = Button(this).apply {
-            text = "🎭 Toggle Live 3s Demo BLE Stream (No Hardware Needed)"
+            text = "🎭 Toggle Live Demo Replay Stream (No Hardware Needed)"
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             visibility = if (isDemoDataEnabled()) View.VISIBLE else View.GONE
             setOnClickListener {
                 val running = collectorService?.toggleDemoStream() ?: false
-                val msg = if (running) "Started Live Demo 0xFDCD Stream (every 3s)" else "Stopped Live Demo Stream"
+                val msg = if (running) "Started Live Demo CSV Replay (every 3s)" else "Stopped Live Demo Replay"
                 Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
             }
         }
@@ -1616,7 +1642,7 @@ class MainActivity : AppCompatActivity() {
             slicesContainer?.removeAllViews()
             if (isDemoDataEnabled()) {
                 slicesContainer?.addView(Button(this).apply {
-                    text = "🎭 Load 75-min Demo Chicago Trip"
+                    text = "🎭 Load Canned Demo Trip"
                     isAllCaps = false
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                     setOnClickListener {
@@ -1624,6 +1650,14 @@ class MainActivity : AppCompatActivity() {
                         customWindowEndEpochSec = null
                         selectedExcursionId = svc.seedDemoChicagoExcursion()
                         refreshTripsTab()
+                    }
+                })
+                slicesContainer?.addView(Button(this).apply {
+                    text = "📂 Import / Replay CSV File..."
+                    isAllCaps = false
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                    setOnClickListener {
+                        importCsvLauncher.launch(arrayOf("text/csv", "text/comma-separated-values", "text/plain", "*/*"))
                     }
                 })
             }
@@ -1953,7 +1987,7 @@ class MainActivity : AppCompatActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
         }
         val labelInput = EditText(this).apply {
-            hint = "e.g., CTA Bus #22, Pediatrician Waiting Room, Coffee Shop"
+            hint = "e.g., CTA Bus #22, Coffee Shop, Bookshop"
             setText(slice.label)
         }
         layout.addView(labelTitle)
@@ -1989,7 +2023,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, dp(8), 0, dp(2))
         }
         val notesInput = EditText(this).apply {
-            hint = "e.g., Crowded waiting area, portable HEPA running"
+            hint = "e.g., Busy espresso bar, windows open"
             setText(slice.notes)
         }
         layout.addView(notesTitle)
@@ -2588,7 +2622,7 @@ class MainActivity : AppCompatActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
         }
         val titleInput = EditText(this).apply {
-            hint = "e.g., Morning Walk & Coffee, Clinic Visit"
+            hint = "e.g., Morning Walk & Coffee, Loop Errand"
             setText(exc.title)
         }
 
@@ -2719,7 +2753,8 @@ class MainActivity : AppCompatActivity() {
         val demo = isDemoDataEnabled()
         val options = excursions.map { "${it.title} (${if (it.isPinned) "Pinned" else "14d Ring"})" }.toMutableList()
         if (demo) {
-            options.add("🔄 Reload 75-min Demo Chicago Trip")
+            options.add("🔄 Reload Canned Demo Trip")
+            options.add("📂 Import / Replay CSV File...")
         }
         if (options.isEmpty()) {
             Toast.makeText(this, "No trips recorded yet.", Toast.LENGTH_SHORT).show()
@@ -2730,12 +2765,19 @@ class MainActivity : AppCompatActivity() {
             .setItems(options.toTypedArray()) { _, which ->
                 customWindowStartEpochSec = null
                 customWindowEndEpochSec = null
-                if (which < excursions.size) {
-                    selectedExcursionId = excursions[which].id
-                } else if (demo) {
-                    selectedExcursionId = svc.seedDemoChicagoExcursion()
+                when {
+                    which < excursions.size -> {
+                        selectedExcursionId = excursions[which].id
+                        refreshTripsTab()
+                    }
+                    demo && which == excursions.size -> {
+                        selectedExcursionId = svc.seedDemoChicagoExcursion()
+                        refreshTripsTab()
+                    }
+                    demo && which == excursions.size + 1 -> {
+                        importCsvLauncher.launch(arrayOf("text/csv", "text/comma-separated-values", "text/plain", "*/*"))
+                    }
                 }
-                refreshTripsTab()
             }
             .show()
     }
@@ -2862,11 +2904,11 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(20), dp(12), dp(20), dp(4))
         }
         val emojiInput = EditText(this).apply {
-            hint = "Emoji Icon (e.g. 🏥, 🚇, ☕)"
+            hint = "Emoji Icon (e.g. ☕, 🚇, 🏢)"
             setText("🏷️")
         }
         val labelInput = EditText(this).apply {
-            hint = "Segment Preset Label (e.g. Dental Clinic, Metra)"
+            hint = "Segment Preset Label (e.g. Coffee Shop, Metra)"
         }
         layout.addView(emojiInput)
         layout.addView(labelInput)

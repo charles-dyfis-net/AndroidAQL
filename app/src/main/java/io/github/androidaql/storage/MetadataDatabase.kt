@@ -171,8 +171,8 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
             "Bus" to "🚌",
             "Train / L" to "🚇",
             "Cab / Car" to "🚕",
-            "Waiting Room" to "🏥",
-            "Exam Room" to "🩺",
+            "Coffee Shop" to "☕",
+            "Restaurant" to "🍽️",
             "Indoor Visit" to "🏢",
             "Outdoor Walk" to "🚶"
         )

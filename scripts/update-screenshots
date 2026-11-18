@@ -131,6 +131,10 @@ def get_setting(adb: str, serial: str, namespace: str, key: str, default: str) -
 def set_rotation(adb: str, serial: str, accel: str, user_rot: str) -> None:
     run_cmd([*adb_base(adb, serial), "shell", "settings", "put", "system", "accelerometer_rotation", accel])
     run_cmd([*adb_base(adb, serial), "shell", "settings", "put", "system", "user_rotation", user_rot])
+    if accel == "0":
+        run_cmd([*adb_base(adb, serial), "shell", "wm", "user-rotation", "lock", user_rot], check=False)
+    else:
+        run_cmd([*adb_base(adb, serial), "shell", "wm", "user-rotation", "free"], check=False)
 
 
 def backup_app_data(adb: str, serial: str) -> bytes:
@@ -230,32 +234,43 @@ def send_screenshot_preset(adb: str, serial: str, preset: str, wait_sec: float) 
     time.sleep(wait_sec)
 
 
-def capture_webp(adb: str, serial: str, ffmpeg: str, tmp_dir: Path, out_path: Path) -> None:
+def capture_image(
+    adb: str,
+    serial: str,
+    ffmpeg: str | None,
+    tmp_dir: Path,
+    out_path: Path,
+    fmt: str,
+) -> None:
     png_bytes = run_cmd([*adb_base(adb, serial), "exec-out", "screencap", "-p"]).stdout
     if not png_bytes.startswith(b"\x89PNG"):
         raise RuntimeError(f"screencap did not return valid PNG data for {out_path.name}")
-    tmp_png = tmp_dir / f"{out_path.stem}.png"
-    tmp_png.write_bytes(png_bytes)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    run_cmd(
-        [
-            ffmpeg,
-            "-y",
-            "-loglevel",
-            "error",
-            "-i",
-            str(tmp_png),
-            "-c:v",
-            "libwebp",
-            "-lossless",
-            "1",
-            "-compression_level",
-            "6",
-            "-q:v",
-            "100",
-            str(out_path),
-        ]
-    )
+    if fmt == "png":
+        out_path.write_bytes(png_bytes)
+    else:
+        assert ffmpeg is not None
+        tmp_png = tmp_dir / f"{out_path.stem}.png"
+        tmp_png.write_bytes(png_bytes)
+        run_cmd(
+            [
+                ffmpeg,
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(tmp_png),
+                "-c:v",
+                "libwebp",
+                "-lossless",
+                "1",
+                "-compression_level",
+                "6",
+                "-q:v",
+                "100",
+                str(out_path),
+            ]
+        )
     print(f"Saved {out_path} ({out_path.stat().st_size:,} bytes)")
 
 
@@ -282,12 +297,25 @@ def main() -> int:
         action="store_true",
         help="Install app/build/outputs/apk/debug/app-debug.apk onto the device before capturing",
     )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="Destination directory for screenshots (defaults to docs/screenshots)",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("webp", "png"),
+        default="webp",
+        help="Output image format (defaults to webp)",
+    )
     args = parser.parse_args()
 
     root = repo_root()
-    screenshots_dir = root / "docs" / "screenshots"
+    screenshots_dir = args.out_dir if args.out_dir is not None else (root / "docs" / "screenshots")
+    ext = args.format
     adb = resolve_adb()
-    ffmpeg = resolve_ffmpeg()
+    ffmpeg = resolve_ffmpeg() if ext == "webp" else None
     serial = resolve_device_serial(adb, args.serial)
     print(f"Using adb device: {serial}")
 
@@ -315,41 +343,42 @@ def main() -> int:
             tmp_dir = Path(td)
 
             if args.include_real_trip:
-                send_screenshot_preset(adb, serial, "real_trip_overview", wait_sec=3.0)
-                real_path = screenshots_dir / "real_trip_overview.webp"
-                capture_webp(adb, serial, ffmpeg, tmp_dir, real_path)
+                send_screenshot_preset(adb, serial, "real_trip_overview", wait_sec=3.5)
+                real_path = screenshots_dir / f"real_trip_overview.{ext}"
+                capture_image(adb, serial, ffmpeg, tmp_dir, real_path, ext)
                 captured_paths.append(real_path)
 
             clear_demo_databases_and_files(adb, serial)
 
-            send_screenshot_preset(adb, serial, "demo_now_dashboard", wait_sec=2.5)
-            p_now = screenshots_dir / "now_dashboard.webp"
-            capture_webp(adb, serial, ffmpeg, tmp_dir, p_now)
+            send_screenshot_preset(adb, serial, "demo_now_dashboard", wait_sec=4.5)
+            p_now = screenshots_dir / f"now_dashboard.{ext}"
+            capture_image(adb, serial, ffmpeg, tmp_dir, p_now, ext)
             captured_paths.append(p_now)
 
             clear_demo_databases_and_files(adb, serial)
 
-            send_screenshot_preset(adb, serial, "seed_demo_view", wait_sec=3.0)
-            p_view = screenshots_dir / "trips_view_mode.webp"
-            capture_webp(adb, serial, ffmpeg, tmp_dir, p_view)
+            send_screenshot_preset(adb, serial, "seed_demo_view", wait_sec=4.5)
+            p_view = screenshots_dir / f"trips_view_mode.{ext}"
+            capture_image(adb, serial, ffmpeg, tmp_dir, p_view, ext)
             captured_paths.append(p_view)
 
-            send_screenshot_preset(adb, serial, "demo_edit_divider", wait_sec=2.0)
-            p_edit = screenshots_dir / "trips_edit_mode.webp"
-            capture_webp(adb, serial, ffmpeg, tmp_dir, p_edit)
+            send_screenshot_preset(adb, serial, "demo_edit_divider", wait_sec=2.5)
+            p_edit = screenshots_dir / f"trips_edit_mode.{ext}"
+            capture_image(adb, serial, ffmpeg, tmp_dir, p_edit, ext)
             captured_paths.append(p_edit)
 
-            send_screenshot_preset(adb, serial, "demo_segment_modal", wait_sec=2.0)
-            p_modal = screenshots_dir / "trips_segment_edit.webp"
-            capture_webp(adb, serial, ffmpeg, tmp_dir, p_modal)
+            send_screenshot_preset(adb, serial, "demo_segment_modal", wait_sec=2.5)
+            p_modal = screenshots_dir / f"trips_segment_edit.{ext}"
+            capture_image(adb, serial, ffmpeg, tmp_dir, p_modal, ext)
             captured_paths.append(p_modal)
 
             run_cmd([*adb_base(adb, serial), "shell", "am", "force-stop", PACKAGE_ID])
             set_rotation(adb, serial, "0", "1")
-            time.sleep(2.0)
-            send_screenshot_preset(adb, serial, "demo_landscape_edit", wait_sec=2.5)
-            p_land = screenshots_dir / "trips_landscape.webp"
-            capture_webp(adb, serial, ffmpeg, tmp_dir, p_land)
+            send_screenshot_preset(adb, serial, "demo_landscape_edit", wait_sec=3.0)
+            set_rotation(adb, serial, "0", "1")
+            time.sleep(2.5)
+            p_land = screenshots_dir / f"trips_landscape.{ext}"
+            capture_image(adb, serial, ffmpeg, tmp_dir, p_land, ext)
             captured_paths.append(p_land)
 
         verify_dimensions(captured_paths)
