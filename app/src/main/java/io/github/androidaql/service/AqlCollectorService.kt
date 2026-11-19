@@ -53,7 +53,7 @@ import io.github.androidaql.engine.AlertEvaluator
 import io.github.androidaql.engine.ExcursionStateMachine
 import io.github.androidaql.engine.GpsMovementFilter
 import io.github.androidaql.engine.StepMovementEstimator
-import io.github.androidaql.export.CsvReplayImporter
+import io.github.androidaql.export.XlsxImporter
 import io.github.androidaql.storage.AqlRingBufferStore
 import io.github.androidaql.storage.BleCollectionMode
 import io.github.androidaql.storage.KnownPlace
@@ -277,7 +277,7 @@ class AqlCollectorService : Service() {
     var isDemoStreamRunning: Boolean = false
         private set
     private var demoTickCounter: Int = 0
-    private var demoStreamRows: List<CsvReplayImporter.ParsedCsvRow> = emptyList()
+    private var demoStreamRows: List<XlsxImporter.ParsedSampleRow> = emptyList()
 
     private val demoStreamRunnable = object : Runnable {
         override fun run() {
@@ -2598,7 +2598,7 @@ class AqlCollectorService : Service() {
     /**
      * Generates a realistic 75-minute Downtown Chicago excursion (CTA Bus -> Loop Coffee Shop
      * with urban canyon GPS multipath -> Bookshop -> Return Transit) so the user can test
-     * retrospective session slicing, shared dividers, and CSV export immediately.
+     * retrospective session slicing, shared dividers, and XLSX export immediately.
      */
     fun toggleDemoStream(): Boolean {
         isDemoStreamRunning = !isDemoStreamRunning
@@ -2644,10 +2644,10 @@ class AqlCollectorService : Service() {
         )
     }
 
-    private fun ensureDemoStreamRows(): List<CsvReplayImporter.ParsedCsvRow> {
+    private fun ensureDemoStreamRows(): List<XlsxImporter.ParsedSampleRow> {
         if (demoStreamRows.isEmpty()) {
-            demoStreamRows = assets.open("demo/sample_trip.csv").use { input ->
-                CsvReplayImporter.parseCsv(input).rows
+            demoStreamRows = assets.open("demo/sample_trip.xlsx").use { input ->
+                XlsxImporter.parseXlsx(input).rows
             }
         }
         return demoStreamRows
@@ -2673,7 +2673,7 @@ class AqlCollectorService : Service() {
 
     /**
      * Populates a deterministic, privacy-safe live "Now" dashboard state at Saved Place "Home"
-     * (`ChicagoHome-5G`) by replaying `assets/demo/sample_now_stationary.csv` time-shifted to `now`.
+     * (`ChicagoHome-5G`) by replaying `assets/demo/sample_now_stationary.xlsx` time-shifted to `now`.
      */
     fun seedDemoNowDashboard() {
         for (exc in metadataDb.getExcursions()) {
@@ -2692,15 +2692,16 @@ class AqlCollectorService : Service() {
 
         val nowMs = System.currentTimeMillis()
         val nowSec = (nowMs / 1000L / 15L) * 15L
-        val parsed = assets.open("demo/sample_now_stationary.csv").use { input ->
-            CsvReplayImporter.parseCsv(input)
+        val parsed = assets.open("demo/sample_now_stationary.xlsx").use { input ->
+            XlsxImporter.parseXlsx(input)
         }
-        val result = CsvReplayImporter.importIntoStore(
-            replay = parsed,
+        val result = XlsxImporter.importTimeShiftedForDemoReplay(
+            parsed = parsed,
             metadataDb = metadataDb,
             ringStore = ringStore,
             targetEndEpochSec = nowSec,
             createExcursion = false,
+            importNotes = false,
             defaultHomeSsid = "ChicagoHome-5G"
         )
         val lastSlot = result.lastRow?.slot ?: return
@@ -2718,36 +2719,48 @@ class AqlCollectorService : Service() {
     }
 
     /**
-     * Imports a 26-column AirSlice CSV (either the bundled `assets/demo/sample_trip.csv` or an
-     * out-of-band CSV selected by a tester) time-shifted to end near `now`.
+     * Imports a 4-sheet AirSlice XLSX workbook (either preserving original timestamps as a pinned
+     * excursion or time-shifted to `now` for Demo Data replay).
      */
-    fun importExcursionFromCsv(input: InputStream, titleOverride: String? = null): Long? {
-        val parsed = CsvReplayImporter.parseCsv(input)
+    fun importExcursionFromXlsx(
+        input: InputStream,
+        timeShiftToNow: Boolean = false,
+        titleOverride: String? = null
+    ): XlsxImporter.ImportResult? {
+        val parsed = XlsxImporter.parseXlsx(input)
         if (parsed.rows.isEmpty()) return null
-        if (parsed.rows.isNotEmpty()) {
+        val result = if (timeShiftToNow) {
             demoStreamRows = parsed.rows
             demoTickCounter = 0
+            val nowSec = ((System.currentTimeMillis() / 1000L / 15L) * 15L) - 15L
+            XlsxImporter.importTimeShiftedForDemoReplay(
+                parsed = parsed,
+                metadataDb = metadataDb,
+                ringStore = ringStore,
+                targetEndEpochSec = nowSec,
+                createExcursion = true,
+                importNotes = true,
+                defaultHomeSsid = "ChicagoHome-5G",
+                titleOverride = titleOverride
+            )
+        } else {
+            XlsxImporter.importPreservingTimestamps(
+                parsed = parsed,
+                metadataDb = metadataDb,
+                defaultHomeSsid = "ChicagoHome-5G",
+                titleOverride = titleOverride
+            )
         }
-        val nowSec = ((System.currentTimeMillis() / 1000L / 15L) * 15L) - 15L
-        val result = CsvReplayImporter.importIntoStore(
-            replay = parsed,
-            metadataDb = metadataDb,
-            ringStore = ringStore,
-            targetEndEpochSec = nowSec,
-            createExcursion = true,
-            defaultHomeSsid = "ChicagoHome-5G",
-            titleOverride = titleOverride
-        )
         notifyListeners()
-        return result.excursionId
+        return result
     }
 
     fun seedDemoChicagoExcursion(): Long {
         if (metadataDb.getKnownPlaces().isEmpty()) {
             metadataDb.createKnownPlaceWithWifi("Home", "ChicagoHome-5G", "AA:BB:CC:11:22:33")
         }
-        return assets.open("demo/sample_trip.csv").use { input ->
-            importExcursionFromCsv(input) ?: 0L
+        return assets.open("demo/sample_trip.xlsx").use { input ->
+            importExcursionFromXlsx(input, timeShiftToNow = true)?.excursionId ?: 0L
         }
     }
 

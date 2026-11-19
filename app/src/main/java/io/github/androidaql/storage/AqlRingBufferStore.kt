@@ -368,7 +368,7 @@ class AqlRingBufferStore(
     }
 
     /**
-     * Writes a pre-aggregated [RingSlotRecord] directly into the archive (used by CSV replay/import
+     * Writes a pre-aggregated [RingSlotRecord] directly into the archive (used by XLSX replay/import
      * to preserve exact intra-bucket min/max, tenths precision, and GPS/speed fields).
      */
     @Synchronized

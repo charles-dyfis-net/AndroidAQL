@@ -2,7 +2,8 @@ package io.github.androidaql
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import io.github.androidaql.export.CsvExporter
+import io.github.androidaql.export.XlsxExporter
+import io.github.androidaql.export.XlsxImporter
 import io.github.androidaql.storage.AqlRingBufferStore
 import io.github.androidaql.storage.MetadataDatabase
 import io.github.androidaql.storage.MonitorDevice
@@ -11,6 +12,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.nio.file.Files
 
@@ -170,7 +172,7 @@ class MetadataDatabaseRotationTest {
     }
 
     @Test
-    fun testOutOfWindowPinnedSlicingTrimmingCsvExportAndUnpinnedPruning() {
+    fun testOutOfWindowPinnedSlicingTrimmingXlsxExportAndUnpinnedPruning() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val dbName = "test_outofwindow_${System.nanoTime()}.db"
         val tmpDir = Files.createTempDirectory("aql_oow").toFile()
@@ -245,11 +247,14 @@ class MetadataDatabaseRotationTest {
             assertEquals(listOf(1515L, 1530L, 1545L, 1560L, 1575L), resolvedSlots.map { it.bucketEpochSec })
             assertEquals(listOf(815, 830, 845, 860, 875), resolvedSlots.map { it.co2PpmMean })
 
-            val csv0 = CsvExporter.exportSliceCsv(dev, trimmedExc, trimmedSlices[0], resolvedSlots)
-            assertTrue(csv0.contains(",1515,"))
-            assertTrue(csv0.contains(",1560,"))
-            assertFalse(csv0.contains(",1500,"))
-            assertFalse(csv0.contains(",1575,"))
+            val xlsxBytes = XlsxExporter.exportSliceXlsx(dev, trimmedExc, trimmedSlices[0], resolvedSlots)
+            val parsed = ByteArrayInputStream(xlsxBytes).use { XlsxImporter.parseXlsx(it) }
+            val exportedEpochs = parsed.rows.map { it.slot.bucketEpochSec }
+            assertEquals(listOf(1515L, 1530L, 1545L, 1560L), exportedEpochs)
+            assertTrue(exportedEpochs.contains(1515L))
+            assertTrue(exportedEpochs.contains(1560L))
+            assertFalse(exportedEpochs.contains(1500L))
+            assertFalse(exportedEpochs.contains(1575L))
         } finally {
             ringStore.close()
             db.close()

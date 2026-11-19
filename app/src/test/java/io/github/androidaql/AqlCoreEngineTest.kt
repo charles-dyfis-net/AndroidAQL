@@ -5,8 +5,9 @@ import io.github.androidaql.ble.QingpingFrameAssembler
 import io.github.androidaql.engine.AlertEvaluator
 import io.github.androidaql.engine.ExcursionStateMachine
 import io.github.androidaql.engine.GpsMovementFilter
-import io.github.androidaql.export.CsvExporter
-import io.github.androidaql.export.CsvReplayImporter
+import io.github.androidaql.export.XlsxExporter
+import io.github.androidaql.export.XlsxImporter
+import io.github.androidaql.export.XlsxWorkbook
 import io.github.androidaql.storage.AqlRingBufferStore
 import io.github.androidaql.storage.BleCollectionMode
 import io.github.androidaql.storage.ExcursionRecord
@@ -485,55 +486,147 @@ class AqlCoreEngineTest {
     }
 
     @Test
-    fun testCsvExporterSelfContainedOutput() {
+    fun testXlsxWorkbookColumnRefsXmlEscapingAndSharedStringsRead() {
+        assertEquals("A", XlsxWorkbook.columnIndexToLetters(0))
+        assertEquals("Z", XlsxWorkbook.columnIndexToLetters(25))
+        assertEquals("AA", XlsxWorkbook.columnIndexToLetters(26))
+        assertEquals("AB", XlsxWorkbook.columnIndexToLetters(27))
+        assertEquals(0, XlsxWorkbook.cellRefToColumnIndex("A1"))
+        assertEquals(25, XlsxWorkbook.cellRefToColumnIndex("Z99"))
+        assertEquals(27, XlsxWorkbook.cellRefToColumnIndex("AB12"))
+
+        val bytes = XlsxWorkbook.writeToBytes(
+            listOf(
+                XlsxWorkbook.XlsxSheet(
+                    name = "Test:Sheet/1?",
+                    rows = listOf(
+                        listOf(
+                            XlsxWorkbook.XlsxCell.Str("col_a"),
+                            XlsxWorkbook.XlsxCell.Str("col_b"),
+                            XlsxWorkbook.XlsxCell.Str("col_c")
+                        ),
+                        listOf(
+                            XlsxWorkbook.XlsxCell.Str("Quotes \" & <tags>\nLine2 📍"),
+                            XlsxWorkbook.XlsxCell.Blank,
+                            XlsxWorkbook.XlsxCell.FloatVal(12.34, decimals = 2)
+                        )
+                    )
+                )
+            )
+        )
+        val parsed = java.io.ByteArrayInputStream(bytes).use { XlsxWorkbook.read(it) }
+        val sheetRows = parsed["Test_Sheet_1_"]!!
+        assertEquals(2, sheetRows.size)
+        assertEquals(listOf("col_a", "col_b", "col_c"), sheetRows[0])
+        assertEquals("Quotes \" & <tags>\nLine2 📍", sheetRows[1][0])
+        assertEquals("", sheetRows[1][1])
+        assertEquals("12.34", sheetRows[1][2])
+
+        // Verify sharedStrings.xml (including rich text <r><t>) + sparse column cell refs read properly
+        val sharedBytes = java.io.ByteArrayOutputStream().also { baos ->
+            java.util.zip.ZipOutputStream(baos, Charsets.UTF_8).use { zos ->
+                fun put(name: String, xml: String) {
+                    zos.putNextEntry(java.util.zip.ZipEntry(name))
+                    zos.write(xml.toByteArray(Charsets.UTF_8))
+                    zos.closeEntry()
+                }
+                put(
+                    "[Content_Types].xml",
+                    """<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>"""
+                )
+                put(
+                    "_rels/.rels",
+                    """<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"""
+                )
+                put(
+                    "xl/workbook.xml",
+                    """<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Samples" sheetId="1" r:id="rId1"/></sheets></workbook>"""
+                )
+                put(
+                    "xl/_rels/workbook.xml.rels",
+                    """<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="/xl/worksheets/sheet1.xml"/></Relationships>"""
+                )
+                put(
+                    "xl/sharedStrings.xml",
+                    """<?xml version="1.0" encoding="UTF-8"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="2" uniqueCount="2"><si><t>Header A</t></si><si><r><t>Rich </t></r><r><t>Text</t></r></si></sst>"""
+                )
+                put(
+                    "xl/worksheets/sheet1.xml",
+                    """<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1" t="b"><v>1</v></c></row><row r="2"><c r="A2" t="s"><v>1</v></c><c r="C2"><v>1.794495285E9</v></c></row></sheetData></worksheet>"""
+                )
+            }
+        }.toByteArray()
+
+        val sharedRead = java.io.ByteArrayInputStream(sharedBytes).use { XlsxWorkbook.read(it) }
+        val rows = sharedRead["Samples"]!!
+        assertEquals(listOf("Header A", "", "true"), rows[0])
+        assertEquals(listOf("Rich Text", "", "1.794495285E9"), rows[1])
+    }
+
+    @Test
+    fun testXlsxExporterWholeTripAndSingleSliceFourSheets() {
         val device = MonitorDevice(1L, "58:2D:34:12:AB:CD", "CGDN1", "Travel Monitor", true)
-        val excursion = ExcursionRecord(7L, 1L, 1500L, 1530L, true, "Downtown Doctor Visit", "")
+        val excursion = ExcursionRecord(7L, 1L, 1500L, 1545L, true, "Downtown Doctor Visit", "Clinic note")
         val slices = listOf(
-            SessionSliceRecord(10L, 7L, 1500L, 1500L, false, "CTA Bus", ""),
-            SessionSliceRecord(11L, 7L, 1515L, 1530L, true, "Waiting Room, Fl 10", "Busy")
+            SessionSliceRecord(10L, 7L, 1500L, 1515L, true, "CTA Bus", ""),
+            SessionSliceRecord(11L, 7L, 1515L, 1545L, true, "Waiting Room, Fl 10", "Busy")
         )
         val slots = listOf(
             AqlRingBufferStore.RingSlotRecord(1500L, 2, 0, 950, 920, 980, 80, 10, 120, 15, 215, 400, 90, -60, 450, 150),
-            AqlRingBufferStore.RingSlotRecord(1515L, 3, 0, 1480, 1450, 1510, 110, 14, 160, 19, 228, 445, 89, -58, 0, 850)
+            AqlRingBufferStore.RingSlotRecord(1515L, 3, 0, 1480, 1450, 1510, 110, 14, 160, 19, 228, 445, 89, -58, 0, 850),
+            AqlRingBufferStore.RingSlotRecord(1545L, 4, 0, 1520, 1490, 1550, 120, 16, 170, 20, 230, 450, 88, -59, 0, 850)
+        )
+        val notes = listOf(
+            TimelineNoteRecord(1L, 1500L, "Boarded bus", 1500L),
+            TimelineNoteRecord(2L, 1515L, "Entered lobby", 1515L),
+            TimelineNoteRecord(3L, 1545L, "Left clinic", 1545L)
         )
 
-        val csv = CsvExporter.exportExcursionCsv(
+        val wholeBytes = XlsxExporter.exportExcursionXlsx(
             device = device,
             excursion = excursion,
             slices = slices,
             slots = slots,
-            onlySelectedForExport = true,
+            notes = notes,
             zoneId = ZoneOffset.UTC
         )
-        val lines = csv.trim().lines()
-        // Header (26 columns) + 1 row (since slice 10 had includeInExport = false)
-        assertEquals(2, lines.size)
-        assertFalse(lines[0].contains("slice_category"))
-        assertEquals(26, lines[0].split(",").size)
-        assertTrue(lines[1].contains("\"Waiting Room, Fl 10\""))
-        assertTrue(lines[1].contains(",1480,1450,1510,"))
+        val sheets = java.io.ByteArrayInputStream(wholeBytes).use { XlsxWorkbook.read(it) }
+        assertEquals(listOf("Trip", "Segments", "Notes", "Samples"), sheets.keys.toList())
 
-        // Verify per-segment time-series export filters strictly to the segment's span
-        // and emits sample rows in chronological order regardless of input ordering.
-        val segSlots = listOf(
-            AqlRingBufferStore.RingSlotRecord(1530L, 4, 0, 1520, 1490, 1550, 120, 16, 170, 20, 230, 450, 88, -59, 0, 850),
-            slots[0], // belongs to slice 10 (outside slice 11)
-            slots[1]  // 1515L, earlier within slice 11
-        )
-        val segCsv = CsvExporter.exportSliceCsv(
+        val tripMap = sheets["Trip"]!!.drop(1).associate { it[0] to it[1] }
+        assertEquals("EXCURSION", tripMap["export_scope"])
+        assertEquals("Downtown Doctor Visit", tripMap["excursion_title"])
+        assertEquals("Clinic note", tripMap["excursion_notes"])
+        assertEquals("true", tripMap["is_pinned"])
+
+        val segRows = sheets["Segments"]!!
+        assertEquals(3, segRows.size) // header + 2 slices
+        assertEquals("1", segRows[1][0])
+        assertEquals("CTA Bus", segRows[1][7])
+        assertEquals("1", segRows[1][10]) // 1500L only ([1500, 1515))
+        assertEquals("2", segRows[2][0])
+        assertEquals("2", segRows[2][10]) // 1515L & 1545L ([1515, 1545])
+
+        val noteRows = sheets["Notes"]!!
+        assertEquals(4, noteRows.size)
+        assertEquals("1", noteRows[1][5]) // 1500 in seg 1
+        assertEquals("2", noteRows[2][5]) // 1515 boundary -> seg 2 only
+        assertEquals("2", noteRows[3][5]) // 1545 end -> seg 2
+
+        val sliceBytes = XlsxExporter.exportSliceXlsx(
             device = device,
             excursion = excursion,
             slice = slices[1],
-            slots = segSlots,
+            slots = slots,
+            notes = notes,
             zoneId = ZoneOffset.UTC
         )
-        val segLines = segCsv.trim().lines()
-        assertEquals(3, segLines.size)
-        assertEquals(26, segLines[0].split(",").size)
-        assertTrue(segLines[1].contains(",1515,15,3,"))
-        assertTrue(segLines[1].contains("\"Waiting Room, Fl 10\""))
-        assertTrue(segLines[2].contains(",1530,15,4,"))
-        assertTrue(segLines[2].contains(",1520,1490,1550,"))
+        val sliceSheets = java.io.ByteArrayInputStream(sliceBytes).use { XlsxWorkbook.read(it) }
+        val sliceTripMap = sliceSheets["Trip"]!!.drop(1).associate { it[0] to it[1] }
+        assertEquals("SLICE", sliceTripMap["export_scope"])
+        assertEquals(2, sliceSheets["Segments"]!!.size)
+        assertEquals(3, sliceSheets["Notes"]!!.size) // 1515 & 1545 only
+        assertEquals(3, sliceSheets["Samples"]!!.size) // 1515 & 1545 only
     }
 
     @Test
@@ -1245,31 +1338,47 @@ class AqlCoreEngineTest {
     }
 
     @Test
-    fun testCsvReplayImporterRoundTripAndTimeShift() {
+    fun testXlsxImporterRoundTripPreservesSplitsNotesEmptySegmentAndTimeShift() {
         val device = MonitorDevice(1L, "58:2D:34:12:AB:CD", "CGDN1", "Travel Monitor", true)
-        val excursion = ExcursionRecord(7L, 1L, 1500L, 1545L, true, "Morning Walk, Loop", "")
+        val excursion = ExcursionRecord(7L, 1L, 1500L, 1545L, true, "Morning Walk, Loop", "Evening outing")
         val slices = listOf(
             SessionSliceRecord(10L, 7L, 1500L, 1515L, true, "Walk Out", "Brisk"),
-            SessionSliceRecord(11L, 7L, 1515L, 1545L, true, "Coffee, Fl 2", "Quote \"test\"")
+            SessionSliceRecord(11L, 7L, 1515L, 1530L, false, "Tunnel Dropout", "No BLE"),
+            SessionSliceRecord(12L, 7L, 1530L, 1545L, true, "Coffee, Fl 2", "Quote \"test\"")
         )
+        // Intentionally omit 1515L so segment #2 ("Tunnel Dropout") has 0 samples
         val slots = listOf(
             AqlRingBufferStore.RingSlotRecord(1500L, 2, 0, 520, 510, 535, 84, 11, 122, 15, 215, 405, 90, -60, 145, 120),
-            AqlRingBufferStore.RingSlotRecord(1530L, 3, 0, 1180, 1150, 1210, 142, 19, 184, 24, 228, 445, 89, -58, 0, 850)
+            AqlRingBufferStore.RingSlotRecord(1545L, 3, 0, 1180, 1150, 1210, 142, 19, 184, 24, 228, 445, 89, -58, 0, 850)
+        )
+        val notes = listOf(
+            TimelineNoteRecord(1L, 1500L, "Left gate", 1500L),
+            TimelineNoteRecord(2L, 1520L, "Signal lost", 1520L)
         )
 
-        val csv = CsvExporter.exportExcursionCsv(
+        val xlsxBytes = XlsxExporter.exportExcursionXlsx(
             device = device,
             excursion = excursion,
             slices = slices,
             slots = slots,
+            notes = notes,
             onlySelectedForExport = false,
             zoneId = ZoneOffset.UTC
         )
-        val parsed = CsvReplayImporter.parseCsvText(csv)
-        assertEquals(2, parsed.rows.size)
-        assertEquals("Morning Walk, Loop", parsed.excursionTitle)
+        val parsed = java.io.ByteArrayInputStream(xlsxBytes).use { XlsxImporter.parseXlsx(it) }
+        assertEquals("Morning Walk, Loop", parsed.trip.excursionTitle)
+        assertEquals("Evening outing", parsed.trip.excursionNotes)
         assertEquals("58:2D:34:12:AB:CD", parsed.deviceMac)
         assertEquals("Travel Monitor", parsed.deviceNickname)
+        assertEquals(3, parsed.segments.size)
+        assertEquals("Tunnel Dropout", parsed.segments[1].label)
+        assertEquals("No BLE", parsed.segments[1].notes)
+        assertFalse(parsed.segments[1].includeInExport)
+        assertEquals("Coffee, Fl 2", parsed.segments[2].label)
+        assertEquals("Quote \"test\"", parsed.segments[2].notes)
+        assertEquals(2, parsed.notes.size)
+        assertEquals("Signal lost", parsed.notes[1].text)
+        assertEquals(2, parsed.rows.size)
 
         val r0 = parsed.rows[0]
         assertEquals(1500L, r0.slot.bucketEpochSec)
@@ -1282,29 +1391,30 @@ class AqlCoreEngineTest {
         assertEquals(120, r0.slot.gpsAccuracyMX10)
         assertEquals("Walk Out", r0.sliceLabel)
 
-        val r1 = parsed.rows[1]
-        assertEquals("Coffee, Fl 2", r1.sliceLabel)
-        assertEquals("Quote \"test\"", r1.sliceNotes)
-
         val shifted = parsed.timeShifted(targetEndEpochSec = 3000L)
-        assertEquals(2970L, shifted.rows[0].slot.bucketEpochSec)
+        val delta = 3000L - 1545L
+        assertEquals(1500L + delta, shifted.trip.startEpochSec)
+        assertEquals(3000L, shifted.trip.endEpochSec)
+        assertEquals(1515L + delta, shifted.segments[1].startEpochSec)
+        assertEquals(1530L + delta, shifted.segments[1].endEpochSec)
+        assertEquals(1520L + delta, shifted.notes[1].timestampEpochSec)
+        assertEquals(1500L + delta, shifted.rows[0].slot.bucketEpochSec)
         assertEquals(3000L, shifted.rows[1].slot.bucketEpochSec)
 
-        val spans = CsvReplayImporter.extractSliceSpans(shifted.rows)
-        assertEquals(2, spans.size)
-        assertEquals(2970L, spans[0].startEpochSec)
-        assertEquals(3000L, spans[0].endEpochSec)
-        assertEquals("Walk Out", spans[0].label)
-        assertEquals(3000L, spans[1].startEpochSec)
-        assertEquals(3000L, spans[1].endEpochSec)
-        assertEquals("Coffee, Fl 2", spans[1].label)
+        // Fallback derivation from Samples when Segments sheet is absent
+        val fallbackSpans = XlsxImporter.extractFallbackSegments(shifted.rows)
+        assertEquals(2, fallbackSpans.size)
+        assertEquals(1500L + delta, fallbackSpans[0].startEpochSec)
+        assertEquals(3000L, fallbackSpans[0].endEpochSec)
+        assertEquals("Walk Out", fallbackSpans[0].label)
+        assertEquals("Coffee, Fl 2", fallbackSpans[1].label)
 
         // Verify AqlRingBufferStore.writeSlot preserves exact RingSlotRecord values
         val tmpRing = Files.createTempFile("aql_replay_test_", ".aqlring").toFile()
         try {
             AqlRingBufferStore(tmpRing).use { store ->
                 shifted.rows.forEach { store.writeSlot(it.slot) }
-                val readBack = store.queryRange(0, 2970L, 3000L)
+                val readBack = store.queryRange(0, 1500L + delta, 3000L)
                 assertEquals(2, readBack.size)
                 assertEquals(510, readBack[0].co2PpmMin)
                 assertEquals(535, readBack[0].co2PpmMax)
@@ -1314,6 +1424,26 @@ class AqlCoreEngineTest {
         } finally {
             tmpRing.delete()
         }
+    }
+
+    @Test
+    fun testBundledDemoXlsxAssetsParseCleanly() {
+        val demoDir = listOf(
+            File("app/src/main/assets/demo"),
+            File("src/main/assets/demo")
+        ).firstOrNull { it.isDirectory }
+        assertNotNull("Expected bundled demo assets directory", demoDir)
+
+        val tripParsed = File(demoDir!!, "sample_trip.xlsx").inputStream().use { XlsxImporter.parseXlsx(it) }
+        assertEquals(67, tripParsed.rows.size)
+        assertEquals(3, tripParsed.segments.size)
+        assertEquals("Demo: Breakfast Trip", tripParsed.excursionTitle)
+        assertFalse(tripParsed.isStationaryOnly)
+
+        val statParsed = File(demoDir, "sample_now_stationary.xlsx").inputStream().use { XlsxImporter.parseXlsx(it) }
+        assertEquals(60, statParsed.rows.size)
+        assertTrue(statParsed.segments.isEmpty())
+        assertTrue(statParsed.isStationaryOnly)
     }
 
     @Test
@@ -1845,5 +1975,129 @@ class AqlCoreEngineTest {
                 windowEndEpochSec = 1950L
             )
         )
+    }
+
+    @Test
+    fun testGeneratedAndBundledXlsxPassOpenXmlAudit() {
+        val home = System.getProperty("user.home").orEmpty()
+        val candidateDirs = buildList {
+            System.getenv("PATH")?.split(File.pathSeparator)?.filter { it.isNotBlank() }?.let { addAll(it) }
+            if (home.isNotBlank()) {
+                add("$home/.nix-profile/bin")
+                add("$home/.local/bin")
+            }
+            add("/opt/homebrew/bin")
+            add("/usr/local/bin")
+        }.distinct()
+
+        fun findExecutable(name: String): File? =
+            candidateDirs.map { File(it, name) }.firstOrNull { it.isFile && it.canExecute() }
+
+        val directTool = findExecutable("openxml-audit")
+        val uvxTool = if (directTool == null) findExecutable("uvx") else null
+        val requireAudit = System.getenv("AIRSLICE_REQUIRE_OPENXML_AUDIT") == "1"
+        if (directTool == null && uvxTool == null) {
+            if (requireAudit) {
+                org.junit.Assert.fail("AIRSLICE_REQUIRE_OPENXML_AUDIT=1 is set, but neither openxml-audit nor uvx was found.")
+            }
+            org.junit.Assume.assumeTrue("Skipping host openxml-audit validation (tool not installed).", false)
+        }
+
+        fun runOpenXmlAudit(targetFile: File) {
+            val attempts = if (directTool != null) {
+                listOf(listOf(directTool.absolutePath, "--output", "json", targetFile.absolutePath))
+            } else {
+                listOf(
+                    listOf(uvxTool!!.absolutePath, "--offline", "openxml-audit", "--output", "json", targetFile.absolutePath),
+                    listOf(uvxTool.absolutePath, "openxml-audit", "--output", "json", targetFile.absolutePath)
+                )
+            }
+            var lastExit = -1
+            var lastStdout = ""
+            var lastStderr = ""
+            for (cmd in attempts) {
+                val proc = ProcessBuilder(cmd).start()
+                val finished = proc.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)
+                if (!finished) {
+                    proc.destroyForcibly()
+                    org.junit.Assert.fail("Timed out running ${cmd.joinToString(" ")}")
+                }
+                lastStdout = proc.inputStream.bufferedReader(Charsets.UTF_8).readText()
+                lastStderr = proc.errorStream.bufferedReader(Charsets.UTF_8).readText()
+                lastExit = proc.exitValue()
+                if (lastExit == 0 || lastStdout.contains("\"valid\"")) {
+                    break
+                }
+            }
+            assertTrue(
+                "openxml-audit failed for ${targetFile.name} (exit=$lastExit):\nSTDOUT:\n$lastStdout\nSTDERR:\n$lastStderr",
+                lastExit == 0 &&
+                    Regex("\"valid\"\\s*:\\s*true\\b").containsMatchIn(lastStdout) &&
+                    Regex("\"error_count\"\\s*:\\s*0\\b").containsMatchIn(lastStdout) &&
+                    Regex("\"warning_count\"\\s*:\\s*0\\b").containsMatchIn(lastStdout)
+            )
+        }
+
+        val tmpDir = Files.createTempDirectory("aql_openxml_audit_").toFile()
+        try {
+            val device = MonitorDevice(1L, "58:2D:34:12:AB:CD", "CGDN1", "Travel Monitor", true)
+            val excursion = ExcursionRecord(7L, 1L, 1500L, 1560L, true, "Clinic & Walk <Test>", " Multi-line\nnote ")
+            val slices = listOf(
+                SessionSliceRecord(10L, 7L, 1500L, 1515L, true, "Home & Porch", "Start"),
+                SessionSliceRecord(11L, 7L, 1515L, 1530L, false, "Tunnel Dropout", "No BLE"),
+                SessionSliceRecord(12L, 7L, 1530L, 1560L, true, "Coffee, Fl 2", "Quote \"test\"")
+            )
+            val slots = listOf(
+                AqlRingBufferStore.RingSlotRecord(1500L, 2, 1, 520, 510, 535, 84, 11, 122, 15, 215, 405, 90, -60, AqlRingBufferStore.SENTINEL_UINT16, AqlRingBufferStore.SENTINEL_UINT16),
+                AqlRingBufferStore.RingSlotRecord(1545L, 3, 0, 1180, 1150, 1210, 142, 19, 184, 24, 228, 445, 255, -128, 145, 120)
+            )
+            val notes = listOf(
+                TimelineNoteRecord(1L, 1500L, " 📍 Marker ", 1500L),
+                TimelineNoteRecord(2L, 1520L, "Signal <lost> & resumed", 1520L)
+            )
+            val places = mapOf(1 to io.github.androidaql.storage.KnownPlace(1, "Home"))
+
+            val wholeFile = File(tmpDir, "whole_trip.xlsx")
+            wholeFile.writeBytes(
+                XlsxExporter.exportExcursionXlsx(
+                    device = device,
+                    excursion = excursion,
+                    slices = slices,
+                    slots = slots,
+                    notes = notes,
+                    knownPlacesById = places,
+                    onlySelectedForExport = false,
+                    zoneId = ZoneOffset.UTC
+                )
+            )
+
+            val sliceFile = File(tmpDir, "single_slice.xlsx")
+            sliceFile.writeBytes(
+                XlsxExporter.exportSliceXlsx(
+                    device = device,
+                    excursion = excursion,
+                    slice = slices[2],
+                    slots = slots,
+                    notes = notes,
+                    knownPlacesById = places,
+                    zoneId = ZoneOffset.UTC
+                )
+            )
+
+            val demoDir = listOf(
+                File("app/src/main/assets/demo"),
+                File("src/main/assets/demo")
+            ).firstOrNull { it.isDirectory }
+            assertNotNull("Expected bundled demo assets directory", demoDir)
+
+            val demoTripFile = File(demoDir!!, "sample_trip.xlsx")
+            val demoStatFile = File(demoDir, "sample_now_stationary.xlsx")
+
+            for (target in listOf(wholeFile, sliceFile, demoTripFile, demoStatFile)) {
+                runOpenXmlAudit(target)
+            }
+        } finally {
+            tmpDir.deleteRecursively()
+        }
     }
 }

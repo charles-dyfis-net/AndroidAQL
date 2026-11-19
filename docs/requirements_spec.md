@@ -71,7 +71,7 @@ Using SQLite for continuous 10–15 second time-series ingestion (`~8,640 rows/d
      * **Total Constant Footprint per Monitor:** **≈ 2.58 MB** on disk forever.
 2. **Pinned Excursion Archive ("Freeze on Pin"):**
    * During the 14-day full-resolution window (Archive 0), retrospective session slicing reads directly from the ring buffer.
-   * When a user flags an `EXCURSION` for indefinite retention (`is_pinned = true`), the raw Archive 0 sensor and movement slots covering `[excursion.start_ts, excursion.end_ts]` are copied into a dedicated immutable **Pinned Excursion Store** (either a per-excursion binary/CSV/SQLite archive table), allowing the ring buffer to keep wrapping around indefinitely without losing advocacy data.
+   * When a user flags an `EXCURSION` for indefinite retention (`is_pinned = true`), the raw Archive 0 sensor and movement slots covering `[excursion.start_ts, excursion.end_ts]` are copied into a dedicated immutable **Pinned Excursion Store** (`PINNED_SLICE_DATA`), allowing the ring buffer to keep wrapping around indefinitely without losing advocacy data.
 3. **SQLite (Room) Strictly for Low-Volume Relational Metadata:**
    * Stores `MONITOR_DEVICE`, `KNOWN_PLACE`, `EXCURSION`, and `SESSION_SLICE` (hundreds of rows total).
 
@@ -180,7 +180,7 @@ erDiagram
       * **Beyond Grace Period (`Δt > T_dropout_grace`):** Rendered as either a **dashed/translucent bridge line** (or an explicit gap with a subtle vertical **"Signal Dropout"** hatch/shading band across the panes) so interpolated spans are immediately obvious and never mistaken for continuous live measurements.
       * **Cursor Scrubbing Inside a Dropout:** When scrubbing the cursor across a dropout interval, the inline callout badge indicates that the span is interpolated / missing telemetry rather than reporting a synthetic reading.
 * **Device-Aware Temperature Unit Formatting (`TemperatureUnitFormatter`):**
-  * While the binary `.aqlring` store and CSV export always preserve canonical Celsius (`0.1°C` fixed-point in binary storage; `temp_c` in CSV), all UI views (`1. Now` Hero card, foreground notification, and `DualPaneSlicerView` Y-axis labels and intersection badges) honor the Android device's configured Regional Preferences / Locale (`-u-mu-fahrenhe` / `-u-mu-celsius` and ICU `LocaleData.MeasurementSystem`, defaulting to **°F** for US locales), with an explicit user override (**Auto**, **°F**, **°C**) in **⚙️ Settings**.
+  * While the binary `.aqlring` store and XLSX export always preserve canonical Celsius (`0.1°C` fixed-point in binary storage; `temp_c_mean` in `Samples`), all UI views (`1. Now` Hero card, foreground notification, and `DualPaneSlicerView` Y-axis labels and intersection badges) honor the Android device's configured Regional Preferences / Locale (`-u-mu-fahrenhe` / `-u-mu-celsius` and ICU `LocaleData.MeasurementSystem`, defaulting to **°F** for US locales), with an explicit user override (**Auto**, **°F**, **°C**) in **⚙️ Settings**.
 * **Separate View vs. Edit Modes & Non-Destructive Boundary Editing:**
   * **View Mode (Default):** Hides divider drag handles (`⇔ 1|2`) and hides the boundary split/nudge toolbar while keeping the color-coded Segment Strip (`#1`, `#2`, ...) visible below Pane 3 so users can cleanly view and scrub the 3-pane timeline without visual clutter or accidental boundary edits.
   * **Edit Mode (`✏️ Edit Trip`):** Reveals the `⇔ 1|2` / `⇔ N|(N+1)` thumb pill handles on shared dividers and the **`✂️ Split` / `-1m` / `-15s` / `+15s` / `+1m`** single-row toolbar with contextual divider/cursor helper text. When no divider is selected yet (or before any split is created), the `-1m / -15s / +15s / +1m` buttons nudge the cursor line for precise split placement; when a divider is selected, they nudge that shared boundary.
@@ -195,7 +195,7 @@ erDiagram
     * **Timestamped Timeline Notes & Promote-to-Split (`TIMELINE_NOTE`, DB v3):**
       * **Live & Retroactive Capture:** On the **Now** dashboard (`liveRecentHistoryView` with `followLatestEdge = true`), the 15-minute chart cursor tracks the latest reading by default (`Live • <time>`) and detaches when scrubbed into the past (exposing a **`↩ Live`** reset pill in the header). Tapping **`📝 Add Note`** targets the detached chart cursor when scrubbed—with an inline **`📍 Selected` / `🕒 Now`** toggle pill in the dialog—or freezes the current epoch second when following Live, offering quick-fill chips and a `📍 Marker` fallback when left blank. When no excursion covers the chosen timestamp (or only a pending Wi-Fi disconnect debounce exists at `Now`), an inline warning informs the user that unpinned notes are discarded after 14 days unless covered by a pinned trip. On **Trips**, **`📝 + Note`** (portrait header) and **`📝 Note`** (landscape View Mode bar) add notes at the current scrubber cursor.
       * **Visual Rendering & Timestamp Association:** `DualPaneSlicerView` renders teal dotted vertical lines with top-rail diamond pins (`#2DD4BF` / `#14B8A6`) and minimap note ticks; tapping a top-rail pin snaps the cursor and invokes edit/delete. `MetadataDatabase.assignNotesToSlices()` dynamically binds notes to slices by timestamp (`[start, end)` for non-last slices, `[start, end]` for final slice), so divider drags, splits, merges, Wi-Fi debounce back-dating, and `14d Window` carving stay consistent without fragile foreign keys.
-      * **Option 1 Promote to Split (`✂️ Split`):** Segment Card note rows whose 15-second-aligned timestamp falls strictly inside `(slice.start, slice.end)` (`MetadataDatabase.computeAlignedSplitForNote()`) offer **`✂️ Split`**, giving users **`Split & Label #N+1`** (or **`Split & Remove Marker`** for blank `📍 Marker` notes—calling `splitSliceAt(..., newRightSliceLabel)` and deleting the standalone note) or **`Split & Keep Note`** (splitting while preserving the note). CSV single-segment export intentionally omits timeline notes until a multi-table whole-trip export format is introduced.
+      * **Option 1 Promote to Split (`✂️ Split`):** Segment Card note rows whose 15-second-aligned timestamp falls strictly inside `(slice.start, slice.end)` (`MetadataDatabase.computeAlignedSplitForNote()`) offer **`✂️ Split`**, giving users **`Split & Label #N+1`** (or **`Split & Remove Marker`** for blank `📍 Marker` notes—calling `splitSliceAt(..., newRightSliceLabel)` and deleting the standalone note) or **`Split & Keep Note`** (splitting while preserving the note). Multi-sheet XLSX exports (`Notes` sheet) export timeline notes for whole trips and enclosing spans, and XLSX import restores both splits and notes.
 
 ---
 
@@ -222,16 +222,15 @@ When the monitor is powered off or out of range, time advances across ring buffe
 
 ## 5. Advocacy Export & Reporting Scope
 
-### 5.1 Self-Contained CSV Export (MVP)
-To allow an external desktop/CLI tool to generate rich PDF advocacy reports directly from a single exported CSV without needing direct database access, the CSV export denormalizes the time series together with its active `EXCURSION`, `SESSION_SLICE`, and nearest/interpolated movement context:
+### 5.1 Self-Contained Multi-Sheet XLSX Export & Import
+To allow external spreadsheet workflows, desktop/CLI PDF advocacy report generators, or whole-trip backup/restore across devices without needing direct SQLite/ring-file access, AirSlice exports 4-sheet OOXML `.xlsx` workbooks (`Trip`, `Segments`, `Notes`, `Samples`) conforming to `docs/xlsx_export_schema.md`:
 
-| Column Group | Columns Included |
+| Sheet | Contents |
 | :--- | :--- |
-| **Time & Resolution** | `timestamp_iso8601` (with local timezone offset), `timestamp_epoch_ms`, `resolution_sec`, `sample_count` |
-| **Device Metadata** | `device_nickname`, `device_model`, `source_type` (`BLE_ADV`) |
-| **Context & Slice Metadata** | `excursion_id`, `excursion_title`, `slice_id`, `slice_label` (e.g., `"Waiting Room"`), `slice_notes`, `known_place_label` |
-| **Air Quality Metrics** | `co2_ppm_mean`, `co2_ppm_min`, `co2_ppm_max`, `pm25_ugm3_mean`, `pm25_ugm3_max`, `pm10_ugm3_mean`, `pm10_ugm3_max`, `temp_c`, `humidity_pct` |
-| **Movement & Signal** | `speed_mps`, `delta_distance_m`, `gps_accuracy_m`, `activity_type`, `rssi_dbm`, `battery_pct` (+ `latitude`, `longitude` only if opt-in enabled and user checks *"Include coordinates in export"*) |
+| **`Trip`** | Key–value metadata (`schema_version`, `export_scope`, `excursion_id`, `excursion_title`, `excursion_notes`, start/end ISO & epoch timestamps, `is_pinned`, `is_manual`, `device_mac`, `device_nickname`, `resolution_sec`) |
+| **`Segments`** | Contiguous `SESSION_SLICE` table (`segment_index`, `slice_id`, ISO/epoch bounds, `duration_sec`, `label`, `notes`, `include_in_export`, `sample_count`, `co2_ppm_mean`, `co2_ppm_max`, `pm25_ugm3_mean`) |
+| **`Notes`** | Timestamped `TIMELINE_NOTE` rows (`note_id`, ISO/epoch timestamp, `text`, `created_epoch_sec`, enclosing 1-based `segment_index`) |
+| **`Samples`** | Chronological 15-second telemetry (`timestamp_iso8601`, `timestamp_epoch_sec`, `resolution_sec`, `sample_count`, `context_state`, `known_place_label`, `slice_id`, `slice_label`, CO₂ mean/min/max, PM2.5/PM10 mean/max, `temp_c_mean`, `humidity_pct_mean`, `battery_pct`, `rssi_dbm`, `speed_mps`, `gps_accuracy_m`) |
 
 ### 5.2 Visual Summary Card (Nice-to-Have / Post-MVP)
 An in-app shareable image card (PNG rendered via Compose Canvas) summarizing an excursion or specific slice with:
@@ -353,7 +352,7 @@ flowchart TD
    * Rather than compressing the entire 14-day Archive 0 ring buffer into the width of a phone screen, Portrait mode provides a **`🗓️ 14d Window`** selector dialog.
    * Users select a Day (`Today`, `Yesterday`, `-2d` … `-13d`), Start Time (30-minute increments), and Window Duration (`30m` to `6h`) to either **Preview Window Only** on the 3-pane chart or **Carve as New Trip** (creating an `EXCURSION` over `[start_ts, end_ts]` ready for slicing).
 4. **Clean Segment Cards & Focused Segment Edit Modal (`✏️ Edit`):**
-   * Rather than cluttering every segment card with an inline row of fixed preset buttons or per-segment retention checkboxes, each segment card shows only the segment title, time span, trim (`🗑️ Drop #1` / `#N`) when applicable, **`✏️ Edit`**, summary stats, and **`📤 Export CSV`** — while trip retention (**`⏳ 14d • 📌 Pin`** / **`📌 Pinned`**) and trip renaming/deletion live at the trip level.
+   * Rather than cluttering every segment card with an inline row of fixed preset buttons or per-segment retention checkboxes, each segment card shows only the segment title, time span, trim (`🗑️ Drop #1` / `#N`) when applicable, **`✏️ Edit`**, summary stats, and **`📤 Export XLSX`** — while whole-trip XLSX export (**`📤 Export Trip (.xlsx)`**), trip retention (**`⏳ 14d • 📌 Pin`** / **`📌 Pinned`**), and trip renaming/deletion live in **Manage Trip** / the trip header.
    * Tapping **`✏️ Edit`** opens the **Edit Segment Modal**, which provides:
      * A **freeform Segment Label `EditText`** (so one-time labels like *"Dr. Smith Exam Room 4B"* or *" Friend's Car"* can be typed directly without creating a reusable preset),
      * Optional **Quick-Fill Preset Chips** inside the modal that populate the label field when tapped,
@@ -372,8 +371,8 @@ flowchart TD
 
 ## 9. Required Documentation Deliverables
 Alongside the application code, the repository must include:
-1. **`docs/binary_storage_format.md`:** Full byte-level specification of the custom fixed-size 14-day ring buffer file format, header magic/versioning, slot struct layout, inline consolidation math, and pinned-excursion extraction format (enabling external Python/Rust/CLI tools to read `.aqlring` files or CSV exports directly).
-2. **`docs/csv_export_schema.md`:** Formal contract for the self-contained CSV export columns so external PDF/advocacy report generators can target a stable schema.
+1. **`docs/binary_storage_format.md`:** Full byte-level specification of the custom fixed-size 14-day ring buffer file format, header magic/versioning, slot struct layout, inline consolidation math, and pinned-excursion extraction format (enabling external Python/Rust/CLI tools to read `.aqlring` files or XLSX exports directly).
+2. **`docs/xlsx_export_schema.md`:** Formal contract for the self-contained 4-sheet OOXML `.xlsx` export/import workbook (`Trip`, `Segments`, `Notes`, `Samples`) so external spreadsheet and PDF/advocacy report generators can target a stable schema.
 
 ---
 
@@ -408,7 +407,7 @@ Because the physical `CGDN1` hardware arrives today, **Milestone 1** is scoped t
    * Full port of `bleparser/qingping.py` (`0xFDCD` Service Data + TLV `0x01`, `0x02`, `0x12`, `0x13` parser) with unit tests.
    * **Discovery Fallback:** Toggle between filtered `0xFDCD` scan and broad BLE scan so we can observe what frames a factory-fresh, never-cloud-paired `CGDN1` broadcasts out of the box.
    * **Persistent Structured JSON-Lines Trace (`files/hw_bringup_trace.jsonl` + Logcat `AndroidAQL_HW`):** When **`🛠️ Developer Mode`** is enabled in `⚙️ Settings` (off by default), `AqlCollectorService` additionally logs every `BLE_ADV_FDCD` frame (MAC, product ID, frame control, RSSI, inter-packet `delta_ms`, decoded metrics, `unknown_tlvs`, `raw_hex`), `BLE_ADV_FDCD_UNPARSED` frame, and nearby `BLE_ADV_NON_FDCD` frame (third-party MAC, name, RSSI, UUIDs, raw hex, throttled 15s/MAC) alongside GATT events to disk (up to `5 MB` with `.prev` rotation) for `adb pull` and one-tap share analysis, and authorizes incoming `net.dyfis.androidaql.DEV_COMMAND` intents on non-debug builds via exported `MainActivity`.
-   * **Developer Demo & Simulation Controls:** When **`🛠️ Developer Mode`** is enabled, UI controls appear to reveal the `3. HW Test` tab, inject a synthetic 3-second `0xFDCD` demo stream, simulate presence at Saved Wi-Fi Places, and load the 75-minute Downtown Chicago demo trip (`Select Trip → 🔄 Reload 75-min Demo Chicago Trip`).
+   * **Developer Demo & Simulation Controls:** When **`🛠️ Developer Mode`** is enabled, UI controls appear to reveal the `3. HW Test` tab, inject a synthetic 3-second `0xFDCD` demo stream, simulate presence at Saved Wi-Fi Places, and load the 75-minute Downtown Chicago demo trip (`Select Trip → 🔄 Reload Canned Demo Trip`).
 2. **Interactive 2-Mode BLE & GATT Testbench:**
    * Live mode selector (`PASSIVE_ONLY`, `PERIODIC_GATT_KEEPALIVE`) to test against the real `CGDN1` today:
      * Verify whether an active GATT connection to `22210000-554a-4546-5542-46534450464d` suppresses `0xFDCD` broadcasts.
@@ -416,5 +415,5 @@ Because the physical `CGDN1` hardware arrives today, **Milestone 1** is scoped t
 3. **BLE-Gated State Machine & Saved Wi-Fi Detector:**
    * Foreground service implementing `Idle_OutOfRange` ↔ `Stationary_KnownAP` ↔ `Field_Excursion_Active` ↔ `Field_Excursion_SignalPaused`.
    * One-tap **"Save Current Wi-Fi Place"** + live `ConnectivityManager.NetworkCallback(FLAG_INCLUDE_LOCATION_INFO)` transition logging + BLE-gated `FusedLocationProviderClient` scalar movement capture (`speed_mps`, `delta_distance_m`, `horizontal_accuracy_m`).
-4. **Binary 14-Day Ring Buffer + CSV Exporter + Format Docs:**
-   * Working `FileChannel`-backed fixed-size 14-day ring buffer (`15s` step, `80,640` slots), one-tap CSV export for inspecting today's hardware test runs, and [`docs/binary_storage_format.md`](binary_storage_format.md) + [`docs/csv_export_schema.md`](csv_export_schema.md).
+4. **Binary 14-Day Ring Buffer + Multi-Sheet XLSX Exporter/Importer + Format Docs:**
+   * Working `FileChannel`-backed fixed-size 14-day ring buffer (`15s` step, `80,640` slots), one-tap whole-trip and per-segment XLSX export and lossless `.xlsx` trip import, and [`docs/binary_storage_format.md`](binary_storage_format.md) + [`docs/xlsx_export_schema.md`](xlsx_export_schema.md).

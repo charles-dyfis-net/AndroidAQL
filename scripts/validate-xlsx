@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""
+Validate generated or bundled `.xlsx` files on the host with `openxml-audit`
+and fail if any workbook has errors or warnings (including Excel app-compat warnings).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _find_cmd() -> list[str]:
+    extra_dirs = [
+        str(Path.home() / ".nix-profile" / "bin"),
+        str(Path.home() / ".local" / "bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+    ]
+    search_path = os.pathsep.join([os.environ.get("PATH", ""), *extra_dirs])
+    direct = shutil.which("openxml-audit", path=search_path)
+    if direct:
+        return [direct]
+    uvx = shutil.which("uvx", path=search_path)
+    if uvx:
+        return [uvx, "--offline", "openxml-audit"]
+    raise SystemExit(
+        "Neither 'openxml-audit' nor 'uvx' was found on PATH (~/.nix-profile/bin, ~/.local/bin, /opt/homebrew/bin, /usr/local/bin)."
+    )
+
+
+def _collect_xlsx_targets(raw_args: list[str]) -> list[Path]:
+    targets: list[Path] = []
+    roots = [Path(a) for a in raw_args] if raw_args else [Path("app/src/main/assets/demo")]
+    for root in roots:
+        if root.is_dir():
+            targets.extend(sorted(root.rglob("*.xlsx")))
+        elif root.is_file():
+            targets.append(root)
+        else:
+            raise SystemExit(f"Target path not found: {root}")
+    if not targets:
+        raise SystemExit("No .xlsx files found to validate.")
+    return targets
+
+
+def _run_audit(base_cmd: list[str], target: Path) -> tuple[int, str, str]:
+    proc = subprocess.run([*base_cmd, "--output", "json", str(target)], capture_output=True, text=True)
+    if proc.returncode != 0 and len(base_cmd) >= 3 and base_cmd[1] == "--offline" and not proc.stdout.strip():
+        online_cmd = [base_cmd[0], *base_cmd[2:]]
+        proc = subprocess.run([*online_cmd, "--output", "json", str(target)], capture_output=True, text=True)
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def main(argv: list[str]) -> int:
+    base_cmd = _find_cmd()
+    targets = _collect_xlsx_targets(argv)
+    failed = False
+    for path in targets:
+        rc, stdout, stderr = _run_audit(base_cmd, path)
+        if rc != 0 or not stdout.strip():
+            print(f"FAIL {path}: openxml-audit exited {rc}\n{stdout}\n{stderr}", file=sys.stderr)
+            failed = True
+            continue
+        try:
+            payload = json.loads(stdout)
+            entry = payload[0] if isinstance(payload, list) else payload
+            valid = bool(entry.get("valid", False))
+            err_cnt = int(entry.get("error_count", -1))
+            warn_cnt = int(entry.get("warning_count", -1))
+        except Exception as exc:
+            print(f"FAIL {path}: could not parse JSON ({exc}):\n{stdout}", file=sys.stderr)
+            failed = True
+            continue
+        if not valid or err_cnt != 0 or warn_cnt != 0:
+            print(f"FAIL {path}: valid={valid}, errors={err_cnt}, warnings={warn_cnt}\n{stdout}", file=sys.stderr)
+            failed = True
+        else:
+            print(f"PASS {path}: valid=true, errors=0, warnings=0")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

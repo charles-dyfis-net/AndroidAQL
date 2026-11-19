@@ -72,6 +72,14 @@ data class TimelineNoteRecord(
     val createdEpochSec: Long
 )
 
+data class ImportedSliceSpec(
+    val startEpochSec: Long,
+    val endEpochSec: Long,
+    val label: String,
+    val notes: String,
+    val includeInExport: Boolean = true
+)
+
 /**
  * Relational metadata store using Android's SQLiteOpenHelper strictly for low-volume
  * metadata: devices, multi-network Saved Places, customizable Segment Presets, Excursions,
@@ -251,6 +259,18 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
         readableDatabase.rawQuery(
             "SELECT id, mac_address, model_code, nickname, is_active_portable FROM monitor_device ORDER BY id ASC LIMIT 1",
             null
+        ).use { c ->
+            if (c.moveToFirst()) {
+                return MonitorDevice(c.getLong(0), c.getString(1), c.getString(2), c.getString(3), c.getInt(4) != 0)
+            }
+        }
+        return null
+    }
+
+    fun getDeviceById(deviceId: Long): MonitorDevice? {
+        readableDatabase.rawQuery(
+            "SELECT id, mac_address, model_code, nickname, is_active_portable FROM monitor_device WHERE id = ?",
+            arrayOf(deviceId.toString())
         ).use { c ->
             if (c.moveToFirst()) {
                 return MonitorDevice(c.getLong(0), c.getString(1), c.getString(2), c.getString(3), c.getInt(4) != 0)
@@ -955,6 +975,71 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
         return false
     }
 
+    fun createImportedExcursion(
+        deviceId: Long,
+        startEpochSec: Long,
+        endEpochSec: Long,
+        title: String,
+        notes: String,
+        isPinned: Boolean,
+        slices: List<ImportedSliceSpec>,
+        pinnedSlots: List<AqlRingBufferStore.RingSlotRecord>? = null
+    ): Long {
+        val db = writableDatabase
+        val safeEnd = endEpochSec.coerceAtLeast(startEpochSec)
+        val cleanTitle = title.trim().ifEmpty { "Imported Trip" }
+        val cleanSlices = if (slices.isNotEmpty()) {
+            slices
+        } else {
+            listOf(
+                ImportedSliceSpec(
+                    startEpochSec = startEpochSec,
+                    endEpochSec = safeEnd.coerceAtLeast(startEpochSec + 15L),
+                    label = DEFAULT_SLICE_LABEL,
+                    notes = "",
+                    includeInExport = true
+                )
+            )
+        }
+        val blob = if (isPinned && pinnedSlots != null) {
+            AqlRingBufferStore.encodePinnedBlob(pinnedSlots.sortedBy { it.bucketEpochSec })
+        } else {
+            null
+        }
+
+        db.beginTransaction()
+        try {
+            val excCv = ContentValues().apply {
+                put("device_id", deviceId)
+                put("start_epoch_sec", startEpochSec)
+                put("end_epoch_sec", safeEnd)
+                put("is_pinned", if (isPinned) 1 else 0)
+                put("title", cleanTitle)
+                put("notes", notes)
+                put("is_manual", 1)
+            }
+            val excursionId = db.insert("excursion", null, excCv)
+            for (slice in cleanSlices) {
+                val sliceCv = ContentValues().apply {
+                    put("excursion_id", excursionId)
+                    put("start_epoch_sec", slice.startEpochSec)
+                    put("end_epoch_sec", slice.endEpochSec.coerceAtLeast(slice.startEpochSec))
+                    put("include_in_export", if (slice.includeInExport) 1 else 0)
+                    put("label", slice.label.trim().ifEmpty { DEFAULT_SLICE_LABEL })
+                    put("notes", slice.notes)
+                }
+                db.insert("session_slice", null, sliceCv)
+            }
+            if (blob != null) {
+                insertPinnedBlob(db, excursionId, null, startEpochSec, safeEnd, blob)
+            }
+            db.setTransactionSuccessful()
+            return excursionId
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     fun resolveSlotsForExcursion(
         excursionId: Long,
         ringStore: AqlRingBufferStore
@@ -963,15 +1048,15 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
         val endSec = exc.endEpochSec ?: (System.currentTimeMillis() / 1000L)
         val mergedByEpoch = mutableMapOf<Long, AqlRingBufferStore.RingSlotRecord>()
 
+        ringStore.queryRange(0, exc.startEpochSec, endSec).forEach { slot ->
+            mergedByEpoch[slot.bucketEpochSec] = slot
+        }
         if (exc.isPinned) {
             getPinnedSlotsForExcursion(excursionId)?.forEach { slot ->
                 if (slot.bucketEpochSec in exc.startEpochSec..endSec) {
                     mergedByEpoch[slot.bucketEpochSec] = slot
                 }
             }
-        }
-        ringStore.queryRange(0, exc.startEpochSec, endSec).forEach { slot ->
-            mergedByEpoch[slot.bucketEpochSec] = slot
         }
         return mergedByEpoch.values.sortedBy { it.bucketEpochSec }
     }

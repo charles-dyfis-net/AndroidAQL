@@ -8,7 +8,7 @@
 
 - **No Cloud Backend & No Data "Collected" Off-Device:** Under Google Play's Data Safety definition, no user data is "collected" or shared off-device—all sensor, Wi-Fi, location, and step processing and storage occur strictly locally on your phone, and AirSlice does not connect to any cloud server, Qingping Cloud, Xiaomi Home, or remote API.
 - **No Analytics, Telemetry, or Ads:** AirSlice contains zero analytics SDKs, crash-reporting trackers, advertising identifiers, or third-party data trackers.
-- **No Automatic Data Transmission:** No data leaves your device unless you explicitly initiate a file export (CSV or diagnostic JSONL) via the Android system share sheet.
+- **No Automatic Data Transmission:** No data leaves your device unless you explicitly initiate a file export (XLSX workbook or diagnostic JSONL) via the Android system share sheet.
 
 ---
 
@@ -26,7 +26,7 @@
 
 ### C. Physical Activity (`ACTIVITY_RECOGNITION`)
 - **Purpose:** Used strictly on-device throughout active Field Excursions to read Android's hardware step detector / step counter so walking pace stays visible on the movement chart whenever GPS is unavailable, weak (> 50 m), or slower to respond than step cadence (for example, indoors, in urban canyons, during meandering walks, or before GPS anchor breakout). Automatically stopped at Saved Wi-Fi Places or when the monitor is out of range.
-- **Storage & Privacy:** Step events remain strictly in a short-lived (~10-second) in-memory sliding window to estimate scalar walking speed (m/s). Ring-buffer and CSV slots attributed to steps leave GPS accuracy unset (`gps_accuracy_m` blank), and cumulative step counts are never stored to disk, logged, or transmitted.
+- **Storage & Privacy:** Step events remain strictly in a short-lived (~10-second) in-memory sliding window to estimate scalar walking speed (m/s). Ring-buffer and exported XLSX sample rows attributed to steps leave GPS accuracy unset (`gps_accuracy_m` blank), and cumulative step counts are never stored to disk, logged, or transmitted.
 
 ### D. Notifications (`POST_NOTIFICATIONS`)
 - **Purpose:** Used to display the ongoing foreground collector status notification (showing live CO₂ and PM2.5 levels) and optional user-configurable high-CO₂, high-PM2.5, or low-battery alerts.
@@ -35,7 +35,7 @@
 
 ## 3. Data Retention, Sharing, and Deletion
 - **Automatic Rolling Expiration:** High-resolution 15-second telemetry is stored in a constant-size 14-day ring buffer that automatically overwrites slots older than 14 days, unless you explicitly **Pin** a trip.
-- **User-Initiated Exports:** You may optionally export trip summaries as CSV files or share a hardware diagnostic trace (JSONL) using the Android system share sheet. You control the recipient of any shared file.
+- **User-Initiated Exports:** You may optionally export trip or segment workbooks as XLSX files or share a hardware diagnostic trace (JSONL) using the Android system share sheet. You control the recipient of any shared file.
 - **Complete Deletion:** You can delete individual trips, slices, or Saved Wi-Fi Places inside the app at any time, or erase all local data immediately by clearing app storage or uninstalling AirSlice in Android Settings.
 
 ---

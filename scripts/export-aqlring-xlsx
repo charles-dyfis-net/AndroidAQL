@@ -1,0 +1,572 @@
+#!/usr/bin/env python3
+"""
+Export a 4-sheet AirSlice OOXML workbook (`.xlsx`: Trip, Segments, Notes, Samples
+matching `docs/xlsx_export_schema.md`) from an `.aqlring` binary ring buffer and
+`android_aql_metadata.db` SQLite database.
+
+Useful for archiving pulled device backups or building canned demo/replay `.xlsx`
+assets under `app/src/main/assets/demo/`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import math
+import sqlite3
+import struct
+import zipfile
+from pathlib import Path
+from typing import Any
+from xml.sax.saxutils import escape
+
+SCHEMA_VERSION = 1
+SENTINEL_UINT16 = 0xFFFF
+
+TRIP_HEADERS = ["field", "value"]
+SEGMENTS_HEADERS = [
+    "segment_index",
+    "slice_id",
+    "start_iso8601",
+    "start_epoch_sec",
+    "end_iso8601",
+    "end_epoch_sec",
+    "duration_sec",
+    "label",
+    "notes",
+    "include_in_export",
+    "sample_count",
+    "co2_ppm_mean",
+    "co2_ppm_max",
+    "pm25_ugm3_mean",
+]
+NOTES_HEADERS = [
+    "note_id",
+    "timestamp_iso8601",
+    "timestamp_epoch_sec",
+    "text",
+    "created_epoch_sec",
+    "segment_index",
+]
+SAMPLES_HEADERS = [
+    "timestamp_iso8601",
+    "timestamp_epoch_sec",
+    "resolution_sec",
+    "sample_count",
+    "context_state",
+    "known_place_label",
+    "slice_id",
+    "slice_label",
+    "co2_ppm_mean",
+    "co2_ppm_min",
+    "co2_ppm_max",
+    "pm25_ugm3_mean",
+    "pm25_ugm3_max",
+    "pm10_ugm3_mean",
+    "pm10_ugm3_max",
+    "temp_c_mean",
+    "humidity_pct_mean",
+    "battery_pct",
+    "rssi_dbm",
+    "speed_mps",
+    "gps_accuracy_m",
+]
+
+
+def col_letters(col_idx: int) -> str:
+    n = col_idx + 1
+    chars: list[str] = []
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        chars.append(chr(ord("A") + rem))
+    return "".join(reversed(chars))
+
+
+def _escape_attr(text: str) -> str:
+    return escape(text, {'"': "&quot;", "'": "&apos;"})
+
+
+def _strip_illegal_xml(text: str) -> str:
+    return "".join(ch for ch in text if ord(ch) >= 0x20 or ch in ("\t", "\n", "\r"))
+
+
+def _format_cell(
+    ref: str,
+    value: Any,
+    is_header: bool,
+    sst_index: dict[str, int],
+    sst_items: list[str],
+    sst_refs: list[int],
+) -> str:
+    style = ' s="1"' if is_header else ""
+    if value is None:
+        return f'<c r="{ref}"{style}/>' if is_header else ""
+    if isinstance(value, bool):
+        return f'<c r="{ref}"{style} t="b"><v>{1 if value else 0}</v></c>'
+    if isinstance(value, int):
+        return f'<c r="{ref}"{style}><v>{value}</v></c>'
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return ""
+        return f'<c r="{ref}"{style}><v>{value}</v></c>'
+    s = _strip_illegal_xml(str(value))
+    if s == "" and not is_header:
+        return ""
+    idx = sst_index.get(s)
+    if idx is None:
+        idx = len(sst_items)
+        sst_index[s] = idx
+        sst_items.append(s)
+    sst_refs[0] += 1
+    return f'<c r="{ref}"{style} t="s"><v>{idx}</v></c>'
+
+
+def _build_theme_xml() -> str:
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme">'
+        "<a:themeElements>"
+        '<a:clrScheme name="Office">'
+        '<a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>'
+        '<a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>'
+        '<a:dk2><a:srgbClr val="1E293B"/></a:dk2>'
+        '<a:lt2><a:srgbClr val="E2E8F0"/></a:lt2>'
+        '<a:accent1><a:srgbClr val="0284C7"/></a:accent1>'
+        '<a:accent2><a:srgbClr val="0D9488"/></a:accent2>'
+        '<a:accent3><a:srgbClr val="D97706"/></a:accent3>'
+        '<a:accent4><a:srgbClr val="7C3AED"/></a:accent4>'
+        '<a:accent5><a:srgbClr val="059669"/></a:accent5>'
+        '<a:accent6><a:srgbClr val="DC2626"/></a:accent6>'
+        '<a:hlink><a:srgbClr val="0369A1"/></a:hlink>'
+        '<a:folHlink><a:srgbClr val="6D28D9"/></a:folHlink>'
+        "</a:clrScheme>"
+        '<a:fontScheme name="Office">'
+        "<a:majorFont>"
+        '<a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/>'
+        "</a:majorFont>"
+        "<a:minorFont>"
+        '<a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/>'
+        "</a:minorFont>"
+        "</a:fontScheme>"
+        '<a:fmtScheme name="Office">'
+        "<a:fillStyleLst>"
+        '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
+        '<a:gradFill rotWithShape="1"><a:gsLst>'
+        '<a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>'
+        '<a:gs pos="100000"><a:schemeClr val="phClr"/></a:gs>'
+        '</a:gsLst><a:lin ang="5400000" scaled="0"/></a:gradFill>'
+        '<a:gradFill rotWithShape="1"><a:gsLst>'
+        '<a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>'
+        '<a:gs pos="100000"><a:schemeClr val="phClr"/></a:gs>'
+        '</a:gsLst><a:lin ang="5400000" scaled="0"/></a:gradFill>'
+        "</a:fillStyleLst>"
+        "<a:lnStyleLst>"
+        '<a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>'
+        '<a:ln w="25400"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>'
+        '<a:ln w="38100"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>'
+        "</a:lnStyleLst>"
+        "<a:effectStyleLst>"
+        "<a:effectStyle><a:effectLst/></a:effectStyle>"
+        "<a:effectStyle><a:effectLst/></a:effectStyle>"
+        "<a:effectStyle><a:effectLst/></a:effectStyle>"
+        "</a:effectStyleLst>"
+        "<a:bgFillStyleLst>"
+        '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
+        '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
+        '<a:gradFill rotWithShape="1"><a:gsLst>'
+        '<a:gs pos="0"><a:schemeClr val="phClr"/></a:gs>'
+        '<a:gs pos="100000"><a:schemeClr val="phClr"/></a:gs>'
+        '</a:gsLst><a:lin ang="5400000" scaled="0"/></a:gradFill>'
+        "</a:bgFillStyleLst>"
+        "</a:fmtScheme>"
+        "</a:themeElements>"
+        "<a:objectDefaults/>"
+        "<a:extraClrSchemeLst/>"
+        "</a:theme>"
+    )
+
+
+def write_xlsx_workbook(out_path: Path, sheets: list[tuple[str, list[list[Any]]]]) -> None:
+    content_types = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+        '<Default Extension="xml" ContentType="application/xml"/>',
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>',
+        '<Override PartName="/xl/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>',
+        '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>',
+    ]
+    for i in range(1, len(sheets) + 1):
+        content_types.append(
+            f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        )
+    content_types.append("</Types>")
+
+    root_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        "</Relationships>"
+    )
+
+    wb_xml = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>',
+    ]
+    wb_rels = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+    ]
+    for idx, (name, _) in enumerate(sheets, start=1):
+        wb_xml.append(f'<sheet name="{_escape_attr(name[:31])}" sheetId="{idx}" r:id="rId{idx}"/>')
+        wb_rels.append(
+            f'<Relationship Id="rId{idx}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{idx}.xml"/>'
+        )
+    wb_xml.append("</sheets></workbook>")
+    next_rid = len(sheets) + 1
+    wb_rels.append(
+        f'<Relationship Id="rId{next_rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+    )
+    wb_rels.append(
+        f'<Relationship Id="rId{next_rid + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>'
+    )
+    wb_rels.append(
+        f'<Relationship Id="rId{next_rid + 2}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>'
+    )
+    wb_rels.append("</Relationships>")
+
+    styles_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        '<fonts count="2">'
+        '<font><sz val="11"/><color rgb="FF0F172A"/><name val="Calibri"/></font>'
+        '<font><b/><sz val="11"/><color rgb="FF0F172A"/><name val="Calibri"/></font>'
+        "</fonts>"
+        '<fills count="3">'
+        '<fill><patternFill patternType="none"/></fill>'
+        '<fill><patternFill patternType="gray125"/></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFE2E8F0"/><bgColor indexed="64"/></patternFill></fill>'
+        "</fills>"
+        '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="2">'
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+        '<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
+        "</cellXfs>"
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+        "</styleSheet>"
+    )
+
+    sst_index: dict[str, int] = {}
+    sst_items: list[str] = []
+    sst_refs = [0]
+    sheet_xmls: list[str] = []
+    for idx, (_, rows) in enumerate(sheets, start=1):
+        max_cols = max((len(r) for r in rows), default=1)
+        dim_ref = "A1" if not rows else f"A1:{col_letters(max_cols - 1)}{len(rows)}"
+        tab_sel = ' tabSelected="1"' if idx == 1 else ""
+        parts = [
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
+            f'<dimension ref="{dim_ref}"/>',
+            f'<sheetViews><sheetView{tab_sel} workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>',
+            '<sheetFormatPr defaultRowHeight="15"/>',
+            "<sheetData>",
+        ]
+        for r_idx, row in enumerate(rows):
+            r_num = r_idx + 1
+            is_header = r_idx == 0
+            parts.append(f'<row r="{r_num}">')
+            for c_idx, val in enumerate(row):
+                cell_xml = _format_cell(f"{col_letters(c_idx)}{r_num}", val, is_header, sst_index, sst_items, sst_refs)
+                if cell_xml:
+                    parts.append(cell_xml)
+            parts.append("</row>")
+        parts.append("</sheetData></worksheet>")
+        sheet_xmls.append("".join(parts))
+
+    sst_parts = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        f'<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="{sst_refs[0]}" uniqueCount="{len(sst_items)}">',
+    ]
+    for item in sst_items:
+        preserve = bool(item) and (item[0].isspace() or item[-1].isspace() or "\n" in item)
+        space_attr = ' xml:space="preserve"' if preserve else ""
+        sst_parts.append(f"<si><t{space_attr}>{escape(item)}</t></si>")
+    sst_parts.append("</sst>")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", "".join(content_types))
+        zf.writestr("_rels/.rels", root_rels)
+        zf.writestr("xl/workbook.xml", "".join(wb_xml))
+        zf.writestr("xl/_rels/workbook.xml.rels", "".join(wb_rels))
+        zf.writestr("xl/styles.xml", styles_xml)
+        zf.writestr("xl/theme/theme1.xml", _build_theme_xml())
+        zf.writestr("xl/sharedStrings.xml", "".join(sst_parts))
+        for idx, xml_body in enumerate(sheet_xmls, start=1):
+            zf.writestr(f"xl/worksheets/sheet{idx}.xml", xml_body)
+
+    print(f"Wrote XLSX workbook to {out_path} ({out_path.stat().st_size:,} bytes)")
+
+
+def read_ring_slots(ring_path: Path) -> tuple[int, list[dict[str, Any]]]:
+    data = ring_path.read_bytes()
+    magic, ver, arch_count = struct.unpack_from("<8sII", data, 0)
+    if magic != b"AQLRING1" or ver != 1 or arch_count < 1:
+        raise ValueError(f"Unsupported .aqlring header in {ring_path}")
+    step_sec, slot_count, slot_size, data_offset, _last_bucket = struct.unpack_from("<IIIIQ", data, 64)
+    slots: list[dict[str, Any]] = []
+    for i in range(slot_count):
+        off = data_offset + i * slot_size
+        rec = struct.unpack_from("<IHHHHHHHHHHhBBHH", data, off)
+        ts, cnt = rec[0], rec[1]
+        if cnt > 0 and ts > 0:
+            rssi = rec[13]
+            if rssi >= 128:
+                rssi -= 256
+            slots.append(
+                {
+                    "bucket_epoch_sec": ts,
+                    "sample_count": cnt,
+                    "known_place_id": rec[2],
+                    "co2_mean": rec[3],
+                    "co2_min": rec[4],
+                    "co2_max": rec[5],
+                    "pm25_mean": round(rec[6] / 10.0, 1),
+                    "pm25_max": rec[7],
+                    "pm10_mean": round(rec[8] / 10.0, 1),
+                    "pm10_max": rec[9],
+                    "temp_c": round(rec[10] / 10.0, 1),
+                    "humidity": round(rec[11] / 10.0, 1),
+                    "battery": rec[12],
+                    "rssi": rssi,
+                    "speed_mps": None if rec[14] == SENTINEL_UINT16 else round(rec[14] / 100.0, 2),
+                    "gps_acc_m": None if rec[15] == SENTINEL_UINT16 else round(rec[15] / 10.0, 1),
+                }
+            )
+    slots.sort(key=lambda s: s["bucket_epoch_sec"])
+    return step_sec, slots
+
+
+def fmt_iso(epoch_sec: int, tz: datetime.tzinfo) -> str:
+    return datetime.datetime.fromtimestamp(epoch_sec, tz=tz).isoformat()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Export .aqlring + SQLite metadata to 4-sheet AirSlice XLSX.")
+    parser.add_argument("--ring", type=Path, required=True, help="Path to device_1.aqlring")
+    parser.add_argument("--db", type=Path, required=True, help="Path to android_aql_metadata.db")
+    parser.add_argument("--out", type=Path, required=True, help="Destination .xlsx path")
+    parser.add_argument("--excursion-id", type=int, help="Excursion ID to export")
+    parser.add_argument("--stationary-before-epoch", type=int, help="Export stationary slots before this epoch")
+    parser.add_argument("--limit-slots", type=int, default=60, help="Max slots for --stationary-before-epoch")
+    parser.add_argument("--excursion-title", help="Override excursion_title in Trip sheet")
+    parser.add_argument("--scrub-mac", default="58:2D:34:12:AB:CD", help="MAC address to write in Trip sheet")
+    parser.add_argument("--device-nickname", default="Qingping Air Monitor Lite", help="Device nickname in Trip sheet")
+    parser.add_argument("--place-label", default="Home", help="Known place label for stationary rows")
+    args = parser.parse_args()
+
+    step_sec, slots = read_ring_slots(args.ring)
+    conn = sqlite3.connect(str(args.db))
+    places = dict(conn.execute("SELECT id, label FROM known_place").fetchall())
+    local_tz = datetime.datetime.now().astimezone().tzinfo or datetime.timezone.utc
+
+    has_notes_table = (
+        conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='timeline_note'").fetchone()
+        is not None
+    )
+
+    trip_rows: list[list[Any]] = [TRIP_HEADERS]
+    segment_rows: list[list[Any]] = [SEGMENTS_HEADERS]
+    note_rows: list[list[Any]] = [NOTES_HEADERS]
+    sample_rows: list[list[Any]] = [SAMPLES_HEADERS]
+
+    if args.excursion_id is not None:
+        exc_row = conn.execute(
+            "SELECT id, start_epoch_sec, end_epoch_sec, is_pinned, title, notes, is_manual FROM excursion WHERE id = ?",
+            (args.excursion_id,),
+        ).fetchone()
+        if not exc_row:
+            raise SystemExit(f"Excursion {args.excursion_id} not found in {args.db}")
+        exc_id, exc_start, exc_end, is_pinned, exc_title, exc_notes, is_manual = exc_row
+        if args.excursion_title:
+            exc_title = args.excursion_title
+
+        slices = conn.execute(
+            "SELECT id, start_epoch_sec, end_epoch_sec, include_in_export, label, notes "
+            "FROM session_slice WHERE excursion_id = ? ORDER BY start_epoch_sec ASC",
+            (exc_id,),
+        ).fetchall()
+        end_bound = exc_end if exc_end is not None else (slots[-1]["bucket_epoch_sec"] if slots else exc_start)
+        exc_slots = [s for s in slots if (exc_start // step_sec) * step_sec <= s["bucket_epoch_sec"] <= end_bound]
+
+        notes_db = (
+            conn.execute(
+                "SELECT id, timestamp_epoch_sec, text, created_epoch_sec FROM timeline_note "
+                "WHERE timestamp_epoch_sec >= ? AND timestamp_epoch_sec <= ? "
+                "ORDER BY timestamp_epoch_sec ASC, id ASC",
+                (exc_start, end_bound),
+            ).fetchall()
+            if has_notes_table
+            else []
+        )
+
+        trip_rows.extend(
+            [
+                ["schema_version", SCHEMA_VERSION],
+                ["export_scope", "EXCURSION"],
+                ["excursion_id", exc_id],
+                ["excursion_title", exc_title],
+                ["excursion_notes", exc_notes or ""],
+                ["start_iso8601", fmt_iso(exc_start, local_tz)],
+                ["start_epoch_sec", exc_start],
+                ["end_iso8601", fmt_iso(end_bound, local_tz) if exc_end is not None else None],
+                ["end_epoch_sec", end_bound if exc_end is not None else None],
+                ["is_pinned", bool(is_pinned)],
+                ["is_manual", bool(is_manual)],
+                ["device_mac", args.scrub_mac],
+                ["device_nickname", args.device_nickname],
+                ["resolution_sec", step_sec],
+            ]
+        )
+
+        def match_slice(ts: int) -> tuple[int, tuple[Any, ...]] | None:
+            for idx, sl in enumerate(slices):
+                if idx < len(slices) - 1:
+                    if sl[1] <= ts < sl[2]:
+                        return idx + 1, sl
+                else:
+                    if sl[1] <= ts <= sl[2]:
+                        return idx + 1, sl
+            return None
+
+        slots_by_slice: dict[int, list[dict[str, Any]]] = {}
+        for s in exc_slots:
+            ts = s["bucket_epoch_sec"]
+            matched = match_slice(ts)
+            sl = matched[1] if matched else None
+            if sl is not None:
+                slots_by_slice.setdefault(sl[0], []).append(s)
+            is_stat = s["known_place_id"] > 0
+            sample_rows.append(
+                [
+                    fmt_iso(ts, local_tz),
+                    ts,
+                    step_sec,
+                    s["sample_count"],
+                    "STATIONARY_KNOWN_AP" if is_stat else "FIELD_EXCURSION",
+                    places.get(s["known_place_id"], f"Place #{s['known_place_id']}") if is_stat else None,
+                    sl[0] if sl else None,
+                    sl[4] if sl else None,
+                    s["co2_mean"],
+                    s["co2_min"],
+                    s["co2_max"],
+                    s["pm25_mean"],
+                    s["pm25_max"],
+                    s["pm10_mean"],
+                    s["pm10_max"],
+                    s["temp_c"],
+                    s["humidity"],
+                    s["battery"] if 0 <= s["battery"] <= 100 else None,
+                    s["rssi"] if s["rssi"] > -128 else None,
+                    s["speed_mps"],
+                    s["gps_acc_m"],
+                ]
+            )
+
+        for idx, sl in enumerate(slices, start=1):
+            sl_id, sl_start, sl_end, sl_inc, sl_label, sl_notes = sl
+            sl_slots = slots_by_slice.get(sl_id, [])
+            segment_rows.append(
+                [
+                    idx,
+                    sl_id,
+                    fmt_iso(sl_start, local_tz),
+                    sl_start,
+                    fmt_iso(sl_end, local_tz),
+                    sl_end,
+                    max(0, sl_end - sl_start),
+                    sl_label,
+                    sl_notes or "",
+                    bool(sl_inc),
+                    len(sl_slots),
+                    round(sum(x["co2_mean"] for x in sl_slots) / len(sl_slots)) if sl_slots else None,
+                    max((x["co2_max"] for x in sl_slots), default=None),
+                    round(sum(x["pm25_mean"] for x in sl_slots) / len(sl_slots), 1) if sl_slots else None,
+                ]
+            )
+
+        for nid, nts, ntext, ncreated in notes_db:
+            matched = match_slice(nts)
+            note_rows.append([nid, fmt_iso(nts, local_tz), nts, ntext, ncreated, matched[0] if matched else None])
+
+    elif args.stationary_before_epoch is not None:
+        stat_slots = [s for s in slots if s["bucket_epoch_sec"] < args.stationary_before_epoch][-args.limit_slots :]
+        start_ts = stat_slots[0]["bucket_epoch_sec"] if stat_slots else args.stationary_before_epoch
+        end_ts = stat_slots[-1]["bucket_epoch_sec"] if stat_slots else args.stationary_before_epoch
+        trip_rows.extend(
+            [
+                ["schema_version", SCHEMA_VERSION],
+                ["export_scope", "EXCURSION"],
+                ["excursion_id", None],
+                ["excursion_title", ""],
+                ["excursion_notes", ""],
+                ["start_iso8601", fmt_iso(start_ts, local_tz)],
+                ["start_epoch_sec", start_ts],
+                ["end_iso8601", fmt_iso(end_ts, local_tz)],
+                ["end_epoch_sec", end_ts],
+                ["is_pinned", False],
+                ["is_manual", False],
+                ["device_mac", args.scrub_mac],
+                ["device_nickname", args.device_nickname],
+                ["resolution_sec", step_sec],
+            ]
+        )
+        for s in stat_slots:
+            ts = s["bucket_epoch_sec"]
+            label = places.get(s["known_place_id"], args.place_label)
+            sample_rows.append(
+                [
+                    fmt_iso(ts, local_tz),
+                    ts,
+                    step_sec,
+                    s["sample_count"],
+                    "STATIONARY_KNOWN_AP",
+                    label,
+                    None,
+                    None,
+                    s["co2_mean"],
+                    s["co2_min"],
+                    s["co2_max"],
+                    s["pm25_mean"],
+                    s["pm25_max"],
+                    s["pm10_mean"],
+                    s["pm10_max"],
+                    s["temp_c"],
+                    s["humidity"],
+                    s["battery"] if 0 <= s["battery"] <= 100 else None,
+                    s["rssi"] if s["rssi"] > -128 else None,
+                    None,
+                    None,
+                ]
+            )
+    else:
+        raise SystemExit("Specify --excursion-id or --stationary-before-epoch")
+
+    write_xlsx_workbook(
+        args.out,
+        [
+            ("Trip", trip_rows),
+            ("Segments", segment_rows),
+            ("Notes", note_rows),
+            ("Samples", sample_rows),
+        ],
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -43,7 +43,7 @@ import androidx.core.content.FileProvider
 import io.github.androidaql.R
 import io.github.androidaql.engine.ExcursionStateMachine
 import io.github.androidaql.engine.StepMovementEstimator
-import io.github.androidaql.export.CsvExporter
+import io.github.androidaql.export.XlsxExporter
 import io.github.androidaql.service.AqlCollectorService
 import io.github.androidaql.storage.AqlRingBufferStore
 import io.github.androidaql.storage.BleCollectionMode
@@ -152,28 +152,48 @@ class MainActivity : AppCompatActivity() {
         collectorService?.refreshStepSensorRegistration()
     }
 
-    private val importCsvLauncher = registerForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        val svc = collectorService ?: return@registerForActivityResult
-        if (uri == null) return@registerForActivityResult
+    private fun launchXlsxImportPicker(timeShiftForDemo: Boolean) {
+        val launcher = if (timeShiftForDemo) importDemoReplayXlsxLauncher else importXlsxLauncher
+        launcher.launch(arrayOf(XlsxExporter.MIME_TYPE, "application/octet-stream", "*/*"))
+    }
+
+    private fun handleImportedXlsxUri(uri: android.net.Uri?, timeShiftForDemo: Boolean) {
+        val svc = collectorService ?: return
+        if (uri == null) return
         try {
-            val importedId = contentResolver.openInputStream(uri)?.use { input ->
-                svc.importExcursionFromCsv(input)
+            val result = contentResolver.openInputStream(uri)?.use { input ->
+                svc.importExcursionFromXlsx(input, timeShiftToNow = timeShiftForDemo)
             }
-            if (importedId != null) {
+            if (result?.excursionId != null) {
                 customWindowStartEpochSec = null
                 customWindowEndEpochSec = null
-                selectedExcursionId = importedId
+                selectedExcursionId = result.excursionId
                 switchTab(1)
                 refreshTripsTab()
-                Toast.makeText(this, "Imported CSV trip for replay", Toast.LENGTH_SHORT).show()
+                val base = if (timeShiftForDemo) {
+                    "Replayed XLSX (${result.importedSegmentCount} segs, ${result.importedNoteCount} notes)"
+                } else {
+                    "Imported pinned trip (${result.importedSegmentCount} segs, ${result.importedNoteCount} notes)"
+                }
+                Toast.makeText(this, base, Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(this, "No valid AirSlice rows found in CSV", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "No valid AirSlice samples found in XLSX workbook", Toast.LENGTH_LONG).show()
             }
         } catch (e: Exception) {
-            Toast.makeText(this, "CSV import failed: ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "XLSX import failed: ${e.message}", Toast.LENGTH_LONG).show()
         }
+    }
+
+    private val importXlsxLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        handleImportedXlsxUri(uri, timeShiftForDemo = false)
+    }
+
+    private val importDemoReplayXlsxLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        handleImportedXlsxUri(uri, timeShiftForDemo = true)
     }
 
     private val serviceListener: (AqlCollectorService.LiveTelemetrySnapshot) -> Unit = { snap ->
@@ -609,7 +629,7 @@ class MainActivity : AppCompatActivity() {
             append("AirSlice accesses location, Wi-Fi, and physical activity step data on-device for Trip Mode and Saved Places (including in the background or with the screen off), and immediately discards almost all of it—keeping only movement speed (m/s) and GPS accuracy (m):\n\n")
             append("• Saved Wi-Fi Places: Checks whether your connected Wi-Fi matches a Saved Place (Location permission required) so GPS and step sensing stay off at saved locations like your home or office, where movement tracking isn't needed.\n\n")
             append("• Trip Movement (GPS + Steps): Outside Saved Places while your monitor is nearby, converts GPS fixes and hardware step cadence into scalar speed (m/s) and accuracy (m) in memory, immediately discarding raw coordinates and step counts.\n\n")
-            append("• 100% Local & Private: Raw GPS coordinates, unconfigured Wi-Fi names, and step counts are never saved to disk or sent to any server; recorded summaries leave your phone only when you explicitly share a CSV or diagnostic log.")
+            append("• 100% Local & Private: Raw GPS coordinates, unconfigured Wi-Fi names, and step counts are never saved to disk or sent to any server; recorded summaries leave your phone only when you explicitly share an XLSX workbook or diagnostic log.")
         }
 
         val builder = AlertDialog.Builder(this)
@@ -940,7 +960,7 @@ class MainActivity : AppCompatActivity() {
             visibility = if (isDemoDataEnabled()) View.VISIBLE else View.GONE
             setOnClickListener {
                 val running = collectorService?.toggleDemoStream() ?: false
-                val msg = if (running) "Started Live Demo CSV Replay (every 3s)" else "Stopped Live Demo Replay"
+                val msg = if (running) "Started Live Demo Replay (every 3s)" else "Stopped Live Demo Replay"
                 Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
             }
         }
@@ -2080,6 +2100,14 @@ class MainActivity : AppCompatActivity() {
             dualPaneSlicerView.timelineNotes = emptyList()
             updateZoomControlsUi()
             slicesContainer?.removeAllViews()
+            slicesContainer?.addView(Button(this).apply {
+                text = "📥 Import Trip (.xlsx)..."
+                isAllCaps = false
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setOnClickListener {
+                    launchXlsxImportPicker(timeShiftForDemo = false)
+                }
+            })
             if (isDemoDataEnabled()) {
                 slicesContainer?.addView(Button(this).apply {
                     text = "🎭 Load Canned Demo Trip"
@@ -2093,11 +2121,11 @@ class MainActivity : AppCompatActivity() {
                     }
                 })
                 slicesContainer?.addView(Button(this).apply {
-                    text = "📂 Import / Replay CSV File..."
+                    text = "📂 Demo Replay XLSX (Time-Shifted)..."
                     isAllCaps = false
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                     setOnClickListener {
-                        importCsvLauncher.launch(arrayOf("text/csv", "text/comma-separated-values", "text/plain", "*/*"))
+                        launchXlsxImportPicker(timeShiftForDemo = true)
                     }
                 })
             }
@@ -2383,11 +2411,11 @@ class MainActivity : AppCompatActivity() {
                 setPadding(0, dp(4), 0, 0)
             }
             val exportSliceBtn = Button(this).apply {
-                text = "📤 Export CSV"
+                text = "📤 Export XLSX"
                 isAllCaps = false
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
                 setOnClickListener {
-                    exportSliceToCsv(slice, idx + 1, sliceSlots)
+                    exportSliceToXlsx(slice, idx + 1, sliceSlots)
                 }
             }
             controlsRow.addView(exportSliceBtn)
@@ -3310,7 +3338,30 @@ class MainActivity : AppCompatActivity() {
         layout.addView(titleInput)
         layout.addView(pinCard)
 
-        AlertDialog.Builder(this)
+        var dialogRef: AlertDialog? = null
+        val exportTripBtn = Button(this).apply {
+            text = "📤 Export Trip (.xlsx)"
+            isAllCaps = false
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8) }
+            setOnClickListener {
+                val editedTitle = titleInput.text.toString().trim().ifEmpty { "Trip" }
+                if (editedTitle != exc.title) {
+                    svc.metadataDb.renameExcursion(exc.id, editedTitle)
+                    refreshTripsTab()
+                }
+                val updatedExc = svc.metadataDb.getExcursions().firstOrNull { it.id == exc.id }
+                    ?: exc.copy(title = editedTitle)
+                dialogRef?.dismiss()
+                exportExcursionToXlsx(updatedExc)
+            }
+        }
+        layout.addView(exportTripBtn)
+
+        dialogRef = AlertDialog.Builder(this)
             .setTitle("Manage Trip")
             .setView(layout)
             .setPositiveButton("Save") { _, _ ->
@@ -3684,13 +3735,11 @@ class MainActivity : AppCompatActivity() {
         val nowSec = System.currentTimeMillis() / 1000L
         val retentionWindowSec = svc.ringStore.getArchiveWindowSec(0)
         val options = excursions.map { formatTripPickerLabel(it, nowSec, retentionWindowSec) }.toMutableList()
+        val importIdx = options.size
+        options.add("📥 Import Trip (.xlsx)...")
         if (demo) {
             options.add("🔄 Reload Canned Demo Trip")
-            options.add("📂 Import / Replay CSV File...")
-        }
-        if (options.isEmpty()) {
-            Toast.makeText(this, "No trips recorded yet.", Toast.LENGTH_SHORT).show()
-            return
+            options.add("📂 Demo Replay XLSX (Time-Shifted)...")
         }
         AlertDialog.Builder(this)
             .setTitle("Select Trip")
@@ -3702,19 +3751,87 @@ class MainActivity : AppCompatActivity() {
                         selectedExcursionId = excursions[which].id
                         refreshTripsTab()
                     }
-                    demo && which == excursions.size -> {
+                    which == importIdx -> {
+                        launchXlsxImportPicker(timeShiftForDemo = false)
+                    }
+                    demo && which == importIdx + 1 -> {
                         selectedExcursionId = svc.seedDemoChicagoExcursion()
                         refreshTripsTab()
                     }
-                    demo && which == excursions.size + 1 -> {
-                        importCsvLauncher.launch(arrayOf("text/csv", "text/comma-separated-values", "text/plain", "*/*"))
+                    demo && which == importIdx + 2 -> {
+                        launchXlsxImportPicker(timeShiftForDemo = true)
                     }
                 }
             }
             .show()
     }
 
-    private fun exportSliceToCsv(
+    private fun slugifyFilenamePart(raw: String, fallback: String): String =
+        raw.lowercase(Locale.US)
+            .replace(Regex("[^a-z0-9]+"), "_")
+            .trim('_')
+            .ifEmpty { fallback }
+            .take(32)
+
+    private fun resolveDeviceForExport(svc: AqlCollectorService, deviceId: Long): MonitorDevice =
+        svc.metadataDb.getDeviceById(deviceId)
+            ?: svc.metadataDb.getPrimaryDevice()
+            ?: MonitorDevice(1L, "58:2D:34:12:AB:CD", "CGDN1", "Qingping Air Monitor Lite", true)
+
+    private fun shareXlsxBytes(
+        bytes: ByteArray,
+        fileName: String,
+        subject: String,
+        chooserTitle: String
+    ) {
+        val exportDir = File(filesDir, "exports").apply { mkdirs() }
+        val outFile = File(exportDir, fileName)
+        outFile.writeBytes(bytes)
+
+        val authority = "${applicationContext.packageName}.fileprovider"
+        val contentUri = FileProvider.getUriForFile(this, authority, outFile)
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = XlsxExporter.MIME_TYPE
+            putExtra(Intent.EXTRA_SUBJECT, subject)
+            putExtra(Intent.EXTRA_STREAM, contentUri)
+            clipData = ClipData.newRawUri(outFile.name, contentUri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(shareIntent, "$chooserTitle (${outFile.name})"))
+    }
+
+    private fun exportExcursionToXlsx(exc: ExcursionRecord) {
+        val svc = collectorService ?: return
+        val slots = svc.metadataDb.resolveSlotsForExcursion(exc.id, svc.ringStore)
+        if (slots.isEmpty()) {
+            Toast.makeText(this, "No air-quality samples recorded in this trip.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val slices = svc.metadataDb.getSlicesForExcursion(exc.id)
+        val excEndSec = exc.endEpochSec ?: (System.currentTimeMillis() / 1000L)
+        val notes = svc.metadataDb.getTimelineNotesInRange(exc.startEpochSec, excEndSec)
+        val device = resolveDeviceForExport(svc, exc.deviceId)
+        val placesMap = svc.metadataDb.getKnownPlaces().associateBy { it.id }
+
+        val xlsxBytes = XlsxExporter.exportExcursionXlsx(
+            device = device,
+            excursion = exc,
+            slices = slices,
+            slots = slots,
+            notes = notes,
+            knownPlacesById = placesMap,
+            onlySelectedForExport = false
+        )
+        val slug = slugifyFilenamePart(exc.title, "trip")
+        shareXlsxBytes(
+            bytes = xlsxBytes,
+            fileName = "trip_${exc.id}_${slug}.xlsx",
+            subject = "Air Quality Trip XLSX: ${exc.title}",
+            chooserTitle = "Share Trip XLSX"
+        )
+    }
+
+    private fun exportSliceToXlsx(
         slice: SessionSliceRecord,
         sliceNumber: Int,
         preloadedSlots: List<AqlRingBufferStore.RingSlotRecord>? = null
@@ -3728,37 +3845,25 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "No air-quality samples recorded in this segment.", Toast.LENGTH_SHORT).show()
             return
         }
-        val device = svc.metadataDb.getPrimaryDevice()
-            ?: MonitorDevice(1L, "58:2D:34:12:AB:CD", "CGDN1", "Qingping Air Monitor Lite", true)
+        val notes = svc.metadataDb.getTimelineNotesInRange(slice.startEpochSec, slice.endEpochSec)
+        val device = resolveDeviceForExport(svc, exc.deviceId)
         val placesMap = svc.metadataDb.getKnownPlaces().associateBy { it.id }
 
-        val csvText = CsvExporter.exportSliceCsv(
+        val xlsxBytes = XlsxExporter.exportSliceXlsx(
             device = device,
             excursion = exc,
             slice = slice,
             slots = slots,
+            notes = notes,
             knownPlacesById = placesMap
         )
-
-        val slug = slice.label.lowercase(Locale.US)
-            .replace(Regex("[^a-z0-9]+"), "_")
-            .trim('_')
-            .ifEmpty { "segment" }
-            .take(32)
-        val exportDir = File(filesDir, "exports").apply { mkdirs() }
-        val outFile = File(exportDir, "trip_${exc.id}_seg_${sliceNumber}_${slug}.csv")
-        outFile.writeText(csvText)
-
-        val authority = "${applicationContext.packageName}.fileprovider"
-        val contentUri = FileProvider.getUriForFile(this, authority, outFile)
-        val shareIntent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/csv"
-            putExtra(Intent.EXTRA_SUBJECT, "Air Quality Segment CSV: #${sliceNumber} ${slice.label}")
-            putExtra(Intent.EXTRA_STREAM, contentUri)
-            clipData = ClipData.newRawUri(outFile.name, contentUri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        startActivity(Intent.createChooser(shareIntent, "Share Segment CSV (${outFile.name})"))
+        val slug = slugifyFilenamePart(slice.label, "segment")
+        shareXlsxBytes(
+            bytes = xlsxBytes,
+            fileName = "trip_${exc.id}_seg_${sliceNumber}_${slug}.xlsx",
+            subject = "Air Quality Segment XLSX: #${sliceNumber} ${slice.label}",
+            chooserTitle = "Share Segment XLSX"
+        )
     }
 
     private fun shareHardwareDiagnosticTrace() {

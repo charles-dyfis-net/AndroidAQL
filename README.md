@@ -20,7 +20,7 @@ The **Qingping Air Monitor Lite (`CGDN1`)** packs research-grade environmental s
   1. **Direct Phone-to-Monitor Bluetooth Recording (Zero Wi-Fi or Cloud Needed):** `AirSlice` receives live readings directly from your `CGDN1` over Bluetooth Low Energy on your Android phone—anywhere you carry it, with no internet connection, cloud account, or MQTT broker required.
   2. **Automatic 5-Second Offline Setup (Continuous Bluetooth • Normal Anti-Burn-In Screen):** If you hold the touch-bar for ~7 seconds on an unconfigured monitor, `AirSlice` completes setup offline over Bluetooth in ~5 seconds, restores the normal pixel-shifting CO₂ display, and unlocks continuous passive Bluetooth broadcasts—with no Wi-Fi network or vendor app required. Already-configured monitors stay untouched and passive.
   3. **Privacy-by-Default Location & Movement Correlation:** Out of the box (`📡 Monitoring • GPS Off`), `AirSlice` keeps GPS and step sensing disabled until you either save a **Saved Wi-Fi Place** (e.g., Home) or explicitly tap **`🚶 Start Trip Manually`**—and whenever you are at a Saved Wi-Fi Place or the monitor is turned off or out of range for 90 seconds, GPS polling turns right back off (`0 mW`). Auto-recorded **Field Excursions** activate once at least one Saved Wi-Fi Place is configured, recording local movement speed and GPS accuracy on-device alongside your air quality readings whenever you leave a saved place (or start a trip manually) with your monitor active. A configurable **Wi-Fi Disconnect Debounce** in **⚙️ Settings** (`30s` default to avoid waking GPS on short Wi-Fi drops, or `0s` Immediate to capture elevators/hallways right away, plus `15s` and `60s`) controls how quickly auto-trips wake GPS; untouched auto-recorded trips shorter than **3 minutes** are automatically cleaned up after closing while manually started trips are always kept (and all 15-second readings remain in the 14-day ring buffer). Recorded trips automatically expire and are deleted after **14 days** unless you actively choose to keep (pin) them.
-  4. **Retrospective Trip Slicer & Self-Contained CSV Export:** Instead of making you fiddle with start/stop buttons while walking or riding transit, `AirSlice` records continuously into a constant-size (`2.58 MB`) on-device ring buffer (14 days at 15-second resolution). After your outing, you can scrub a synchronized **3-Pane Graph Stack**, split the trip into named segments, trim start/end dead time, pin trips you want to keep forever so they are never overwritten, and export self-contained RFC 4180 CSV reports for analysis or indoor-air-quality advocacy.
+  4. **Retrospective Trip Slicer & Multi-Sheet XLSX Export/Import:** Instead of making you fiddle with start/stop buttons while walking or riding transit, `AirSlice` records continuously into a constant-size (`2.58 MB`) on-device ring buffer (14 days at 15-second resolution). After your outing, you can scrub a synchronized **3-Pane Graph Stack**, split the trip into named segments, trim start/end dead time, pin trips you want to keep forever so they are never overwritten, and export or re-import self-contained 4-sheet OOXML `.xlsx` workbooks (`Trip`, `Segments`, `Notes`, `Samples`) preserving every split and note.
 
 | Capability | Stock Qingping / MQTT Clients | `AirSlice` |
 | :--- | :--- | :--- |
@@ -29,7 +29,7 @@ The **Qingping Air Monitor Lite (`CGDN1`)** packs research-grade environmental s
 | **Works Outside Home Wi-Fi?** | ❌ Loses connectivity as soon as you leave your AP | ✅ Records over Bluetooth anywhere with your phone |
 | **Unconfigured Setup & Sleep Limits** | ❌ Bluetooth stays off or sleeps after 1–30m until set up via Qingping+ & Wi-Fi | ✅ **Automatic 5-second offline setup** + continuous passive recording (anti-burn-in OLED restored) |
 | **Retrospective Trip Slicing** | ❌ Continuous unsegmented stream | ✅ Interactive 3-pane timeline slicer with named segments & notes |
-| **Cloud / Account Dependency** | Typically requires Qingping/Xiaomi app or local server | **None** — 100% local on-device storage and direct CSV export |
+| **Cloud / Account Dependency** | Typically requires Qingping/Xiaomi app or local server | **None** — 100% local on-device storage and direct XLSX export/import |
 
 ---
 
@@ -82,13 +82,13 @@ The **Qingping Air Monitor Lite (`CGDN1`)** packs research-grade environmental s
 
 ## Documentation
 
-* **[How Trips, Segments, and Splits Work](docs/trip_slicing_guide.md)** — End-user guide with screenshots explaining segments (`#1`, `#2`, ...), shared dividers (`⇔ 1|2`), Overview Minimap zooming/panning, splitting, nudging, labeling, merging, permanent pinning, zero-scroll landscape mode, and CSV export.
+* **[How Trips, Segments, and Splits Work](docs/trip_slicing_guide.md)** — End-user guide with screenshots explaining segments (`#1`, `#2`, ...), shared dividers (`⇔ 1|2`), Overview Minimap zooming/panning, splitting, nudging, labeling, merging, permanent pinning, zero-scroll landscape mode, and XLSX export/import.
 * **[How Your Monitor Works with `AirSlice`](docs/how_cgdn1_works.md)** — Conceptual guide for curious users covering sensors inside the `CGDN1`, battery runtime, Setup Mode vs. Normal Mode, 5-second offline setup, fallback settings, and ESPHome support.
 * **[Upstream ESPHome Firmware (`nemethhh/esphome-qingping-cgdn1`, `main` ≥ `26642dcb`)](https://github.com/nemethhh/esphome-qingping-cgdn1)** — Compile `main` (commit [`26642dcb3d324e5619563279f77eef4a0f239d46`](https://github.com/nemethhh/esphome-qingping-cgdn1/commit/26642dcb3d324e5619563279f77eef4a0f239d46) / 2026-11-17 or newer) with `-s bthome true` (and optionally `-s portable true`) for passive BTHome v2 (`0xFCD2`) BLE broadcasts tuned for portable `AirSlice` use.
 * **[Requirements & Architecture Specification](docs/requirements_spec.md)** — State machine, decoupled BLE timeouts, 3-mode BLE/GATT privacy strategy, data model, 3-pane graph stack, View/Edit & Portrait/Landscape ergonomics, and hardware bring-up logger.
 * **[Physical Hardware Observations (`CGDN1`)](docs/hardware_observations.md)** — Empirical and firmware-verified wire-protocol reference for `CGDN1` (`Firmware 4.8.5`, Product ID `0x24`), including ESP32-WROVER-B internals, dual-MAC radio behavior (`:BA` vs. `:BC`), the `7.2 s` touch-slider reset, Bluetooth timers, SHT4x self-heating, and the full GATT characteristic/command map.
 * **[Binary Ring-Buffer Format (`.aqlring`)](docs/binary_storage_format.md)** — Byte-level specification of the constant-size (`2.58 MB`) 14-day circular time-series store (`AQLRING1`) and pinned trip blobs (`AQLP`).
-* **[CSV Export Schema](docs/csv_export_schema.md)** — Self-contained RFC 4180 CSV export contract designed to feed external PDF/advocacy report generators.
+* **[XLSX Export & Import Schema](docs/xlsx_export_schema.md)** — Self-contained 4-sheet OOXML `.xlsx` contract (`Trip`, `Segments`, `Notes`, `Samples`) for whole-trip backups/restores and PDF/advocacy report generators.
 * **[Privacy Policy](docs/PRIVACY_POLICY.md)** — Local-only privacy disclosure for Google Play (`net.dyfis.androidaql`).
 
 ---
@@ -98,6 +98,8 @@ The **Qingping Air Monitor Lite (`CGDN1`)** packs research-grade environmental s
 ```bash
 ./gradlew test assembleDebug
 ```
+
+Host-side OOXML validation of generated and bundled `.xlsx` workbooks uses [`openxml-audit`](https://pypi.org/project/openxml-audit/) (run automatically during `./gradlew test` when `openxml-audit` or `uvx` is available, or manually via [`./scripts/validate-xlsx`](scripts/validate-xlsx)).
 
 Debug-only screenshot capture automation (requires `adb`, `ffmpeg`, and a connected Android device or emulator; safely backs up and restores live app data afterward):
 
