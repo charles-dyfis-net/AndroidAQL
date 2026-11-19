@@ -65,6 +65,13 @@ data class SessionSliceRecord(
     val notes: String
 )
 
+data class TimelineNoteRecord(
+    val id: Long,
+    val timestampEpochSec: Long,
+    val text: String,
+    val createdEpochSec: Long
+)
+
 /**
  * Relational metadata store using Android's SQLiteOpenHelper strictly for low-volume
  * metadata: devices, multi-network Saved Places, customizable Segment Presets, Excursions,
@@ -161,12 +168,41 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
             """.trimIndent()
         )
 
+        db.execSQL(
+            """
+            CREATE TABLE timeline_note (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp_epoch_sec INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                created_epoch_sec INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+        db.execSQL(
+            "CREATE INDEX idx_timeline_note_ts ON timeline_note(timestamp_epoch_sec)"
+        )
+
         seedDefaultSegmentPresets(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) {
             db.execSQL("ALTER TABLE excursion ADD COLUMN is_manual INTEGER NOT NULL DEFAULT 0")
+        }
+        if (oldVersion < 3) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS timeline_note (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp_epoch_sec INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    created_epoch_sec INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS idx_timeline_note_ts ON timeline_note(timestamp_epoch_sec)"
+            )
         }
     }
 
@@ -507,8 +543,14 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
             val endSec = exc.endEpochSec
             if (endSec != null) {
                 val duration = endSec - exc.startEpochSec
+                val hasNotes = getTimelineNotesInRange(exc.startEpochSec, endSec).isNotEmpty()
                 if (!exc.isPinned) {
-                    val closedBlip = isAutoDiscardableBlip(exc, getSlicesForExcursion(exc.id), nowSec)
+                    val closedBlip = isAutoDiscardableBlip(
+                        excursion = exc,
+                        slices = getSlicesForExcursion(exc.id),
+                        nowEpochSec = nowSec,
+                        hasTimelineNotes = hasNotes
+                    )
                     val expiredByClock = (nowSec - endSec) > retentionWindowSec
                     val rotatedOutOfRing = (nowSec - endSec) > MICRO_EXCURSION_COALESCE_GAP_SEC &&
                         ringStore.queryRange(0, exc.startEpochSec, endSec).isEmpty()
@@ -517,7 +559,7 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
                         continue
                     }
                 }
-                if (exc.isManual || exc.isPinned || duration >= AUTO_TRIP_MIN_DURATION_SEC) {
+                if (exc.isManual || exc.isPinned || hasNotes || duration >= AUTO_TRIP_MIN_DURATION_SEC) {
                     ringStore.clearKnownPlaceInRange(exc.startEpochSec, endSec)
                 }
             }
@@ -529,6 +571,7 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
                 }
             }
         }
+        pruneExpiredUnpinnedTimelineNotes(retentionWindowSec, nowSec)
     }
 
     fun updateOngoingExcursionEnd(
@@ -627,7 +670,8 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
     fun splitSliceAt(
         sliceId: Long,
         splitEpochSec: Long,
-        @Suppress("UNUSED_PARAMETER") ringStore: AqlRingBufferStore? = null
+        @Suppress("UNUSED_PARAMETER") ringStore: AqlRingBufferStore? = null,
+        newRightSliceLabel: String? = null
     ): Boolean {
         val db = writableDatabase
         val target = readableDatabase.rawQuery(
@@ -654,12 +698,16 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
             val updateCv = ContentValues().apply { put("end_epoch_sec", alignedSplit) }
             db.update("session_slice", updateCv, "id = ?", arrayOf(target.id.toString()))
 
+            val resolvedRightLabel = newRightSliceLabel
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?: "Segment ${existingCount + 1}"
             val insertCv = ContentValues().apply {
                 put("excursion_id", target.excursionId)
                 put("start_epoch_sec", alignedSplit)
                 put("end_epoch_sec", target.endEpochSec)
                 put("include_in_export", if (target.includeInExport) 1 else 0)
-                put("label", "Segment ${existingCount + 1}")
+                put("label", resolvedRightLabel)
                 put("notes", "")
             }
             db.insert("session_slice", null, insertCv)
@@ -928,26 +976,118 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
         return mergedByEpoch.values.sortedBy { it.bucketEpochSec }
     }
 
+    fun addTimelineNote(
+        timestampEpochSec: Long,
+        text: String,
+        createdEpochSec: Long = System.currentTimeMillis() / 1000L
+    ): TimelineNoteRecord {
+        val cleanText = text.trim().ifEmpty { DEFAULT_QUICK_NOTE_TEXT }
+        val cv = ContentValues().apply {
+            put("timestamp_epoch_sec", timestampEpochSec)
+            put("text", cleanText)
+            put("created_epoch_sec", createdEpochSec)
+        }
+        val id = writableDatabase.insert("timeline_note", null, cv)
+        return TimelineNoteRecord(id, timestampEpochSec, cleanText, createdEpochSec)
+    }
+
+    fun updateTimelineNote(noteId: Long, text: String) {
+        val cleanText = text.trim().ifEmpty { DEFAULT_QUICK_NOTE_TEXT }
+        val cv = ContentValues().apply { put("text", cleanText) }
+        writableDatabase.update("timeline_note", cv, "id = ?", arrayOf(noteId.toString()))
+    }
+
+    fun deleteTimelineNote(noteId: Long) {
+        writableDatabase.delete("timeline_note", "id = ?", arrayOf(noteId.toString()))
+    }
+
+    fun getTimelineNotesInRange(
+        startEpochSec: Long,
+        endEpochSec: Long
+    ): List<TimelineNoteRecord> {
+        val list = mutableListOf<TimelineNoteRecord>()
+        readableDatabase.rawQuery(
+            """
+            SELECT id, timestamp_epoch_sec, text, created_epoch_sec
+            FROM timeline_note
+            WHERE timestamp_epoch_sec >= ? AND timestamp_epoch_sec <= ?
+            ORDER BY timestamp_epoch_sec ASC, id ASC
+            """.trimIndent(),
+            arrayOf(startEpochSec.toString(), endEpochSec.toString())
+        ).use { c ->
+            while (c.moveToNext()) {
+                list.add(
+                    TimelineNoteRecord(
+                        id = c.getLong(0),
+                        timestampEpochSec = c.getLong(1),
+                        text = c.getString(2),
+                        createdEpochSec = c.getLong(3)
+                    )
+                )
+            }
+        }
+        return list
+    }
+
+    fun pruneExpiredUnpinnedTimelineNotes(
+        retentionWindowSec: Long,
+        nowSec: Long = System.currentTimeMillis() / 1000L
+    ) {
+        val cutoffSec = nowSec - retentionWindowSec
+        val staleNotes = mutableListOf<TimelineNoteRecord>()
+        readableDatabase.rawQuery(
+            """
+            SELECT id, timestamp_epoch_sec, text, created_epoch_sec
+            FROM timeline_note
+            WHERE timestamp_epoch_sec < ?
+            """.trimIndent(),
+            arrayOf(cutoffSec.toString())
+        ).use { c ->
+            while (c.moveToNext()) {
+                staleNotes.add(
+                    TimelineNoteRecord(
+                        id = c.getLong(0),
+                        timestampEpochSec = c.getLong(1),
+                        text = c.getString(2),
+                        createdEpochSec = c.getLong(3)
+                    )
+                )
+            }
+        }
+        if (staleNotes.isEmpty()) return
+        val pinnedExcursions = getExcursions().filter { it.isPinned }
+        val db = writableDatabase
+        for (note in staleNotes) {
+            val coveredByPinned = pinnedExcursions.any { exc ->
+                note.timestampEpochSec in exc.startEpochSec..(exc.endEpochSec ?: nowSec)
+            }
+            if (!coveredByPinned) {
+                db.delete("timeline_note", "id = ?", arrayOf(note.id.toString()))
+            }
+        }
+    }
+
     companion object {
         const val DB_NAME = "android_aql_metadata.db"
-        const val DB_VERSION = 2
+        const val DB_VERSION = 3
         const val MICRO_EXCURSION_COALESCE_GAP_SEC = 90L
         const val AUTO_TRIP_MIN_DURATION_SEC = 180L
         const val AUTO_TRIP_TITLE_PREFIX = "Trip ("
         const val DEFAULT_SLICE_LABEL = "Unlabeled Trip Span"
+        const val DEFAULT_QUICK_NOTE_TEXT = "📍 Marker"
 
         /**
          * Returns true when a closed auto-recorded excursion is safe to discard as a momentary
          * Wi-Fi dropout: unpinned, not manually started/carved, shorter than 3 minutes, past the
-         * 90-second coalesce grace window, and untouched by user edits (default title, no notes,
-         * single default segment slice).
+         * 90-second coalesce grace window, and untouched by user edits or timeline notes.
          */
         fun isAutoDiscardableBlip(
             excursion: ExcursionRecord,
             slices: List<SessionSliceRecord>,
-            nowEpochSec: Long
+            nowEpochSec: Long,
+            hasTimelineNotes: Boolean = false
         ): Boolean {
-            if (excursion.isPinned || excursion.isManual) return false
+            if (excursion.isPinned || excursion.isManual || hasTimelineNotes) return false
             val endSec = excursion.endEpochSec ?: return false
             val durationSec = (endSec - excursion.startEpochSec).coerceAtLeast(0L)
             if (durationSec >= AUTO_TRIP_MIN_DURATION_SEC) return false
@@ -957,6 +1097,45 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
                 return false
             }
             return true
+        }
+
+        /**
+         * Associates timestamped timeline notes with contiguous slices using `[start, end)` for
+         * non-final segments and `[start, end]` for the final segment so boundary notes appear once.
+         */
+        fun assignNotesToSlices(
+            slices: List<SessionSliceRecord>,
+            notes: List<TimelineNoteRecord>
+        ): Map<Long, List<TimelineNoteRecord>> {
+            if (slices.isEmpty() || notes.isEmpty()) return emptyMap()
+            val out = LinkedHashMap<Long, MutableList<TimelineNoteRecord>>()
+            for (note in notes) {
+                val ts = note.timestampEpochSec
+                val match = slices.withIndex().firstOrNull { (idx, slice) ->
+                    if (idx < slices.lastIndex) {
+                        ts >= slice.startEpochSec && ts < slice.endEpochSec
+                    } else {
+                        ts >= slice.startEpochSec && ts <= slice.endEpochSec
+                    }
+                }?.value ?: continue
+                out.getOrPut(match.id) { mutableListOf() }.add(note)
+            }
+            return out
+        }
+
+        /**
+         * Snaps [noteEpochSec] to the nearest [stepSec] grid boundary strictly inside
+         * `(sliceStartEpochSec, sliceEndEpochSec)`, returning null if it falls on an endpoint.
+         */
+        fun computeAlignedSplitForNote(
+            noteEpochSec: Long,
+            sliceStartEpochSec: Long,
+            sliceEndEpochSec: Long,
+            stepSec: Long = 15L
+        ): Long? {
+            if (stepSec <= 0L) return null
+            val aligned = ((noteEpochSec + stepSec / 2L) / stepSec) * stepSec
+            return if (aligned > sliceStartEpochSec && aligned < sliceEndEpochSec) aligned else null
         }
 
         fun resolveSelectedExcursionId(

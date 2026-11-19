@@ -51,6 +51,7 @@ import io.github.androidaql.storage.ExcursionRecord
 import io.github.androidaql.storage.MetadataDatabase
 import io.github.androidaql.storage.MonitorDevice
 import io.github.androidaql.storage.SessionSliceRecord
+import io.github.androidaql.storage.TimelineNoteRecord
 import io.github.androidaql.util.TempUnitPreference
 import io.github.androidaql.util.TemperatureUnitFormatter
 import java.io.File
@@ -100,9 +101,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var co2VentilationBadgeView: TextView
     private lateinit var secondaryMetricsView: TextView
     private lateinit var liveRecentHistoryView: DualPaneSlicerView
+    private lateinit var recentGraphHeaderView: TextView
+    private lateinit var liveFollowResetBtn: TextView
     private lateinit var wifiStatusView: TextView
     private lateinit var saveCurrentWifiBtn: Button
     private lateinit var manualTripToggleBtn: Button
+    private lateinit var addNowNoteBtn: Button
     private lateinit var demoStreamBtn: Button
 
     // Tab 2: Trips & Slicer Views
@@ -110,6 +114,8 @@ class MainActivity : AppCompatActivity() {
     private var pinTripBtn: TextView? = null
     private var manageTripBtn: TextView? = null
     private lateinit var modeToggleBtn: Button
+    private var tripsAddNoteBtn: TextView? = null
+    private var landAddNoteBtn: Button? = null
     private lateinit var dualPaneSlicerView: DualPaneSlicerView
     private var zoomControlBar: LinearLayout? = null
     private var zoomStatusView: TextView? = null
@@ -135,6 +141,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var hwRawHexLogView: TextView
 
     private val shortTimeFmt = DateTimeFormatter.ofPattern("h:mm a", Locale.US).withZone(ZoneId.systemDefault())
+    private val exactTimeFmt = DateTimeFormatter.ofPattern("h:mm:ss a", Locale.US).withZone(ZoneId.systemDefault())
     private val dateShortTimeFmt = DateTimeFormatter.ofPattern("MMM d, h:mm a", Locale.US).withZone(ZoneId.systemDefault())
 
     private val permissionLauncher = registerForActivityResult(
@@ -806,20 +813,46 @@ class MainActivity : AppCompatActivity() {
         col.addView(heroCardView)
 
         // Recent-History 3-Pane Graph Stack (Last 15 Minutes)
-        val recentGraphHeader = TextView(this).apply {
+        recentGraphHeaderView = TextView(this).apply {
             text = "Recent History (Last 15 Minutes • Touch to Inspect)"
             setTextColor(Color.parseColor("#94A3B8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             setTypeface(typeface, Typeface.BOLD)
-            setPadding(dp(2), dp(12), dp(2), dp(4))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        col.addView(recentGraphHeader)
+        liveFollowResetBtn = TextView(this).apply {
+            text = "↩ Live"
+            maxLines = 1
+            gravity = Gravity.CENTER
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(8), dp(2), dp(8), dp(2))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextColor(Color.parseColor("#7DD3FC"))
+            background = roundedRect("#0F172A", dp(6), strokeHex = "#38BDF8", strokeWidthPx = dp(1))
+            visibility = View.GONE
+            setOnClickListener { liveRecentHistoryView.snapToLiveEdge() }
+        }
+        val recentGraphHeaderRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(2), dp(12), dp(2), dp(4))
+            addView(recentGraphHeaderView)
+            addView(liveFollowResetBtn)
+        }
+        col.addView(recentGraphHeaderRow)
 
         liveRecentHistoryView = DualPaneSlicerView(this).apply {
             isEditMode = false
+            followLatestEdge = true
             desiredHeightDp = 265
             dropoutGracePeriodSec = getDropoutGracePeriodSec()
             emptyStateMessage = "No recent samples in the last 15 minutes."
+            onCursorChanged = { updateLiveGraphHeaderUi() }
+            onLiveFollowStateChanged = { updateLiveGraphHeaderUi() }
+            onTimelineNoteTapped = { note ->
+                showEditOrPromoteNoteDialog(note, slice = null, sliceIdx = -1)
+            }
         }
         col.addView(liveRecentHistoryView)
 
@@ -844,10 +877,15 @@ class MainActivity : AppCompatActivity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             setOnClickListener { promptAddCurrentWifiToSavedPlaces() }
         }
+        val tripActionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
         manualTripToggleBtn = Button(this).apply {
             text = "🚶 Start Trip Manually"
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.45f)
             setOnClickListener {
                 val svc = collectorService ?: return@setOnClickListener
                 val snap = svc.buildSnapshot()
@@ -865,6 +903,36 @@ class MainActivity : AppCompatActivity() {
                 refreshTripsTab()
             }
         }
+        addNowNoteBtn = Button(this).apply {
+            text = "📝 Add Note"
+            isAllCaps = false
+            maxLines = 1
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(6)
+            }
+            setOnClickListener {
+                val nowSec = System.currentTimeMillis() / 1000L
+                val hasDetachedSelection = liveRecentHistoryView.slots.isNotEmpty() &&
+                    !liveRecentHistoryView.isFollowingLiveEdge &&
+                    liveRecentHistoryView.cursorEpochSec > 0L
+                if (hasDetachedSelection) {
+                    showAddNoteDialog(
+                        capturedEpochSec = liveRecentHistoryView.cursorEpochSec,
+                        isFromTripsTab = false,
+                        alternateNowEpochSec = nowSec
+                    )
+                } else {
+                    showAddNoteDialog(
+                        capturedEpochSec = nowSec,
+                        isFromTripsTab = false,
+                        alternateNowEpochSec = null
+                    )
+                }
+            }
+        }
+        tripActionRow.addView(manualTripToggleBtn)
+        tripActionRow.addView(addNowNoteBtn)
         demoStreamBtn = Button(this).apply {
             text = "🎭 Toggle Live Demo Replay Stream (No Hardware Needed)"
             isAllCaps = false
@@ -878,7 +946,7 @@ class MainActivity : AppCompatActivity() {
         }
         wifiCard.addView(wifiStatusView)
         wifiCard.addView(saveCurrentWifiBtn)
-        wifiCard.addView(manualTripToggleBtn)
+        wifiCard.addView(tripActionRow)
         wifiCard.addView(demoStreamBtn)
         col.addView(wifiCard)
 
@@ -930,6 +998,18 @@ class MainActivity : AppCompatActivity() {
             }
             onViewportChanged = { _, _, _ ->
                 updateZoomControlsUi()
+            }
+            onTimelineNoteTapped = { note ->
+                val curSlices = slices
+                val containingIdx = curSlices.indices.firstOrNull { idx ->
+                    val s = curSlices[idx]
+                    if (idx < curSlices.lastIndex) {
+                        note.timestampEpochSec >= s.startEpochSec && note.timestampEpochSec < s.endEpochSec
+                    } else {
+                        note.timestampEpochSec >= s.startEpochSec && note.timestampEpochSec <= s.endEpochSec
+                    }
+                } ?: -1
+                showEditOrPromoteNoteDialog(note, curSlices.getOrNull(containingIdx), containingIdx)
             }
         }
 
@@ -1046,13 +1126,33 @@ class MainActivity : AppCompatActivity() {
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
                 setOnClickListener { focusCurrentSegmentOrDivider() }
             }
+            val landNoteBtn = Button(this).apply {
+                text = "📝 Note"
+                isAllCaps = false
+                maxLines = 1
+                minWidth = 0
+                minimumWidth = 0
+                setPadding(dp(6), dp(4), dp(6), dp(4))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                setOnClickListener {
+                    val ts = if (dualPaneSlicerView.cursorEpochSec > 0L) {
+                        dualPaneSlicerView.cursorEpochSec
+                    } else {
+                        System.currentTimeMillis() / 1000L
+                    }
+                    showAddNoteDialog(capturedEpochSec = ts, isFromTripsTab = true)
+                }
+            }
             landZoomToggleBtn = landZoomBtn
             landFocusSegBtn = landSegBtn
+            landAddNoteBtn = landNoteBtn
+            tripsAddNoteBtn = null
 
             compactTopBar.addView(tripSelectorLabel)
             compactTopBar.addView(switchTripBtn)
             compactTopBar.addView(landZoomBtn)
             compactTopBar.addView(landSegBtn)
+            compactTopBar.addView(landNoteBtn)
             compactTopBar.addView(modeToggleBtn)
             compactTopBar.addView(dividerNudgeBar)
             landRoot.addView(compactTopBar)
@@ -1075,6 +1175,7 @@ class MainActivity : AppCompatActivity() {
             // 3-Pane Graph Stack with Overview Minimap + Quick Zoom bar, and clean Segment Cards.
             landZoomToggleBtn = null
             landFocusSegBtn = null
+            landAddNoteBtn = null
 
             val scroll = ScrollView(this).apply {
                 layoutParams = LinearLayout.LayoutParams(
@@ -1157,8 +1258,38 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(Color.parseColor("#94A3B8"))
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                 setPadding(dp(2), dp(2), dp(2), dp(2))
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             }
             zoomStatusView = zStatus
+
+            val addTripsNoteBtn = TextView(this).apply {
+                text = "📝 + Note"
+                maxLines = 1
+                gravity = Gravity.CENTER
+                isClickable = true
+                isFocusable = true
+                setPadding(dp(8), dp(2), dp(8), dp(2))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setTextColor(Color.parseColor("#5EEAD4"))
+                background = roundedRect("#0F172A", dp(6), strokeHex = "#14B8A6", strokeWidthPx = dp(1))
+                setOnClickListener {
+                    val ts = if (dualPaneSlicerView.cursorEpochSec > 0L) {
+                        dualPaneSlicerView.cursorEpochSec
+                    } else {
+                        System.currentTimeMillis() / 1000L
+                    }
+                    showAddNoteDialog(capturedEpochSec = ts, isFromTripsTab = true)
+                }
+            }
+            tripsAddNoteBtn = addTripsNoteBtn
+
+            val zoomHeaderRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(2), 0, dp(2))
+                addView(zStatus)
+                addView(addTripsNoteBtn)
+            }
 
             fun makeZoomBtn(label: String, weight: Float, onClick: () -> Unit): Button =
                 Button(this).apply {
@@ -1207,7 +1338,7 @@ class MainActivity : AppCompatActivity() {
             val zBar = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(0, dp(2), 0, dp(2))
-                addView(zStatus)
+                addView(zoomHeaderRow)
                 addView(zoomBtnRow)
             }
             zoomControlBar = zBar
@@ -1375,6 +1506,7 @@ class MainActivity : AppCompatActivity() {
             visibility = if (hasSlots && dualPaneSlicerView.slices.isNotEmpty()) View.VISIBLE else View.GONE
             alpha = if (canFocusSeg) ENABLED_BUTTON_ALPHA else DISABLED_BUTTON_ALPHA
         }
+        landAddNoteBtn?.visibility = if (hasSlots && !isTripEditMode) View.VISIBLE else View.GONE
     }
 
     private fun toggleSelectedTripPin(forcePin: Boolean? = null) {
@@ -1845,16 +1977,39 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun updateLiveGraphHeaderUi() {
+        if (!::liveRecentHistoryView.isInitialized ||
+            !::recentGraphHeaderView.isInitialized ||
+            !::liveFollowResetBtn.isInitialized
+        ) {
+            return
+        }
+        val detached = liveRecentHistoryView.slots.isNotEmpty() &&
+            !liveRecentHistoryView.isFollowingLiveEdge &&
+            liveRecentHistoryView.cursorEpochSec > 0L
+        if (detached) {
+            recentGraphHeaderView.text =
+                "Recent History • Selected ${exactTimeFmt.format(Instant.ofEpochSecond(liveRecentHistoryView.cursorEpochSec))}"
+            liveFollowResetBtn.visibility = View.VISIBLE
+        } else {
+            recentGraphHeaderView.text = "Recent History (Last 15 Minutes • Touch to Inspect)"
+            liveFollowResetBtn.visibility = View.GONE
+        }
+    }
+
     private fun refreshLiveRecentGraph() {
         val svc = collectorService ?: return
         val nowSec = System.currentTimeMillis() / 1000L
         val startSec = nowSec - 15L * 60L
         // Query last 15 minutes of 15s high-resolution samples to match the "Last 15 Minutes" header
         val recentSlots = svc.ringStore.queryRange(0, startSec, nowSec)
+        val recentNotes = svc.metadataDb.getTimelineNotesInRange(startSec, nowSec)
         liveRecentHistoryView.fixedWindowStartEpochSec = startSec
         liveRecentHistoryView.fixedWindowEndEpochSec = nowSec
         liveRecentHistoryView.slices = emptyList()
+        liveRecentHistoryView.timelineNotes = recentNotes
         liveRecentHistoryView.slots = recentSlots
+        updateLiveGraphHeaderUi()
     }
 
     private fun refreshTripsTab() {
@@ -1871,12 +2026,14 @@ class MainActivity : AppCompatActivity() {
                 dualPaneSlicerView.resetZoom(notify = false)
             }
             val slots = svc.ringStore.queryRange(0, cwStart, cwEnd)
+            val windowNotes = svc.metadataDb.getTimelineNotesInRange(cwStart, cwEnd)
             val spanLabel = "${dateShortTimeFmt.format(Instant.ofEpochSecond(cwStart))} – ${shortTimeFmt.format(Instant.ofEpochSecond(cwEnd))}"
             tripSelectorLabel.text = "14d Window: $spanLabel"
             pinTripBtn?.visibility = View.GONE
             manageTripBtn?.visibility = View.GONE
             tripRetentionBanner?.visibility = View.GONE
             dualPaneSlicerView.slices = emptyList()
+            dualPaneSlicerView.timelineNotes = windowNotes
             dualPaneSlicerView.slots = slots
             applyPendingSavedViewportIfNeeded()
             updateZoomControlsUi()
@@ -1890,6 +2047,19 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 container.addView(carveBtn)
+                if (windowNotes.isNotEmpty()) {
+                    val notesHdr = TextView(this).apply {
+                        text = "Notes in Selected Window (${windowNotes.size})"
+                        setTextColor(Color.parseColor("#5EEAD4"))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                        setTypeface(typeface, Typeface.BOLD)
+                        setPadding(dp(2), dp(8), dp(2), dp(4))
+                    }
+                    container.addView(notesHdr)
+                    for (note in windowNotes) {
+                        container.addView(buildTimelineNoteRowView(note, slice = null, sliceIdx = -1))
+                    }
+                }
             }
             return
         }
@@ -1907,6 +2077,7 @@ class MainActivity : AppCompatActivity() {
             dualPaneSlicerView.resetZoom(notify = false)
             dualPaneSlicerView.slots = emptyList()
             dualPaneSlicerView.slices = emptyList()
+            dualPaneSlicerView.timelineNotes = emptyList()
             updateZoomControlsUi()
             slicesContainer?.removeAllViews()
             if (isDemoDataEnabled()) {
@@ -1949,6 +2120,8 @@ class MainActivity : AppCompatActivity() {
         }
         val slices = svc.metadataDb.getSlicesForExcursion(currentExc.id)
         val slots = svc.metadataDb.resolveSlotsForExcursion(currentExc.id, svc.ringStore)
+        val excEndSec = currentExc.endEpochSec ?: (System.currentTimeMillis() / 1000L)
+        val tripNotes = svc.metadataDb.getTimelineNotesInRange(currentExc.startEpochSec, excEndSec)
 
         val remLabel = formatRemainingRetentionCompact(
             currentExc,
@@ -1970,6 +2143,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         dualPaneSlicerView.slices = slices
+        dualPaneSlicerView.timelineNotes = tripNotes
         dualPaneSlicerView.slots = slots
         applyPendingSavedViewportIfNeeded()
         updateEditHelperText()
@@ -1977,7 +2151,7 @@ class MainActivity : AppCompatActivity() {
         updateTripRetentionBanner(currentExc, slices)
 
         if (!isLandscape()) {
-            renderSliceCards(slices, slots)
+            renderSliceCards(slices, slots, tripNotes)
         }
     }
 
@@ -1993,14 +2167,97 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun buildTimelineNoteRowView(
+        note: TimelineNoteRecord,
+        slice: SessionSliceRecord?,
+        sliceIdx: Int
+    ): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(4), dp(6), dp(4))
+            background = roundedRect("#0F172A", dp(6), strokeHex = "#14B8A6", strokeWidthPx = dp(1))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(4) }
+        }
+        val labelTv = TextView(this).apply {
+            text = "📝 ${exactTimeFmt.format(Instant.ofEpochSecond(note.timestampEpochSec))} — ${note.text}"
+            setTextColor(Color.parseColor("#CCFBF1"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener {
+                dualPaneSlicerView.selectedDividerIndex = -1
+                val (tripStart, tripEnd) = dualPaneSlicerView.getTripBoundsEpochSec()
+                val snapped = ((note.timestampEpochSec + DualPaneSlicerView.STEP_SEC / 2L) / DualPaneSlicerView.STEP_SEC) * DualPaneSlicerView.STEP_SEC
+                val clamped = snapped.coerceIn(tripStart, tripEnd)
+                dualPaneSlicerView.cursorEpochSec = clamped
+                dualPaneSlicerView.ensureTimestampVisibleInViewport(clamped, centerIfOutside = true)
+                updateEditModeUi()
+                updateSliceCardHighlights(clamped)
+                dualPaneSlicerView.invalidate()
+                (tabContainers.getOrNull(1) as? ScrollView)?.smoothScrollTo(0, 0)
+            }
+        }
+        row.addView(labelTv)
+
+        val canPromote = slice != null &&
+            MetadataDatabase.computeAlignedSplitForNote(
+                note.timestampEpochSec,
+                slice.startEpochSec,
+                slice.endEpochSec
+            ) != null
+        if (canPromote && slice != null) {
+            val splitBtn = Button(this).apply {
+                text = "✂️ Split"
+                isAllCaps = false
+                maxLines = 1
+                minWidth = 0
+                minimumWidth = 0
+                minHeight = 0
+                minimumHeight = 0
+                setPadding(dp(6), dp(3), dp(6), dp(3))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { marginStart = dp(4) }
+                setOnClickListener { showPromoteNoteToSplitDialog(note, slice, sliceIdx) }
+            }
+            row.addView(splitBtn)
+        }
+
+        val editNoteBtn = Button(this).apply {
+            text = "✏️"
+            isAllCaps = false
+            maxLines = 1
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            setPadding(dp(6), dp(3), dp(6), dp(3))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = dp(4) }
+            setOnClickListener { showEditOrPromoteNoteDialog(note, slice, sliceIdx) }
+        }
+        row.addView(editNoteBtn)
+        return row
+    }
+
     private fun renderSliceCards(
         slices: List<SessionSliceRecord>,
-        allSlots: List<AqlRingBufferStore.RingSlotRecord>
+        allSlots: List<AqlRingBufferStore.RingSlotRecord>,
+        timelineNotes: List<TimelineNoteRecord> = emptyList()
     ) {
         val container = slicesContainer ?: return
         container.removeAllViews()
         val cardsList = mutableListOf<Pair<SessionSliceRecord, LinearLayout>>()
         val cursorTs = dualPaneSlicerView.cursorEpochSec
+        val notesBySliceId = MetadataDatabase.assignNotesToSlices(slices, timelineNotes)
 
         for ((idx, slice) in slices.withIndex()) {
             val sliceSlots = allSlots.filter { it.bucketEpochSec in slice.startEpochSec..slice.endEpochSec }
@@ -2113,6 +2370,11 @@ class MainActivity : AppCompatActivity() {
                     setPadding(0, dp(4), 0, dp(2))
                 }
                 card.addView(notesView)
+            }
+
+            val sliceTimelineNotes = notesBySliceId[slice.id].orEmpty()
+            for (note in sliceTimelineNotes) {
+                card.addView(buildTimelineNoteRowView(note, slice, idx))
             }
 
             val controlsRow = LinearLayout(this).apply {
@@ -3099,6 +3361,317 @@ class MainActivity : AppCompatActivity() {
                 selectedExcursionId = svc.metadataDb.getExcursions().firstOrNull()?.id
                 refreshTripsTab()
             }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showAddNoteDialog(
+        capturedEpochSec: Long,
+        isFromTripsTab: Boolean,
+        alternateNowEpochSec: Long? = null
+    ) {
+        val svc = collectorService ?: return
+        val snap = svc.buildSnapshot()
+        val excursions = svc.metadataDb.getExcursions()
+
+        var targetEpochSec = capturedEpochSec
+        var dialogRef: AlertDialog? = null
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(10), dp(20), dp(6))
+        }
+
+        val warnView: TextView? = if (!isFromTripsTab) {
+            TextView(this).apply {
+                setTextColor(Color.parseColor("#FDE68A"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setPadding(0, 0, 0, dp(8))
+            }
+        } else {
+            null
+        }
+
+        fun updateRetentionWarning(tsSec: Long) {
+            val wv = warnView ?: return
+            val nowRefSec = alternateNowEpochSec ?: (System.currentTimeMillis() / 1000L)
+            val coveredByRecordedTrip = excursions.any { exc ->
+                tsSec in exc.startEpochSec..(exc.endEpochSec ?: nowRefSec)
+            }
+            val isLiveNowTarget = (alternateNowEpochSec == null || tsSec == alternateNowEpochSec)
+            val isTripActiveNow = snap.activeExcursionId != null ||
+                snap.collectorState == ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE ||
+                snap.collectorState == ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED
+            when {
+                coveredByRecordedTrip || (isLiveNowTarget && isTripActiveNow) -> {
+                    wv.visibility = View.GONE
+                }
+                isLiveNowTarget && snap.isPendingWifiLossDebounce -> {
+                    wv.text =
+                        "⏳ Waiting for Wi-Fi disconnect debounce — this note will be included if the trip starts (otherwise retained for 14 days)."
+                    wv.visibility = View.VISIBLE
+                }
+                else -> {
+                    wv.text = if (isLiveNowTarget) {
+                        "⏳ No trip is currently running — this note will be discarded after 14 days unless included in a pinned trip."
+                    } else {
+                        "⏳ No trip covers this timestamp — this note will be discarded after 14 days unless included in a pinned trip."
+                    }
+                    wv.visibility = View.VISIBLE
+                }
+            }
+        }
+
+        if (!isFromTripsTab && alternateNowEpochSec != null && alternateNowEpochSec != capturedEpochSec) {
+            val selectedLabel = "📍 Selected (${exactTimeFmt.format(Instant.ofEpochSecond(capturedEpochSec))})"
+            val nowLabel = "🕒 Now (${exactTimeFmt.format(Instant.ofEpochSecond(alternateNowEpochSec))})"
+            lateinit var selectedPill: TextView
+            lateinit var nowPill: TextView
+
+            fun styleTargetPill(pill: TextView, active: Boolean) {
+                if (active) {
+                    pill.setTextColor(Color.parseColor("#5EEAD4"))
+                    pill.setTypeface(Typeface.DEFAULT_BOLD)
+                    pill.background = roundedRect("#0F172A", dp(6), strokeHex = "#14B8A6", strokeWidthPx = dp(1))
+                } else {
+                    pill.setTextColor(Color.parseColor("#CBD5E1"))
+                    pill.setTypeface(Typeface.DEFAULT)
+                    pill.background = roundedRect("#1E293B", dp(6), strokeHex = "#475569", strokeWidthPx = dp(1))
+                }
+            }
+
+            fun selectTargetTimestamp(newTs: Long) {
+                targetEpochSec = newTs
+                val selectedActive = (newTs == capturedEpochSec)
+                styleTargetPill(selectedPill, selectedActive)
+                styleTargetPill(nowPill, !selectedActive)
+                dialogRef?.setTitle("📝 Add Note (${exactTimeFmt.format(Instant.ofEpochSecond(newTs))})")
+                updateRetentionWarning(newTs)
+            }
+
+            selectedPill = TextView(this).apply {
+                text = selectedLabel
+                maxLines = 2
+                gravity = Gravity.CENTER
+                isClickable = true
+                isFocusable = true
+                setPadding(dp(8), dp(6), dp(8), dp(6))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginEnd = dp(4)
+                }
+                setOnClickListener { selectTargetTimestamp(capturedEpochSec) }
+            }
+            nowPill = TextView(this).apply {
+                text = nowLabel
+                maxLines = 2
+                gravity = Gravity.CENTER
+                isClickable = true
+                isFocusable = true
+                setPadding(dp(8), dp(6), dp(8), dp(6))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    marginStart = dp(4)
+                }
+                setOnClickListener { selectTargetTimestamp(alternateNowEpochSec) }
+            }
+            styleTargetPill(selectedPill, true)
+            styleTargetPill(nowPill, false)
+            val toggleRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = dp(8) }
+                addView(selectedPill)
+                addView(nowPill)
+            }
+            container.addView(toggleRow)
+        }
+
+        if (warnView != null) {
+            updateRetentionWarning(targetEpochSec)
+            container.addView(warnView)
+        }
+
+        val input = EditText(this).apply {
+            hint = "e.g. Boarded bus, opened window (blank = ${MetadataDatabase.DEFAULT_QUICK_NOTE_TEXT})"
+            setSingleLine(false)
+            maxLines = 3
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        }
+        container.addView(input)
+
+        val presets = svc.metadataDb.getSegmentPresets()
+        if (presets.isNotEmpty()) {
+            val chipScroll = HorizontalScrollView(this).apply {
+                setPadding(0, dp(6), 0, 0)
+            }
+            val chipRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
+            for (preset in presets) {
+                val chip = Button(this).apply {
+                    text = "${preset.iconEmoji} ${preset.label}"
+                    isAllCaps = false
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                    setPadding(dp(8), dp(4), dp(8), dp(4))
+                    minWidth = 0
+                    minimumWidth = 0
+                    setOnClickListener {
+                        input.setText("${preset.iconEmoji} ${preset.label}")
+                        input.setSelection(input.text.length)
+                    }
+                }
+                chipRow.addView(chip)
+            }
+            chipScroll.addView(chipRow)
+            container.addView(chipScroll)
+        }
+
+        dialogRef = AlertDialog.Builder(this)
+            .setTitle("📝 Add Note (${exactTimeFmt.format(Instant.ofEpochSecond(targetEpochSec))})")
+            .setView(container)
+            .setPositiveButton("Save") { _, _ ->
+                val text = input.text.toString().trim().ifEmpty { MetadataDatabase.DEFAULT_QUICK_NOTE_TEXT }
+                svc.metadataDb.addTimelineNote(targetEpochSec, text)
+                refreshLiveRecentGraph()
+                refreshTripsTab()
+                Toast.makeText(
+                    this,
+                    "📝 Saved note at ${exactTimeFmt.format(Instant.ofEpochSecond(targetEpochSec))}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showEditOrPromoteNoteDialog(
+        note: TimelineNoteRecord,
+        slice: SessionSliceRecord?,
+        sliceIdx: Int
+    ) {
+        val svc = collectorService ?: return
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(10), dp(20), dp(6))
+        }
+        val input = EditText(this).apply {
+            setText(note.text)
+            setSelection(text.length)
+            setSingleLine(false)
+            maxLines = 3
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        }
+        container.addView(input)
+
+        val alignedSplit = if (slice != null) {
+            MetadataDatabase.computeAlignedSplitForNote(
+                note.timestampEpochSec,
+                slice.startEpochSec,
+                slice.endEpochSec
+            )
+        } else {
+            null
+        }
+
+        var dialogRef: AlertDialog? = null
+        if (alignedSplit != null && slice != null) {
+            val promoteBtn = Button(this).apply {
+                text = "✂️ Promote to Split..."
+                isAllCaps = false
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(8) }
+                setOnClickListener {
+                    val edited = input.text.toString().trim().ifEmpty { MetadataDatabase.DEFAULT_QUICK_NOTE_TEXT }
+                    val noteForSplit = if (edited != note.text) {
+                        svc.metadataDb.updateTimelineNote(note.id, edited)
+                        note.copy(text = edited)
+                    } else {
+                        note
+                    }
+                    dialogRef?.dismiss()
+                    refreshLiveRecentGraph()
+                    refreshTripsTab()
+                    showPromoteNoteToSplitDialog(noteForSplit, slice, sliceIdx)
+                }
+            }
+            container.addView(promoteBtn)
+        }
+
+        dialogRef = AlertDialog.Builder(this)
+            .setTitle("📝 Note (${exactTimeFmt.format(Instant.ofEpochSecond(note.timestampEpochSec))})")
+            .setView(container)
+            .setPositiveButton("Save") { _, _ ->
+                svc.metadataDb.updateTimelineNote(note.id, input.text.toString())
+                refreshLiveRecentGraph()
+                refreshTripsTab()
+            }
+            .setNeutralButton("Delete") { _, _ ->
+                svc.metadataDb.deleteTimelineNote(note.id)
+                refreshLiveRecentGraph()
+                refreshTripsTab()
+                Toast.makeText(this, "Deleted note", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showPromoteNoteToSplitDialog(
+        note: TimelineNoteRecord,
+        slice: SessionSliceRecord,
+        sliceIdx: Int
+    ) {
+        val svc = collectorService ?: return
+        val alignedSplit = MetadataDatabase.computeAlignedSplitForNote(
+            note.timestampEpochSec,
+            slice.startEpochSec,
+            slice.endEpochSec
+        ) ?: return
+        val newRightNum = sliceIdx + 2
+
+        fun finishSplit(newRightLabel: String?, deleteNote: Boolean) {
+            if (svc.metadataDb.splitSliceAt(slice.id, alignedSplit, svc.ringStore, newRightSliceLabel = newRightLabel)) {
+                if (deleteNote) {
+                    svc.metadataDb.deleteTimelineNote(note.id)
+                }
+                isTripEditMode = true
+                refreshTripsTab()
+                refreshLiveRecentGraph()
+                dualPaneSlicerView.selectedDividerIndex = sliceIdx
+                dualPaneSlicerView.cursorEpochSec = alignedSplit
+                dualPaneSlicerView.ensureTimestampVisibleInViewport(alignedSplit, centerIfOutside = true)
+                updateEditModeUi()
+                updateZoomControlsUi()
+                updateSliceCardHighlights(alignedSplit)
+                dualPaneSlicerView.invalidate()
+                (tabContainers.getOrNull(1) as? ScrollView)?.smoothScrollTo(0, 0)
+                Toast.makeText(
+                    this,
+                    "✂️ Created draggable divider ⇔ ${sliceIdx + 1}|$newRightNum",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+
+        val isQuickMarker = (note.text == MetadataDatabase.DEFAULT_QUICK_NOTE_TEXT)
+        val positiveText = if (isQuickMarker) "Split & Remove Marker" else "Split & Label #$newRightNum"
+        val neutralText = if (isQuickMarker) "Split & Keep Marker" else "Split & Keep Note"
+        val rightLabel = if (isQuickMarker) null else note.text
+
+        AlertDialog.Builder(this)
+            .setTitle("✂️ Promote to Split (${exactTimeFmt.format(Instant.ofEpochSecond(alignedSplit))})")
+            .setMessage(
+                "Create a draggable split boundary inside #${sliceIdx + 1} (${slice.label}) at " +
+                    "${exactTimeFmt.format(Instant.ofEpochSecond(alignedSplit))}?\n\nNote: \"${note.text}\""
+            )
+            .setPositiveButton(positiveText) { _, _ -> finishSplit(newRightLabel = rightLabel, deleteNote = true) }
+            .setNeutralButton(neutralText) { _, _ -> finishSplit(newRightLabel = null, deleteNote = false) }
             .setNegativeButton("Cancel", null)
             .show()
     }

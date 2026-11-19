@@ -13,6 +13,7 @@ import io.github.androidaql.storage.ExcursionRecord
 import io.github.androidaql.storage.MetadataDatabase
 import io.github.androidaql.storage.MonitorDevice
 import io.github.androidaql.storage.SessionSliceRecord
+import io.github.androidaql.storage.TimelineNoteRecord
 import io.github.androidaql.ui.DualPaneSlicerView
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -1666,6 +1667,183 @@ class AqlCoreEngineTest {
         assertEquals(
             "Evening Walk • Live (5m) • 📌 Pinned",
             io.github.androidaql.ui.MainActivity.formatTripPickerLabel(livePinned, baseStart + 5L * 60L)
+        )
+    }
+
+    @Test
+    fun testAssignNotesToSlicesHandlesBoundariesWithoutDuplication() {
+        val slices = listOf(
+            SessionSliceRecord(101L, 10L, 1000L, 1180L, false, "Walk", ""),
+            SessionSliceRecord(102L, 10L, 1180L, 1360L, false, "Train", ""),
+            SessionSliceRecord(103L, 10L, 1360L, 1540L, false, "Office", "")
+        )
+        val notes = listOf(
+            TimelineNoteRecord(1L, 985L, "Before trip", 985L),
+            TimelineNoteRecord(2L, 1000L, "At start", 1000L),
+            TimelineNoteRecord(3L, 1090L, "Mid walk", 1090L),
+            TimelineNoteRecord(4L, 1180L, "Boarded train", 1180L),
+            TimelineNoteRecord(5L, 1360L, "Arrived office", 1360L),
+            TimelineNoteRecord(6L, 1540L, "At end", 1540L),
+            TimelineNoteRecord(7L, 1555L, "After trip", 1555L)
+        )
+
+        val grouped = MetadataDatabase.assignNotesToSlices(slices, notes)
+        assertEquals(listOf(2L, 3L), grouped[101L]?.map { it.id })
+        assertEquals(listOf(4L), grouped[102L]?.map { it.id })
+        assertEquals(listOf(5L, 6L), grouped[103L]?.map { it.id })
+    }
+
+    @Test
+    fun testComputeAlignedSplitForNoteSnapsTo15sGridAndRejectsEndpoints() {
+        org.junit.Assert.assertNull(MetadataDatabase.computeAlignedSplitForNote(1500L, 1500L, 1560L))
+        org.junit.Assert.assertNull(MetadataDatabase.computeAlignedSplitForNote(1507L, 1500L, 1560L))
+        assertEquals(1515L, MetadataDatabase.computeAlignedSplitForNote(1508L, 1500L, 1560L))
+        assertEquals(1515L, MetadataDatabase.computeAlignedSplitForNote(1522L, 1500L, 1560L))
+        assertEquals(1530L, MetadataDatabase.computeAlignedSplitForNote(1523L, 1500L, 1560L))
+        assertEquals(1545L, MetadataDatabase.computeAlignedSplitForNote(1552L, 1500L, 1560L))
+        org.junit.Assert.assertNull(MetadataDatabase.computeAlignedSplitForNote(1553L, 1500L, 1560L))
+        org.junit.Assert.assertNull(MetadataDatabase.computeAlignedSplitForNote(1560L, 1500L, 1560L))
+    }
+
+    @Test
+    fun testAutoDiscardBlipProtectsExcursionWithTimelineNotes() {
+        val baseStart = 1_700_000_000L
+        val blip = ExcursionRecord(12L, 1L, baseStart, baseStart + 120L, false, "Trip (12:00)", "", isManual = false)
+        val slices = listOf(
+            SessionSliceRecord(20L, 12L, baseStart, baseStart + 120L, false, "Unlabeled Trip Span", "")
+        )
+        val nowAfterGrace = baseStart + 600L
+
+        assertTrue(
+            MetadataDatabase.isAutoDiscardableBlip(
+                blip,
+                slices,
+                nowAfterGrace,
+                hasTimelineNotes = false
+            )
+        )
+        assertFalse(
+            MetadataDatabase.isAutoDiscardableBlip(
+                blip,
+                slices,
+                nowAfterGrace,
+                hasTimelineNotes = true
+            )
+        )
+    }
+
+    @Test
+    fun testLiveEdgeCursorFollowsLatestDetachesOnScrubAndReattachesOnEdgeOrScrollOff() {
+        // 1. Initial load: live chart follows latest slot; Trips chart initializes at midpoint
+        assertEquals(
+            1890L to true,
+            DualPaneSlicerView.resolveCursorOnSlotsUpdated(
+                followLatestEdge = true,
+                isFollowingLiveEdge = true,
+                currentCursorEpochSec = 0L,
+                tripStartEpochSec = 1000L,
+                tripEndEpochSec = 1900L,
+                firstSlotEpochSec = 1005L,
+                midSlotEpochSec = 1455L,
+                lastSlotEpochSec = 1890L
+            )
+        )
+        assertEquals(
+            1455L to false,
+            DualPaneSlicerView.resolveCursorOnSlotsUpdated(
+                followLatestEdge = false,
+                isFollowingLiveEdge = true,
+                currentCursorEpochSec = 0L,
+                tripStartEpochSec = 1000L,
+                tripEndEpochSec = 1900L,
+                firstSlotEpochSec = 1005L,
+                midSlotEpochSec = 1455L,
+                lastSlotEpochSec = 1890L
+            )
+        )
+
+        // 2. Rolling updates while following advance cursor to newest sample
+        assertEquals(
+            1920L to true,
+            DualPaneSlicerView.resolveCursorOnSlotsUpdated(
+                followLatestEdge = true,
+                isFollowingLiveEdge = true,
+                currentCursorEpochSec = 1890L,
+                tripStartEpochSec = 1020L,
+                tripEndEpochSec = 1920L,
+                firstSlotEpochSec = 1020L,
+                midSlotEpochSec = 1470L,
+                lastSlotEpochSec = 1920L
+            )
+        )
+
+        // 3. Scrubbing left detaches from live edge; subsequent rolling updates preserve selection
+        assertFalse(
+            DualPaneSlicerView.shouldFollowLiveEdgeAfterScrub(
+                targetEpochSec = 1500L,
+                latestSlotEpochSec = 1920L,
+                windowEndEpochSec = 1920L
+            )
+        )
+        assertEquals(
+            1500L to false,
+            DualPaneSlicerView.resolveCursorOnSlotsUpdated(
+                followLatestEdge = true,
+                isFollowingLiveEdge = false,
+                currentCursorEpochSec = 1500L,
+                tripStartEpochSec = 1050L,
+                tripEndEpochSec = 1950L,
+                firstSlotEpochSec = 1050L,
+                midSlotEpochSec = 1500L,
+                lastSlotEpochSec = 1950L
+            )
+        )
+
+        // 4. Scrubbing back to the right edge or latest slot re-attaches live follow
+        assertTrue(
+            DualPaneSlicerView.shouldFollowLiveEdgeAfterScrub(
+                targetEpochSec = 1950L,
+                latestSlotEpochSec = 1950L,
+                windowEndEpochSec = 1950L
+            )
+        )
+        assertTrue(
+            DualPaneSlicerView.shouldFollowLiveEdgeAfterScrub(
+                targetEpochSec = 1940L,
+                latestSlotEpochSec = 1940L,
+                windowEndEpochSec = 1950L
+            )
+        )
+
+        // 5. Detached cursor scrolling off the left edge auto-reattaches to live latest slot
+        assertEquals(
+            2415L to true,
+            DualPaneSlicerView.resolveCursorOnSlotsUpdated(
+                followLatestEdge = true,
+                isFollowingLiveEdge = false,
+                currentCursorEpochSec = 1500L,
+                tripStartEpochSec = 1515L,
+                tripEndEpochSec = 2415L,
+                firstSlotEpochSec = 1515L,
+                midSlotEpochSec = 1965L,
+                lastSlotEpochSec = 2415L
+            )
+        )
+
+        // 6. Tapping in a stale disconnect gap or on an old last reading stays detached
+        assertFalse(
+            DualPaneSlicerView.shouldFollowLiveEdgeAfterScrub(
+                targetEpochSec = 1500L,
+                latestSlotEpochSec = 1200L,
+                windowEndEpochSec = 1950L
+            )
+        )
+        assertFalse(
+            DualPaneSlicerView.shouldFollowLiveEdgeAfterScrub(
+                targetEpochSec = 1200L,
+                latestSlotEpochSec = 1200L,
+                windowEndEpochSec = 1950L
+            )
         )
     }
 }

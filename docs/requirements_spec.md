@@ -79,6 +79,7 @@ Using SQLite for continuous 10–15 second time-series ingestion (`~8,640 rows/d
 erDiagram
     MONITOR_DEVICE ||--|| RRD_RING_BUFFER : "writes O(1) continuous stream"
     MONITOR_DEVICE ||--o{ EXCURSION : "taken on"
+    EXCURSION ||--o{ TIMELINE_NOTE : "timestamp-matched (no FK)"
     KNOWN_PLACE ||--o{ KNOWN_WIFI_NETWORK : "matched by 1..N networks"
     KNOWN_PLACE ||--o{ RRD_RING_BUFFER : "known_place_id slot tag"
     EXCURSION ||--o{ SESSION_SLICE : "contains"
@@ -150,6 +151,13 @@ erDiagram
         string notes
     }
 
+    TIMELINE_NOTE {
+        long id PK
+        long ts_epoch_sec "Timestamp-anchored point note (DB v3)"
+        string text "Custom text or 📍 Marker"
+        long created_epoch_sec
+    }
+
     PINNED_SLICE_DATA {
         long id PK
         long excursion_id FK
@@ -184,14 +192,18 @@ erDiagram
     * **Viewport-Scoped Y-Axes:** Sub-window Y-axes auto-scale dynamically to the visible samples while preserving baseline floors/ceilings (`400–1600 ppm` CO₂, `35 µg/m³` PM2.5, `0–28°C`, `12 m/s` speed).
     * **Quick-Zoom & Focus Ergonomics:** Portrait displays a `🔍 View` / `🔍 Zoom` status row and quick buttons (`Full`, `30m`, `10m`, `3m`, `🎯 Seg`) plus a per-card `🔍` focus button (while single-tapping a card pans to reveal it without changing zoom). Landscape adds compact top-bar toggles (`🔍 10m` / `🔍 3m` / `🔍 Full` and `🎯 Seg`). Zoom bounds persist across orientation changes via `onSaveInstanceState`.
     * **Responsive Bottom Chrome & Height:** `DualPaneSlicerView.BottomChromeMetrics` derives strip, time-axis (with narrow label overlap guard), and minimap heights dynamically from view height and font metrics; Portrait slicer height scales between `320dp` and `460dp` (`45%` of screen height).
+    * **Timestamped Timeline Notes & Promote-to-Split (`TIMELINE_NOTE`, DB v3):**
+      * **Live & Retroactive Capture:** On the **Now** dashboard (`liveRecentHistoryView` with `followLatestEdge = true`), the 15-minute chart cursor tracks the latest reading by default (`Live • <time>`) and detaches when scrubbed into the past (exposing a **`↩ Live`** reset pill in the header). Tapping **`📝 Add Note`** targets the detached chart cursor when scrubbed—with an inline **`📍 Selected` / `🕒 Now`** toggle pill in the dialog—or freezes the current epoch second when following Live, offering quick-fill chips and a `📍 Marker` fallback when left blank. When no excursion covers the chosen timestamp (or only a pending Wi-Fi disconnect debounce exists at `Now`), an inline warning informs the user that unpinned notes are discarded after 14 days unless covered by a pinned trip. On **Trips**, **`📝 + Note`** (portrait header) and **`📝 Note`** (landscape View Mode bar) add notes at the current scrubber cursor.
+      * **Visual Rendering & Timestamp Association:** `DualPaneSlicerView` renders teal dotted vertical lines with top-rail diamond pins (`#2DD4BF` / `#14B8A6`) and minimap note ticks; tapping a top-rail pin snaps the cursor and invokes edit/delete. `MetadataDatabase.assignNotesToSlices()` dynamically binds notes to slices by timestamp (`[start, end)` for non-last slices, `[start, end]` for final slice), so divider drags, splits, merges, Wi-Fi debounce back-dating, and `14d Window` carving stay consistent without fragile foreign keys.
+      * **Option 1 Promote to Split (`✂️ Split`):** Segment Card note rows whose 15-second-aligned timestamp falls strictly inside `(slice.start, slice.end)` (`MetadataDatabase.computeAlignedSplitForNote()`) offer **`✂️ Split`**, giving users **`Split & Label #N+1`** (or **`Split & Remove Marker`** for blank `📍 Marker` notes—calling `splitSliceAt(..., newRightSliceLabel)` and deleting the standalone note) or **`Split & Keep Note`** (splitting while preserving the note). CSV single-segment export intentionally omits timeline notes until a multi-table whole-trip export format is introduced.
 
 ---
 
 ## 4. Retention Policy (Fixed-Size 14-Day Ring & Trip Pinning)
 
 ### 4.1 Protection Rules (Trip-Level Pinning, Dropout Cleanup & Start/End Trimming)
-* **14-Day Archive 0 Grace Window:** Because Archive 0 holds 14 days of raw 15-second slots in a fixed circular buffer, all auto-recorded excursions and stationary readings automatically retain full fidelity for 14 days without user action. Auto-recorded trips are **not** kept beyond 14 days unless explicitly pinned (`EXCURSION.is_pinned = true`).
-* **3-Minute Untouched Auto-Trip Cleanup & Trip Picker Duration:** To prevent momentary AP dropouts from cluttering the trip list, `coalesceMicroExcursionsAndRestoreRingPlaceIds()` (triggered after the 90-second coalesce grace window via the service watchdog and before rendering the Trip Picker) automatically discards closed auto-recorded trips shorter than **3 minutes** (`< 180s`) **only** when they are unpinned (`is_pinned = false`), non-manual (`is_manual = false`), and untouched (default `"Trip (...)"` title, blank trip notes, single `"Unlabeled Trip Span"` slice with blank notes). Manual trips (`is_manual = true`, including **`🚶 Start Trip Manually`** and **`🗓️ 14d Window`** carved trips), pinned trips, and user-edited/split trips are never auto-discarded, and raw 15-second readings remain in Archive 0. Each Trip Picker item displays its duration and status (`• 42m • ⏳ 12d` dynamic remaining-days countdown `[⏳ <N>d]` / `⏳ <1d`, `• Live (12m)` while ongoing, or `• 📌 Pinned` when retained permanently).
+* **14-Day Archive 0 Grace Window:** Because Archive 0 holds 14 days of raw 15-second slots in a fixed circular buffer, all auto-recorded excursions and stationary readings automatically retain full fidelity for 14 days without user action. Auto-recorded trips are **not** kept beyond 14 days unless explicitly pinned (`EXCURSION.is_pinned = true`). Standalone unpinned `TIMELINE_NOTE` rows outside the 14-day ring window (`cutoffEpochSec`) are pruned by `pruneExpiredUnpinnedTimelineNotes()` unless enclosed by a pinned excursion.
+* **3-Minute Untouched Auto-Trip Cleanup & Trip Picker Duration:** To prevent momentary AP dropouts from cluttering the trip list, `coalesceMicroExcursionsAndRestoreRingPlaceIds()` (triggered after the 90-second coalesce grace window via the service watchdog and before rendering the Trip Picker) automatically discards closed auto-recorded trips shorter than **3 minutes** (`< 180s`) **only** when they are unpinned (`is_pinned = false`), non-manual (`is_manual = false`), contain no `TIMELINE_NOTE` records (`hasTimelineNotes = false`), and are untouched (default `"Trip (...)"` title, blank trip notes, single `"Unlabeled Trip Span"` slice with blank notes). Manual trips (`is_manual = true`, including **`🚶 Start Trip Manually`** and **`🗓️ 14d Window`** carved trips), pinned trips, trips with timeline notes, and user-edited/split trips are never auto-discarded, and raw 15-second readings remain in Archive 0. Each Trip Picker item displays its duration and status (`• 42m • ⏳ 12d` dynamic remaining-days countdown `[⏳ <N>d]` / `⏳ <1d`, `• Live (12m)` while ongoing, or `• 📌 Pinned` when retained permanently).
 * **Whole-Trip Pinning & Trimming (`EXCURSION.is_pinned`):**
   1. **Whole-Trip Retention:** Toggling `EXCURSION.is_pinned = true` (from the trip header pill `⏳ 14d • 📌 Pin`, **Manage Trip**, or the ongoing notification `"Bookmark Trip"` action) freezes the trip's raw Archive 0 data into `PINNED_SLICE_DATA` (`AQLP`). Manually carved trips from **`14d Window`** are automatically pinned (`is_pinned = true`) on creation, and renaming an unpinned auto-recorded trip pre-selects pinning. Unpinning a trip whose raw data has already rolled out of the 14-day ring buffer warns and deletes through the same confirmation flow as trip deletion.
   2. **Boundary Trimming Instead of Per-Slice Pinning:** Rather than pinning individual segments, unwanted leading or trailing spans (such as dead time at Home or a post-outing buffer) can be dropped cleanly via **`🗑️ Drop #1`** / **`🗑️ Drop #N`**, which updates `[excursion.start_ts, excursion.end_ts]` and re-extracts `PINNED_SLICE_DATA` if pinned so only the desired excursion span is kept.

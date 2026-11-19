@@ -185,7 +185,8 @@ class AqlCollectorService : Service() {
         val currentGpsAccuracyM: Float?,
         val gattConnectionStatus: String,
         val gattDiscoveredServicesLog: List<String>,
-        val recentRawFramesLog: List<String>
+        val recentRawFramesLog: List<String>,
+        val isPendingWifiLossDebounce: Boolean = false
     )
 
     private val binder = LocalBinder()
@@ -2790,7 +2791,8 @@ class AqlCollectorService : Service() {
             currentGpsAccuracyM = latestGpsAccuracyM,
             gattConnectionStatus = gattStatusText,
             gattDiscoveredServicesLog = gattServicesLog.toList(),
-            recentRawFramesLog = rawFrameHistory.toList()
+            recentRawFramesLog = rawFrameHistory.toList(),
+            isPendingWifiLossDebounce = stateMachine.isPendingWifiLossDebounce
         )
     }
 

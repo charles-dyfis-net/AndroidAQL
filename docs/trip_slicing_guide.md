@@ -76,21 +76,31 @@ Tap **`✏️ Edit Trip`** in the top bar (it turns orange as **`👁️ Done Ed
 
 ---
 
-## 5. Labeling, Presets, Notes, and Merging
+## 5. Labeling, Presets, Segment Notes, Timeline Notes, and Merging
 
 Tap **`✏️ Edit`** on any segment card to open **`Edit Segment #N (<start>–<end>)`**.
 
 ![Edit Segment #1 dialog showing segment span header, label field, quick-fill presets, notes, Drop #1 trim button, and Merge #1 + #2](screenshots/trips_segment_edit.webp)
 
 * **Segment Label:** Enter any description (for example, `CTA Bus #22`) or tap a chip under **Quick-Fill from Saved Presets** (`Bus`, `Train / L`, `Cab / Car`, etc.) to populate the label in one tap.
-* **Notes:** Record extra context such as crowding, HVAC state, or portable filtration (`"Outbound bus"`, `"Busy espresso bar"`).
+* **Segment Notes:** Record leg-level context such as crowding, HVAC state, or portable filtration (`"Outbound bus"`, `"Busy espresso bar"`).
 * **Merging adjacent segments (`MERGE #1 + #2 ↓`):** Combines the current segment with the segment immediately following it (`#1 + #2`), removing the divider between them while preserving the earlier segment's metadata.
+
+### Timestamped Timeline Notes & "Promote to Split"
+
+Timeline Notes are lightweight point-in-time bookmarks you can drop at an exact moment—either live on the **Now** screen or retroactively on **Trips**—distinct from segment splits until you decide to turn one into a boundary:
+
+* **Add Live or from the Recent History Chart on Now (`📝 Add Note`):** By default, the **Now** 15-minute chart cursor follows the **Live** right edge (`Live • h:mm:ss a`); touching or dragging left detaches it to inspect a recent reading (showing **`↩ Live`** in the header to snap back). Tapping **`📝 Add Note`** uses the chart's **Selected** timestamp when detached (with a **`📍 Selected` / `🕒 Now`** pill toggle inside the dialog in case you meant to log the current moment), or freezes the current timestamp when following Live. Tap a quick-fill chip from your Saved Presets (`Bus`, `Train / L`, `Cab / Car`, etc.) or leave blank to save `📍 Marker`. Notes can be added even when **no trip is active**—if no trip covers the chosen timestamp (or only a brief Wi-Fi debounce is pending for `Now`), the dialog warns that unpinned notes are discarded after **14 days** unless covered by a pinned trip.
+* **Add Retroactively on Trips (`📝 + Note` / Landscape `📝 Note`):** Scrub the chart cursor to any timestamp and tap **`📝 + Note`** (portrait header) or **`📝 Note`** (landscape bar), or tap a teal diamond pin on the top rail / chart to jump the cursor and edit or delete the note.
+* **Segment Cards & Promote to Split (`✂️ Split`):** Each timeline note appears on the chart and minimap as a teal marker and lists inside its enclosing Segment Card (tap a note row to jump the cursor there). Any note strictly inside a segment (so a 15-second-aligned split falls strictly between the segment's start and end) offers **`✂️ Split`**, letting you convert it into an editable segment boundary via two choices:
+  * **`Split & Label #N+1`** *(or **`Split & Remove Marker`** for blank `📍 Marker` notes)*: Splits at the nearest 15-second grid slot, copies the note text onto the new `#N+1` segment's label, and removes the standalone note marker.
+  * **`Split & Keep Note`**: Creates the split boundary while keeping the timestamped note intact.
 
 ---
 
 ## 6. Zero-Scroll Landscape View
 
-Rotate your device to **Landscape** to view all three sensor panes, the Segment Strip, the Overview Minimap, and the compact top bar (`Switch Trip`, **`🔍 10m`** / **`🔍 3m`** / **`🔍 Full`**, **`🎯 Seg`**, **`👁️ Done Editing`**, and **`✂️ Split | -1m | -15s | +15s | +1m`**) simultaneously with zero vertical scrolling. Landscape gives wider horizontal spacing, making long trips, minimap scrubbing, and fine boundary placement even easier.
+Rotate your device to **Landscape** to view all three sensor panes, the Segment Strip, the Overview Minimap, and the compact top bar (`Switch Trip`, **`🔍 10m`** / **`🔍 3m`** / **`🔍 Full`**, **`🎯 Seg`**, **`📝 Note`** in View Mode, **`👁️ Done Editing`**, and **`✂️ Split | -1m | -15s | +15s | +1m`**) simultaneously with zero vertical scrolling. Landscape gives wider horizontal spacing, making long trips, minimap scrubbing, and fine boundary placement even easier.
 
 ![Zero-scroll Landscape view of the 3-Pane Trip Slicer in Edit Mode](screenshots/trips_landscape.webp)
 
@@ -100,7 +110,7 @@ Rotate your device to **Landscape** to view all three sensor panes, the Segment 
 
 * **Trip Picker Duration & Status (`Switch Trip` / trip title):** Tap **`Trips`** / **`Switch Trip`** to browse recorded trips; each entry displays its elapsed duration (`• 42m • ⏳ 12d` counting down remaining days from `⏳ 14d` to `⏳ <1d` before ring-buffer rotation, `• Live (12m)` while ongoing, or `• 📌 Pinned` when retained permanently) so brief dropouts are immediately distinguishable from real excursions.
 * **Automatic Cleanup of Momentary Auto-Trips (`< 3m`):** If home Wi-Fi drops briefly and reconnects before a real excursion begins, any **untouched, unpinned, auto-recorded trip shorter than 3 minutes** is automatically discarded ~90 seconds after closing so temporary AP glitches do not clutter your Trip list.
-  * **Always kept:** Trips you **start manually** (`🚶 Start Trip Manually`), trips carved from **`🗓️ 14d Window`**, **pinned** trips, and any trip you **rename, annotate, split, or relabel** are never auto-discarded—even if shorter than 3 minutes.
+  * **Always kept:** Trips you **start manually** (`🚶 Start Trip Manually`), trips carved from **`🗓️ 14d Window`**, **pinned** trips, trips containing **timeline notes**, and any trip you **rename, annotate, split, or relabel** are never auto-discarded—even if shorter than 3 minutes. Unpinned standalone notes expire alongside the 14-day ring window unless covered by a pinned trip.
   * **No readings lost:** Discarding a short auto-trip entry only removes the trip wrapper; every 15-second reading remains in the 14-day circular buffer and can still be viewed or carved anytime via **`🗓️ 14d Window`**.
 * **Wi-Fi Disconnect Debounce (`⚙️ Settings`):** Configure how long `AirSlice` waits after Saved Place Wi-Fi drops before creating an auto-trip and waking GPS (**`30s — Default`** to avoid waking location on short Wi-Fi dropouts, or choose **`0s` Immediate** to capture elevators and hallways right away, **`15s`**, or **`60s`**). When a delayed debounce confirms departure, the trip start timestamp is back-dated to when Wi-Fi first dropped. Manual trips always start immediately regardless of this setting.
 * **14-Day Ring Window (`[⏳ 14d]`):** Full 15-second sensor data automatically stays available in the local circular buffer for ~14 days. Auto-recorded trips show their remaining window (`⏳ 12d`, `⏳ <1d`) and are **not** kept beyond 14 days unless you pin the trip.

@@ -13,6 +13,7 @@ import android.view.View
 import android.view.ViewConfiguration
 import io.github.androidaql.storage.AqlRingBufferStore
 import io.github.androidaql.storage.SessionSliceRecord
+import io.github.androidaql.storage.TimelineNoteRecord
 import io.github.androidaql.util.TemperatureUnitFormatter
 import java.time.Instant
 import java.time.ZoneId
@@ -42,10 +43,27 @@ class DualPaneSlicerView(context: Context) : View(context) {
                 viewStartEpochSec = null
                 viewEndEpochSec = null
                 stopEdgeAutoScroll()
+                if (followLatestEdge && !isFollowingLiveEdge) {
+                    isFollowingLiveEdge = true
+                    onLiveFollowStateChanged?.invoke(true)
+                }
             } else {
                 val (tripStart, tripEnd) = getTripBoundsEpochSec()
-                if (cursorEpochSec < tripStart || cursorEpochSec > tripEnd) {
-                    cursorEpochSec = value[value.size / 2].bucketEpochSec
+                val prevFollowing = isFollowingLiveEdge
+                val (resolvedCursor, nextFollowing) = resolveCursorOnSlotsUpdated(
+                    followLatestEdge = followLatestEdge,
+                    isFollowingLiveEdge = isFollowingLiveEdge,
+                    currentCursorEpochSec = cursorEpochSec,
+                    tripStartEpochSec = tripStart,
+                    tripEndEpochSec = tripEnd,
+                    firstSlotEpochSec = value.first().bucketEpochSec,
+                    midSlotEpochSec = value[value.size / 2].bucketEpochSec,
+                    lastSlotEpochSec = value.last().bucketEpochSec
+                )
+                cursorEpochSec = resolvedCursor
+                isFollowingLiveEdge = nextFollowing
+                if (followLatestEdge && nextFollowing != prevFollowing) {
+                    onLiveFollowStateChanged?.invoke(nextFollowing)
                 }
                 val curVs = viewStartEpochSec
                 val curVe = viewEndEpochSec
@@ -68,6 +86,19 @@ class DualPaneSlicerView(context: Context) : View(context) {
             field = value
             invalidate()
         }
+
+    var timelineNotes: List<TimelineNoteRecord> = emptyList()
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    var onTimelineNoteTapped: ((TimelineNoteRecord) -> Unit)? = null
+
+    var followLatestEdge: Boolean = false
+    var isFollowingLiveEdge: Boolean = true
+        private set
+    var onLiveFollowStateChanged: ((Boolean) -> Unit)? = null
 
     var cursorEpochSec: Long = 0L
 
@@ -426,6 +457,28 @@ class DualPaneSlicerView(context: Context) : View(context) {
         isFakeBoldText = true
         textAlign = Paint.Align.CENTER
     }
+    private val noteLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor(NOTE_MARKER_COLOR_HEX)
+        alpha = 175
+        strokeWidth = 1.2f * density
+        style = Paint.Style.STROKE
+        pathEffect = DashPathEffect(floatArrayOf(3f * density, 4f * density), 0f)
+    }
+    private val notePinFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor(NOTE_PIN_FILL_HEX)
+        style = Paint.Style.FILL
+    }
+    private val notePinStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor(NOTE_PIN_STROKE_HEX)
+        strokeWidth = 1.2f * density
+        style = Paint.Style.STROKE
+    }
+    private val minimapNotePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor(NOTE_MARKER_COLOR_HEX)
+        strokeWidth = 1.6f * density
+        style = Paint.Style.STROKE
+    }
+    private val notePinPath = Path()
 
     private val co2Path = Path()
     private val pm25Path = Path()
@@ -467,6 +520,7 @@ class DualPaneSlicerView(context: Context) : View(context) {
     private var edgeScrollDirection: Int = 0
     private var lastTouchX: Float = 0f
     private var edgeScrollActive: Boolean = false
+    private var pendingTappedNote: TimelineNoteRecord? = null
 
     private val edgeScrollRunnable = object : Runnable {
         override fun run() {
@@ -1046,6 +1100,25 @@ class DualPaneSlicerView(context: Context) : View(context) {
             drawSingleDivider(selectedDividerIndex)
         }
 
+        // 6b. Timestamped Timeline Notes (teal dotted marker + top-rail diamond pin)
+        if (timelineNotes.isNotEmpty()) {
+            val pinCy = topPaneTop - 6.5f * density
+            val pinR = NOTE_PIN_RADIUS_DP * density
+            for (note in timelineNotes) {
+                if (note.timestampEpochSec !in viewMinTs..viewMaxTs) continue
+                val nx = tsToViewX(note.timestampEpochSec)
+                canvas.drawLine(nx, topPaneTop, nx, botPaneBot, noteLinePaint)
+                notePinPath.reset()
+                notePinPath.moveTo(nx, pinCy - pinR)
+                notePinPath.lineTo(nx + pinR, pinCy)
+                notePinPath.lineTo(nx, pinCy + pinR)
+                notePinPath.lineTo(nx - pinR, pinCy)
+                notePinPath.close()
+                canvas.drawPath(notePinPath, notePinFillPaint)
+                canvas.drawPath(notePinPath, notePinStrokePaint)
+            }
+        }
+
         // 7. Interactive Scrubber Cursor, Top Floating Time Bubble & Inline Intersection Value Badges
         if (cursorEpochSec in viewMinTs..viewMaxTs) {
             val cx = tsToViewX(cursorEpochSec)
@@ -1064,10 +1137,10 @@ class DualPaneSlicerView(context: Context) : View(context) {
                 val baseTimeLabel = exactTimeFmt.format(Instant.ofEpochSecond(
                     if (inDropoutGapSec > 0L) cursorEpochSec else nearest.bucketEpochSec
                 ))
-                val timeLabel = if (inDropoutGapSec > 0L) {
-                    "$baseTimeLabel • DROPOUT (${inDropoutGapSec}s gap)"
-                } else {
-                    baseTimeLabel
+                val timeLabel = when {
+                    inDropoutGapSec > 0L -> "$baseTimeLabel • DROPOUT (${inDropoutGapSec}s gap)"
+                    followLatestEdge && isFollowingLiveEdge -> "Live • $baseTimeLabel"
+                    else -> baseTimeLabel
                 }
                 timeBubbleBgPaint.color = if (inDropoutGapSec > 0L) Color.parseColor("#FDE68A") else Color.parseColor("#F8FAFC")
                 val tbW = badgeTextPaint.measureText(timeLabel) + 12f * density
@@ -1219,6 +1292,19 @@ class DualPaneSlicerView(context: Context) : View(context) {
                 }
             }
 
+            for (note in timelineNotes) {
+                if (note.timestampEpochSec in tripMinTs..tripMaxTs) {
+                    val nxMini = tsToTripX(note.timestampEpochSec)
+                    canvas.drawLine(
+                        nxMini,
+                        layout.minimapTop + 1f * density,
+                        nxMini,
+                        layout.minimapBot - 1f * density,
+                        minimapNotePaint
+                    )
+                }
+            }
+
             if (cursorEpochSec in tripMinTs..tripMaxTs) {
                 val miniCx = tsToTripX(cursorEpochSec)
                 canvas.drawLine(miniCx, layout.minimapTop, miniCx, layout.minimapBot, minimapCursorPaint)
@@ -1325,6 +1411,33 @@ class DualPaneSlicerView(context: Context) : View(context) {
         invalidate()
     }
 
+    fun snapToLiveEdge() {
+        if (!followLatestEdge) return
+        val wasFollowing = isFollowingLiveEdge
+        isFollowingLiveEdge = true
+        if (slots.isNotEmpty()) {
+            cursorEpochSec = slots.last().bucketEpochSec
+        }
+        if (!wasFollowing) {
+            onLiveFollowStateChanged?.invoke(true)
+        }
+        onCursorChanged?.invoke(cursorEpochSec)
+        invalidate()
+    }
+
+    private fun applyUserCursorScrub(targetTs: Long, tripMaxTs: Long) {
+        cursorEpochSec = targetTs
+        if (followLatestEdge) {
+            val latestSlotTs = slots.lastOrNull()?.bucketEpochSec ?: tripMaxTs
+            val nextFollow = shouldFollowLiveEdgeAfterScrub(targetTs, latestSlotTs, tripMaxTs)
+            if (nextFollow != isFollowingLiveEdge) {
+                isFollowingLiveEdge = nextFollow
+                onLiveFollowStateChanged?.invoke(nextFollow)
+            }
+        }
+        onCursorChanged?.invoke(cursorEpochSec)
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (slots.isEmpty()) return false
         val (tripMinTs, tripMaxTs) = getTripBoundsEpochSec()
@@ -1354,6 +1467,7 @@ class DualPaneSlicerView(context: Context) : View(context) {
             MotionEvent.ACTION_DOWN -> {
                 parent?.requestDisallowInterceptTouchEvent(true)
                 stopEdgeAutoScroll()
+                pendingTappedNote = null
                 val layout = computePaneLayout()
 
                 // Case A: Overview Minimap Zone
@@ -1454,6 +1568,22 @@ class DualPaneSlicerView(context: Context) : View(context) {
                     selectedDividerIndex = hitDivider
                     onDividerSelected?.invoke(hitDivider)
                 } else {
+                    if (timelineNotes.isNotEmpty() &&
+                        event.y <= layout.topPaneTop + NOTE_PIN_HIT_RADIUS_DP * density
+                    ) {
+                        val hitRadiusPx = NOTE_PIN_HIT_RADIUS_DP * density
+                        var bestDist = Float.MAX_VALUE
+                        var bestNote: TimelineNoteRecord? = null
+                        for (note in timelineNotes) {
+                            if (note.timestampEpochSec !in viewMinTs..viewMaxTs) continue
+                            val dx = abs(event.x - tsToViewX(note.timestampEpochSec))
+                            if (dx <= hitRadiusPx && dx < bestDist) {
+                                bestDist = dx
+                                bestNote = note
+                            }
+                        }
+                        pendingTappedNote = bestNote
+                    }
                     touchMode = TouchMode.SCRUB_CURSOR
                     val wasSelected = selectedDividerIndex >= 0
                     draggingDividerIdx = -1
@@ -1461,13 +1591,13 @@ class DualPaneSlicerView(context: Context) : View(context) {
                     if (wasSelected) {
                         onDividerSelected?.invoke(-1)
                     }
-                    cursorEpochSec = xToViewTs(event.x)
-                    onCursorChanged?.invoke(cursorEpochSec)
+                    applyUserCursorScrub(xToViewTs(event.x), tripMaxTs)
                 }
                 invalidate()
                 return true
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
+                pendingTappedNote = null
                 if (enableZoomAndMinimap && event.pointerCount >= 2 && touchMode != TouchMode.DRAG_MINIMAP) {
                     draggingDividerIdx = -1
                     downDividerWasAlreadySelected = false
@@ -1479,6 +1609,9 @@ class DualPaneSlicerView(context: Context) : View(context) {
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
+                if (abs(event.x - downX) > tapSlopPx || abs(event.y - downY) > tapSlopPx) {
+                    pendingTappedNote = null
+                }
                 when (touchMode) {
                     TouchMode.NONE -> return true
                     TouchMode.TWO_FINGER_PINCH_PAN -> {
@@ -1539,8 +1672,7 @@ class DualPaneSlicerView(context: Context) : View(context) {
                                 onSharedDividerMoved?.invoke(left.id, right.id, targetTs)
                             }
                         } else {
-                            cursorEpochSec = targetTs
-                            onCursorChanged?.invoke(cursorEpochSec)
+                            applyUserCursorScrub(targetTs, tripMaxTs)
                         }
                         if (isViewportZoomed()) {
                             val edgeZonePx = EDGE_AUTOSCROLL_ZONE_DP * density
@@ -1566,6 +1698,23 @@ class DualPaneSlicerView(context: Context) : View(context) {
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 stopEdgeAutoScroll()
+                val tappedNote = pendingTappedNote
+                pendingTappedNote = null
+                if (event.actionMasked == MotionEvent.ACTION_UP &&
+                    tappedNote != null &&
+                    abs(event.x - downX) <= tapSlopPx &&
+                    abs(event.y - downY) <= tapSlopPx
+                ) {
+                    touchMode = TouchMode.NONE
+                    draggingDividerIdx = -1
+                    downDividerWasAlreadySelected = false
+                    val snapped = ((tappedNote.timestampEpochSec + STEP_SEC / 2L) / STEP_SEC) * STEP_SEC
+                    applyUserCursorScrub(snapped.coerceIn(viewMinTs, viewMaxTs), tripMaxTs)
+                    parent?.requestDisallowInterceptTouchEvent(false)
+                    invalidate()
+                    onTimelineNoteTapped?.invoke(tappedNote)
+                    return true
+                }
                 if (event.actionMasked == MotionEvent.ACTION_UP &&
                     touchMode == TouchMode.DRAG_DIVIDER &&
                     downDividerWasAlreadySelected &&
@@ -1679,6 +1828,13 @@ class DualPaneSlicerView(context: Context) : View(context) {
         const val COLOR_MINIMAP_CURSOR_HEX = "#F8FAFC"
         const val COLOR_MINIMAP_DIVIDER_HEX = "#FBBF24"
         const val COLOR_ZOOM_STATUS_HEX = "#38BDF8"
+
+        // Timeline Note Markers
+        const val NOTE_PIN_RADIUS_DP = 5.5f
+        const val NOTE_PIN_HIT_RADIUS_DP = 18f
+        const val NOTE_MARKER_COLOR_HEX = "#2DD4BF"
+        const val NOTE_PIN_FILL_HEX = "#14B8A6"
+        const val NOTE_PIN_STROKE_HEX = "#0F172A"
 
         data class BottomChromeMetrics(
             val effectivePadBottomPx: Float,
@@ -1929,6 +2085,54 @@ class DualPaneSlicerView(context: Context) : View(context) {
             val denom = ln(1f + clampedMax / SPEED_LOG_SCALE_KNEE_MPS)
             if (denom <= 0f) return 0f
             return (ln(1f + clampedSpd / SPEED_LOG_SCALE_KNEE_MPS) / denom).coerceIn(0f, 1f)
+        }
+
+        /**
+         * Returns true when a user scrub on a live-following chart lands at or past the live edge
+         * (the latest available sample or within one step of the trailing window end).
+         */
+        fun shouldFollowLiveEdgeAfterScrub(
+            targetEpochSec: Long,
+            latestSlotEpochSec: Long,
+            windowEndEpochSec: Long,
+            stepSec: Long = STEP_SEC
+        ): Boolean = targetEpochSec >= max(latestSlotEpochSec, windowEndEpochSec - stepSec)
+
+        /**
+         * Resolves `(cursorEpochSec, isFollowingLiveEdge)` whenever new ring slots arrive.
+         * Live charts track the rightmost reading until the user scrubs left, and re-attach
+         * automatically once a detached cursor scrolls past the trailing window.
+         */
+        fun resolveCursorOnSlotsUpdated(
+            followLatestEdge: Boolean,
+            isFollowingLiveEdge: Boolean,
+            currentCursorEpochSec: Long,
+            tripStartEpochSec: Long,
+            tripEndEpochSec: Long,
+            @Suppress("UNUSED_PARAMETER") firstSlotEpochSec: Long,
+            midSlotEpochSec: Long,
+            lastSlotEpochSec: Long
+        ): Pair<Long, Boolean> {
+            return if (followLatestEdge) {
+                if (isFollowingLiveEdge ||
+                    currentCursorEpochSec < tripStartEpochSec ||
+                    currentCursorEpochSec > tripEndEpochSec
+                ) {
+                    lastSlotEpochSec to true
+                } else {
+                    currentCursorEpochSec to false
+                }
+            } else {
+                val resolvedCursor = if (
+                    currentCursorEpochSec < tripStartEpochSec ||
+                    currentCursorEpochSec > tripEndEpochSec
+                ) {
+                    midSlotEpochSec
+                } else {
+                    currentCursorEpochSec
+                }
+                resolvedCursor to false
+            }
         }
     }
 }
