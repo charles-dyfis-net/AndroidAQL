@@ -254,7 +254,7 @@ object CsvReplayImporter {
             val startSec = shifted.rows.first().slot.bucketEpochSec
             val endSec = shifted.rows.last().slot.bucketEpochSec
             val title = titleOverride?.takeIf { it.isNotBlank() } ?: shifted.excursionTitle
-            val exc = metadataDb.startExcursion(dev.id, startSec, title)
+            val exc = metadataDb.startExcursion(dev.id, startSec, title, isManual = true)
             metadataDb.updateOngoingExcursionEnd(exc.id, endSec, closeExcursion = true)
 
             val spans = extractSliceSpans(shifted.rows)

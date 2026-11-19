@@ -12,7 +12,8 @@ import kotlin.math.max
  */
 class ExcursionStateMachine(
     val gpsPauseTimeoutSec: Long = 90L,
-    val excursionCloseTimeoutSec: Long = 45L * 60L
+    val excursionCloseTimeoutSec: Long = 45L * 60L,
+    wifiLossDebounceSec: Long = DEFAULT_WIFI_LOSS_DEBOUNCE_SEC
 ) {
     enum class CollectorState {
         IDLE_OUT_OF_RANGE,
@@ -28,8 +29,13 @@ class ExcursionStateMachine(
         val effectiveBleMode: BleCollectionMode,
         val activeKnownPlaceId: Int,
         val startedNewExcursion: Boolean,
-        val closedExcursion: Boolean
+        val closedExcursion: Boolean,
+        val startedExcursionStartEpochSec: Long? = null,
+        val startedByManualOverride: Boolean = false
     )
+
+    var wifiLossDebounceSec: Long = wifiLossDebounceSec.coerceAtLeast(0L)
+        set(value) { field = value.coerceAtLeast(0L) }
 
     var currentState: CollectorState = CollectorState.IDLE_OUT_OF_RANGE
         private set
@@ -45,6 +51,10 @@ class ExcursionStateMachine(
 
     var isManualExcursionOverride: Boolean = false
         private set
+
+    private var wifiLostSinceEpochSec: Long? = null
+    val isPendingWifiLossDebounce: Boolean
+        get() = wifiLostSinceEpochSec != null && currentState == CollectorState.STATIONARY_KNOWN_AP
 
     private var manualStartSuppressedPlaceId: Int = 0
     private var manualEndHoldUntilKnownPlaceOrBleTimeout: Boolean = false
@@ -85,6 +95,7 @@ class ExcursionStateMachine(
         isManualExcursionOverride = true
         manualEndHoldUntilKnownPlaceOrBleTimeout = false
         manualStartSuppressedPlaceId = currentKnownPlaceId
+        wifiLostSinceEpochSec = null
         if (lastBlePacketEpochSec < 0L || (timestampEpochSec - lastBlePacketEpochSec) > excursionCloseTimeoutSec) {
             lastBlePacketEpochSec = timestampEpochSec - gpsPauseTimeoutSec - 1L
         }
@@ -113,6 +124,9 @@ class ExcursionStateMachine(
         if (!forceClose && (currentKnownPlaceId > 0 || !isBleFresh)) {
             manualEndHoldUntilKnownPlaceOrBleTimeout = false
         }
+        if (prev != CollectorState.STATIONARY_KNOWN_AP) {
+            wifiLostSinceEpochSec = null
+        }
         val effectiveKnownPlaceId = if (currentKnownPlaceId > 0 && currentKnownPlaceId != manualStartSuppressedPlaceId) {
             currentKnownPlaceId
         } else {
@@ -124,6 +138,8 @@ class ExcursionStateMachine(
             manualEndHoldUntilKnownPlaceOrBleTimeout
 
         var startedExcursion = false
+        var startedExcursionStartSec: Long? = null
+        var startedByManual = false
         var closedExcursion = false
 
         val next = when (prev) {
@@ -132,6 +148,8 @@ class ExcursionStateMachine(
                     !isBleFresh -> {
                         if (isManualExcursionOverride && bleAgeSec <= excursionCloseTimeoutSec && !isStationaryOrUnconfigured) {
                             startedExcursion = true
+                            startedExcursionStartSec = nowEpochSec
+                            startedByManual = true
                             CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED
                         } else {
                             CollectorState.IDLE_OUT_OF_RANGE
@@ -140,6 +158,8 @@ class ExcursionStateMachine(
                     isStationaryOrUnconfigured -> CollectorState.STATIONARY_KNOWN_AP
                     else -> {
                         startedExcursion = true
+                        startedExcursionStartSec = nowEpochSec
+                        startedByManual = isManualExcursionOverride
                         CollectorState.FIELD_EXCURSION_ACTIVE
                     }
                 }
@@ -147,17 +167,39 @@ class ExcursionStateMachine(
             CollectorState.STATIONARY_KNOWN_AP -> {
                 when {
                     !isBleFresh -> {
+                        wifiLostSinceEpochSec = null
                         if (isManualExcursionOverride && bleAgeSec <= excursionCloseTimeoutSec && !isStationaryOrUnconfigured) {
                             startedExcursion = true
+                            startedExcursionStartSec = nowEpochSec
+                            startedByManual = true
                             CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED
                         } else {
                             CollectorState.IDLE_OUT_OF_RANGE
                         }
                     }
-                    isStationaryOrUnconfigured -> CollectorState.STATIONARY_KNOWN_AP
+                    isStationaryOrUnconfigured -> {
+                        wifiLostSinceEpochSec = null
+                        CollectorState.STATIONARY_KNOWN_AP
+                    }
                     else -> {
-                        startedExcursion = true
-                        CollectorState.FIELD_EXCURSION_ACTIVE
+                        if (isManualExcursionOverride || wifiLossDebounceSec <= 0L) {
+                            wifiLostSinceEpochSec = null
+                            startedExcursion = true
+                            startedExcursionStartSec = nowEpochSec
+                            startedByManual = isManualExcursionOverride
+                            CollectorState.FIELD_EXCURSION_ACTIVE
+                        } else {
+                            val lostSince = wifiLostSinceEpochSec ?: nowEpochSec.also { wifiLostSinceEpochSec = it }
+                            if ((nowEpochSec - lostSince) >= wifiLossDebounceSec) {
+                                wifiLostSinceEpochSec = null
+                                startedExcursion = true
+                                startedExcursionStartSec = lostSince
+                                startedByManual = false
+                                CollectorState.FIELD_EXCURSION_ACTIVE
+                            } else {
+                                CollectorState.STATIONARY_KNOWN_AP
+                            }
+                        }
                     }
                 }
             }
@@ -218,7 +260,13 @@ class ExcursionStateMachine(
             effectiveBleMode = effectiveBleMode,
             activeKnownPlaceId = if (next == CollectorState.STATIONARY_KNOWN_AP && effectiveKnownPlaceId > 0) effectiveKnownPlaceId else 0,
             startedNewExcursion = startedExcursion,
-            closedExcursion = closedExcursion
+            closedExcursion = closedExcursion,
+            startedExcursionStartEpochSec = startedExcursionStartSec,
+            startedByManualOverride = startedByManual
         )
+    }
+
+    companion object {
+        const val DEFAULT_WIFI_LOSS_DEBOUNCE_SEC = 30L
     }
 }

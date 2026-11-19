@@ -51,7 +51,8 @@ data class ExcursionRecord(
     val endEpochSec: Long?,
     val isPinned: Boolean,
     val title: String,
-    val notes: String
+    val notes: String,
+    val isManual: Boolean = false
 )
 
 data class SessionSliceRecord(
@@ -126,7 +127,8 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
                 end_epoch_sec INTEGER,
                 is_pinned INTEGER NOT NULL DEFAULT 0,
                 title TEXT NOT NULL,
-                notes TEXT NOT NULL DEFAULT ''
+                notes TEXT NOT NULL DEFAULT '',
+                is_manual INTEGER NOT NULL DEFAULT 0
             )
             """.trimIndent()
         )
@@ -163,7 +165,9 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // v1 initial schema
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE excursion ADD COLUMN is_manual INTEGER NOT NULL DEFAULT 0")
+        }
     }
 
     private fun seedDefaultSegmentPresets(db: SQLiteDatabase) {
@@ -327,14 +331,19 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
         return SegmentPreset(id, label.trim(), iconEmoji.ifBlank { "🏷️" }, nextOrder)
     }
 
-    fun startExcursion(deviceId: Long, startEpochSec: Long, title: String): ExcursionRecord {
+    fun startExcursion(
+        deviceId: Long,
+        startEpochSec: Long,
+        title: String,
+        isManual: Boolean = false
+    ): ExcursionRecord {
         val db = writableDatabase
         // Coalesce hallway/elevator Wi-Fi edge flicker: if the most recent excursion for this device
-        // ended within <= 90 seconds of startEpochSec (or is still open), resume it instead of
-        // creating a fragmented 1-second micro-excursion.
+        // ended within <= MICRO_EXCURSION_COALESCE_GAP_SEC of startEpochSec (or is still open),
+        // resume it instead of creating a fragmented micro-excursion.
         db.rawQuery(
             """
-            SELECT id, start_epoch_sec, end_epoch_sec, is_pinned, title, notes
+            SELECT id, start_epoch_sec, end_epoch_sec, is_pinned, title, notes, is_manual
             FROM excursion
             WHERE device_id = ?
             ORDER BY start_epoch_sec DESC, id DESC
@@ -349,16 +358,28 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
                 val prevPinned = c.getInt(3) != 0
                 val prevTitle = c.getString(4)
                 val prevNotes = c.getString(5)
+                val prevManual = c.getInt(6) != 0
                 val prevSlices = getSlicesForExcursion(prevId)
                 val isUntouchedDefault = prevSlices.size == 1 &&
-                    prevSlices[0].label == "Unlabeled Trip Span" &&
+                    prevSlices[0].label == DEFAULT_SLICE_LABEL &&
                     prevSlices[0].notes.isBlank() &&
                     prevSlices[0].startEpochSec == prevStart
-                if (prevEnd == null || (isUntouchedDefault && startEpochSec >= prevStart && (startEpochSec - prevEnd) <= 90L)) {
-                    val reopenCv = ContentValues().apply { putNull("end_epoch_sec") }
+                val canCoalesceClosedAuto = !isManual &&
+                    prevEnd != null &&
+                    isUntouchedDefault &&
+                    startEpochSec >= prevStart &&
+                    (startEpochSec - prevEnd) <= MICRO_EXCURSION_COALESCE_GAP_SEC
+                if (prevEnd == null || canCoalesceClosedAuto) {
+                    val updatedManual = prevManual || isManual
+                    val reopenCv = ContentValues().apply {
+                        putNull("end_epoch_sec")
+                        if (updatedManual && !prevManual) {
+                            put("is_manual", 1)
+                        }
+                    }
                     db.update("excursion", reopenCv, "id = ?", arrayOf(prevId.toString()))
                     updateOngoingExcursionEnd(prevId, maxOf(startEpochSec, prevEnd ?: startEpochSec), closeExcursion = false)
-                    return ExcursionRecord(prevId, deviceId, prevStart, null, prevPinned, prevTitle, prevNotes)
+                    return ExcursionRecord(prevId, deviceId, prevStart, null, prevPinned, prevTitle, prevNotes, updatedManual)
                 }
             }
         }
@@ -370,6 +391,7 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
             put("is_pinned", 0)
             put("title", title)
             put("notes", "")
+            put("is_manual", if (isManual) 1 else 0)
         }
         val excursionId = db.insert("excursion", null, cv)
         // v1 Manual Slicing: Start with a single contiguous slice spanning the excursion
@@ -378,17 +400,24 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
             put("start_epoch_sec", startEpochSec)
             put("end_epoch_sec", startEpochSec + 15)
             put("include_in_export", 1)
-            put("label", "Unlabeled Trip Span")
+            put("label", DEFAULT_SLICE_LABEL)
             put("notes", "")
         }
         db.insert("session_slice", null, sliceCv)
-        return ExcursionRecord(excursionId, deviceId, startEpochSec, null, false, title, "")
+        return ExcursionRecord(excursionId, deviceId, startEpochSec, null, false, title, "", isManual)
+    }
+
+    fun markExcursionManual(excursionId: Long) {
+        val cv = ContentValues().apply { put("is_manual", 1) }
+        writableDatabase.update("excursion", cv, "id = ?", arrayOf(excursionId.toString()))
     }
 
     /**
      * Coalesces fragmented micro-excursions separated by `<= 90s` of fringe Wi-Fi (such as in
-     * an elevator shaft or hallway), removes standalone unpinned `< 30s` Wi-Fi blips, and ensures
-     * `knownPlaceId = 0` in [ringStore] across all confirmed excursion windows (`>= 60s`).
+     * an elevator shaft or hallway), automatically removes standalone closed, unpinned, untouched
+     * auto-created Wi-Fi blips shorter than `180s` (3m) once the 90s coalesce grace window has
+     * elapsed (never deleting manually started, pinned, renamed, or edited trips), and ensures
+     * `knownPlaceId = 0` in [ringStore] across confirmed/kept excursion windows.
      */
     fun coalesceMicroExcursionsAndRestoreRingPlaceIds(
         ringStore: AqlRingBufferStore,
@@ -404,23 +433,28 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
             val currEnd = current.endEpochSec ?: next.startEpochSec
             val gapSec = next.startEpochSec - currEnd
             val nextSlices = getSlicesForExcursion(next.id)
-            val nextHasCustomSlices = nextSlices.size > 1 || nextSlices.any { it.label != "Unlabeled Trip Span" || it.notes.isNotBlank() }
+            val nextHasCustomSlices = nextSlices.size > 1 || nextSlices.any { it.label != DEFAULT_SLICE_LABEL || it.notes.isNotBlank() }
 
             if (current.deviceId == next.deviceId && gapSec < 0L) {
                 val nextEnd = next.endEpochSec ?: Long.MAX_VALUE
                 if (next.startEpochSec >= current.startEpochSec && nextEnd <= currEnd && !nextHasCustomSlices) {
                     val mergedPinned = current.isPinned || next.isPinned
+                    val mergedManual = current.isManual || next.isManual
+                    if (mergedManual && !current.isManual) {
+                        markExcursionManual(current.id)
+                    }
                     deleteExcursion(next.id)
                     if (mergedPinned) {
                         setExcursionPinned(current.id, true, ringStore)
                     }
-                    current = current.copy(isPinned = mergedPinned)
+                    current = current.copy(isPinned = mergedPinned, isManual = mergedManual)
                 } else {
                     current = if (nextEnd > currEnd) next else current
                 }
-            } else if (current.deviceId == next.deviceId && gapSec in 0L..90L) {
+            } else if (current.deviceId == next.deviceId && gapSec in 0L..MICRO_EXCURSION_COALESCE_GAP_SEC) {
                 val mergedEnd = if (next.endEpochSec == null) null else maxOf(currEnd, next.endEpochSec)
                 val mergedPinned = current.isPinned || next.isPinned
+                val mergedManual = current.isManual || next.isManual
                 // Prefer the title of whichever excursion was longer
                 val currDur = (current.endEpochSec ?: current.startEpochSec) - current.startEpochSec
                 val nextDur = (next.endEpochSec ?: next.startEpochSec) - next.startEpochSec
@@ -430,6 +464,7 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
                 val cv = ContentValues().apply {
                     if (mergedEnd == null) putNull("end_epoch_sec") else put("end_epoch_sec", mergedEnd)
                     put("is_pinned", if (mergedPinned) 1 else 0)
+                    put("is_manual", if (mergedManual) 1 else 0)
                     put("title", mergedTitle)
                     put("notes", mergedNotes)
                 }
@@ -452,6 +487,7 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
                 current = current.copy(
                     endEpochSec = mergedEnd,
                     isPinned = mergedPinned,
+                    isManual = mergedManual,
                     title = mergedTitle,
                     notes = mergedNotes
                 )
@@ -463,25 +499,25 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
             }
         }
 
-        // Clean up standalone unpinned < 30s Wi-Fi blips that closed > 90s ago,
+        // Clean up standalone closed, unpinned, untouched < 3m Wi-Fi blips after the 90s grace period,
         // prune expired or rotated-out unpinned excursions, restore knownPlaceId = 0 in ringStore
-        // across confirmed excursions (>= 60s), and ensure pinned excursions hold their full span.
+        // across kept excursions (manual, pinned, or >= 3m), and ensure pinned excursions hold their full span.
         val retentionWindowSec = ringStore.getArchiveWindowSec(0)
         for (exc in getExcursions()) {
             val endSec = exc.endEpochSec
             if (endSec != null) {
                 val duration = endSec - exc.startEpochSec
                 if (!exc.isPinned) {
-                    val closedBlip = duration < 30L && (nowSec - endSec) > 90L
+                    val closedBlip = isAutoDiscardableBlip(exc, getSlicesForExcursion(exc.id), nowSec)
                     val expiredByClock = (nowSec - endSec) > retentionWindowSec
-                    val rotatedOutOfRing = (nowSec - endSec) > 90L &&
+                    val rotatedOutOfRing = (nowSec - endSec) > MICRO_EXCURSION_COALESCE_GAP_SEC &&
                         ringStore.queryRange(0, exc.startEpochSec, endSec).isEmpty()
                     if (closedBlip || expiredByClock || rotatedOutOfRing) {
                         deleteExcursion(exc.id)
                         continue
                     }
                 }
-                if (duration >= 60L) {
+                if (exc.isManual || exc.isPinned || duration >= AUTO_TRIP_MIN_DURATION_SEC) {
                     ringStore.clearKnownPlaceInRange(exc.startEpochSec, endSec)
                 }
             }
@@ -534,7 +570,7 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
     fun getExcursions(): List<ExcursionRecord> {
         val list = mutableListOf<ExcursionRecord>()
         readableDatabase.rawQuery(
-            "SELECT id, device_id, start_epoch_sec, end_epoch_sec, is_pinned, title, notes FROM excursion ORDER BY start_epoch_sec DESC",
+            "SELECT id, device_id, start_epoch_sec, end_epoch_sec, is_pinned, title, notes, is_manual FROM excursion ORDER BY start_epoch_sec DESC",
             null
         ).use { c ->
             while (c.moveToNext()) {
@@ -547,7 +583,8 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
                         endEpochSec = endSec,
                         isPinned = c.getInt(4) != 0,
                         title = c.getString(5),
-                        notes = c.getString(6)
+                        notes = c.getString(6),
+                        isManual = c.getInt(7) != 0
                     )
                 )
             }
@@ -893,7 +930,34 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
 
     companion object {
         const val DB_NAME = "android_aql_metadata.db"
-        const val DB_VERSION = 1
+        const val DB_VERSION = 2
+        const val MICRO_EXCURSION_COALESCE_GAP_SEC = 90L
+        const val AUTO_TRIP_MIN_DURATION_SEC = 180L
+        const val AUTO_TRIP_TITLE_PREFIX = "Trip ("
+        const val DEFAULT_SLICE_LABEL = "Unlabeled Trip Span"
+
+        /**
+         * Returns true when a closed auto-recorded excursion is safe to discard as a momentary
+         * Wi-Fi dropout: unpinned, not manually started/carved, shorter than 3 minutes, past the
+         * 90-second coalesce grace window, and untouched by user edits (default title, no notes,
+         * single default segment slice).
+         */
+        fun isAutoDiscardableBlip(
+            excursion: ExcursionRecord,
+            slices: List<SessionSliceRecord>,
+            nowEpochSec: Long
+        ): Boolean {
+            if (excursion.isPinned || excursion.isManual) return false
+            val endSec = excursion.endEpochSec ?: return false
+            val durationSec = (endSec - excursion.startEpochSec).coerceAtLeast(0L)
+            if (durationSec >= AUTO_TRIP_MIN_DURATION_SEC) return false
+            if ((nowEpochSec - endSec) <= MICRO_EXCURSION_COALESCE_GAP_SEC) return false
+            if (excursion.notes.isNotBlank() || !excursion.title.startsWith(AUTO_TRIP_TITLE_PREFIX)) return false
+            if (slices.size > 1 || slices.any { it.label != DEFAULT_SLICE_LABEL || it.notes.isNotBlank() }) {
+                return false
+            }
+            return true
+        }
 
         fun resolveSelectedExcursionId(
             excursions: List<ExcursionRecord>,

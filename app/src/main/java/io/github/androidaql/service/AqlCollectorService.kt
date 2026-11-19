@@ -260,6 +260,7 @@ class AqlCollectorService : Service() {
     private var isStepSensorActive = false
 
     private var activeExcursionId: Long? = null
+    private var pendingBlipCleanupAfterEpochSec: Long? = null
     private var lastSampledFrame: QingpingBleParser.DecodedQingpingFrame? = null
     private var lastInterPacketDeltaMs: Long? = null
     private var latestCo2Ppm: Int = 0
@@ -290,6 +291,11 @@ class AqlCollectorService : Service() {
             val nowSec = System.currentTimeMillis() / 1000L
             val transition = stateMachine.onTimerTick(nowSec)
             applyStateTransition(transition, nowSec)
+            val cleanupAt = pendingBlipCleanupAfterEpochSec
+            if (cleanupAt != null && nowSec >= cleanupAt) {
+                pendingBlipCleanupAfterEpochSec = null
+                metadataDb.coalesceMicroExcursionsAndRestoreRingPlaceIds(ringStore, nowSec)
+            }
             refreshEffectiveSpeed()
             restartScanIfStalled()
             updateOngoingForegroundNotification()
@@ -357,6 +363,7 @@ class AqlCollectorService : Service() {
         val ringFile = File(filesDir, "device_1.aqlring")
         ringStore = AqlRingBufferStore(ringFile, deviceId = 1L)
         metadataDb.coalesceMicroExcursionsAndRestoreRingPlaceIds(ringStore)
+        stateMachine.wifiLossDebounceSec = getWifiLossDebounceSec()
         devConfig = loadDevKeepAliveConfig()
         fakeWifiSsidOverride = getSharedPreferences("aql_dev_keepalive", Context.MODE_PRIVATE)
             .getString("fake_wifi_ssid", null)
@@ -715,10 +722,30 @@ class AqlCollectorService : Service() {
         }
     }
 
+    fun getWifiLossDebounceSec(): Long =
+        getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
+            .getLong(PREF_WIFI_LOSS_DEBOUNCE_SEC, ExcursionStateMachine.DEFAULT_WIFI_LOSS_DEBOUNCE_SEC)
+            .coerceIn(0L, MAX_WIFI_LOSS_DEBOUNCE_SEC)
+
+    fun setWifiLossDebounceSec(debounceSec: Long) {
+        val clamped = debounceSec.coerceIn(0L, MAX_WIFI_LOSS_DEBOUNCE_SEC)
+        getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putLong(PREF_WIFI_LOSS_DEBOUNCE_SEC, clamped)
+            .apply()
+        stateMachine.wifiLossDebounceSec = clamped
+        val nowSec = System.currentTimeMillis() / 1000L
+        val transition = stateMachine.onTimerTick(nowSec)
+        applyStateTransition(transition, nowSec)
+        updateOngoingForegroundNotification()
+        notifyListeners()
+    }
+
     fun startManualExcursion(): Long? {
         val nowSec = System.currentTimeMillis() / 1000L
         val transition = stateMachine.onManualTripStart(nowSec)
         applyStateTransition(transition, nowSec)
+        activeExcursionId?.let { excId -> metadataDb.markExcursionManual(excId) }
         updateOngoingForegroundNotification()
         notifyListeners()
         return activeExcursionId
@@ -1268,10 +1295,20 @@ class AqlCollectorService : Service() {
         nowEpochSec: Long
     ) {
         if (transition.startedNewExcursion && activeExcursionId == null) {
+            val startSec = transition.startedExcursionStartEpochSec ?: nowEpochSec
             val fmt = DateTimeFormatter.ofPattern("MMM d, h:mm a", Locale.US).withZone(ZoneId.systemDefault())
-            val title = "Trip (${fmt.format(Instant.ofEpochSecond(nowEpochSec))})"
-            val exc = metadataDb.startExcursion(deviceId = 1L, startEpochSec = nowEpochSec, title = title)
+            val title = "Trip (${fmt.format(Instant.ofEpochSecond(startSec))})"
+            val exc = metadataDb.startExcursion(
+                deviceId = 1L,
+                startEpochSec = startSec,
+                title = title,
+                isManual = transition.startedByManualOverride
+            )
+            if (nowEpochSec > startSec) {
+                metadataDb.updateOngoingExcursionEnd(exc.id, nowEpochSec, closeExcursion = false)
+            }
             activeExcursionId = exc.id
+            pendingBlipCleanupAfterEpochSec = null
             // If the monitor was already awake at Home under 0509_ONLY for >= 10 minutes before stepping out
             // in Always 24m Reset mode, arm a 11 01 window reset so the trip starts with a fresh 30m timer.
             val nowMs = System.currentTimeMillis()
@@ -1290,7 +1327,9 @@ class AqlCollectorService : Service() {
                 closeExcursion = true,
                 ringStore = ringStore
             )
-            metadataDb.coalesceMicroExcursionsAndRestoreRingPlaceIds(ringStore)
+            metadataDb.coalesceMicroExcursionsAndRestoreRingPlaceIds(ringStore, nowEpochSec)
+            pendingBlipCleanupAfterEpochSec =
+                nowEpochSec + MetadataDatabase.MICRO_EXCURSION_COALESCE_GAP_SEC + 1L
             activeExcursionId = null
         }
 
@@ -2771,6 +2810,8 @@ class AqlCollectorService : Service() {
         const val ACTION_DEV_COMMAND = "net.dyfis.androidaql.DEV_COMMAND"
         const val PERIODIC_GATT_KEEPALIVE_INTERVAL_MS = 210_000L
         const val GATT_RETRY_COOLDOWN_MS = 15_000L
+        const val PREF_WIFI_LOSS_DEBOUNCE_SEC = "wifi_loss_debounce_sec"
+        const val MAX_WIFI_LOSS_DEBOUNCE_SEC = 300L
 
         @Volatile
         var instance: AqlCollectorService? = null

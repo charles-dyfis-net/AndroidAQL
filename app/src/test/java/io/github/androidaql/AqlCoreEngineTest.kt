@@ -307,7 +307,11 @@ class AqlCoreEngineTest {
 
     @Test
     fun testStateMachineDecoupledTimeoutsAndBleModes() {
-        val sm = ExcursionStateMachine(gpsPauseTimeoutSec = 90L, excursionCloseTimeoutSec = 2700L)
+        val sm = ExcursionStateMachine(
+            gpsPauseTimeoutSec = 90L,
+            excursionCloseTimeoutSec = 2700L,
+            wifiLossDebounceSec = 0L
+        )
         // Verify default mode is PERIODIC_GATT_KEEPALIVE
         assertEquals(BleCollectionMode.PERIODIC_GATT_KEEPALIVE, sm.userExcursionBleMode)
 
@@ -1109,7 +1113,11 @@ class AqlCoreEngineTest {
 
     @Test
     fun testAutoExcursionDisabledUntilAtLeastOneKnownPlaceConfigured() {
-        val sm = ExcursionStateMachine(gpsPauseTimeoutSec = 90L, excursionCloseTimeoutSec = 2700L)
+        val sm = ExcursionStateMachine(
+            gpsPauseTimeoutSec = 90L,
+            excursionCloseTimeoutSec = 2700L,
+            wifiLossDebounceSec = 0L
+        )
 
         // 1. Before any Saved Wi-Fi Place exists, live BLE advertisements must NOT auto-start
         //    a trip or enable GPS, while keeping offline 0x88 setup / periodic keep-alive ready.
@@ -1489,6 +1497,175 @@ class AqlCoreEngineTest {
         assertEquals(
             DualPaneSlicerView.DEFAULT_PORTRAIT_HEIGHT_DP,
             io.github.androidaql.ui.MainActivity.computePortraitSlicerHeightDp(0)
+        )
+    }
+
+    @Test
+    fun testWifiLossDebounceDelaysAutoExcursionAndBackdatesStart() {
+        assertEquals(30L, ExcursionStateMachine.DEFAULT_WIFI_LOSS_DEBOUNCE_SEC)
+        val sm = ExcursionStateMachine(
+            gpsPauseTimeoutSec = 90L,
+            excursionCloseTimeoutSec = 2700L
+        )
+        // Stationary at Home
+        val tHome = sm.onBleAdvertisement(
+            timestampEpochSec = 1000L,
+            connectedKnownPlaceId = 1,
+            hasConfiguredKnownPlaces = true
+        )
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tHome.currentState)
+        assertFalse(sm.isPendingWifiLossDebounce)
+
+        // Momentary Wi-Fi drop for 15s -> stays stationary without starting trip or waking GPS
+        val tDrop1 = sm.onWifiContextChanged(1010L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tDrop1.currentState)
+        assertFalse(tDrop1.startedNewExcursion)
+        assertFalse(tDrop1.shouldRunGps)
+        assertTrue(sm.isPendingWifiLossDebounce)
+
+        val tWait1 = sm.onTimerTick(1025L)
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tWait1.currentState)
+        assertFalse(tWait1.startedNewExcursion)
+
+        // Wi-Fi recovers before 30s -> resets debounce cleanly
+        val tRecover = sm.onWifiContextChanged(1030L, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tRecover.currentState)
+        assertFalse(sm.isPendingWifiLossDebounce)
+
+        // Real departure: Wi-Fi stays dropped across 30s threshold -> confirms excursion back-dated to 1100L
+        sm.onBleAdvertisement(1095L, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
+        val tDrop2 = sm.onWifiContextChanged(1100L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tDrop2.currentState)
+        assertFalse(tDrop2.startedNewExcursion)
+        val tBefore = sm.onTimerTick(1120L)
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tBefore.currentState)
+        assertFalse(tBefore.startedNewExcursion)
+
+        val tConfirm = sm.onTimerTick(1130L)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, tConfirm.currentState)
+        assertTrue(tConfirm.startedNewExcursion)
+        assertTrue(tConfirm.shouldRunGps)
+        assertEquals(1100L, tConfirm.startedExcursionStartEpochSec)
+        assertFalse(tConfirm.startedByManualOverride)
+        assertFalse(sm.isPendingWifiLossDebounce)
+
+        // Manual trip start bypasses Wi-Fi-loss debounce even while pending
+        val smManual = ExcursionStateMachine(wifiLossDebounceSec = 30L)
+        smManual.onBleAdvertisement(2000L, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
+        smManual.onWifiContextChanged(2010L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        assertTrue(smManual.isPendingWifiLossDebounce)
+        val tManual = smManual.onManualTripStart(2015L)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, tManual.currentState)
+        assertTrue(tManual.startedNewExcursion)
+        assertEquals(2015L, tManual.startedExcursionStartEpochSec)
+        assertTrue(tManual.startedByManualOverride)
+        assertFalse(smManual.isPendingWifiLossDebounce)
+
+        // Starting away from home out of IDLE_OUT_OF_RANGE does not apply Wi-Fi-loss debounce
+        val smAway = ExcursionStateMachine(wifiLossDebounceSec = 30L)
+        val tAway = smAway.onBleAdvertisement(3000L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, tAway.currentState)
+        assertTrue(tAway.startedNewExcursion)
+        assertEquals(3000L, tAway.startedExcursionStartEpochSec)
+        assertFalse(tAway.startedByManualOverride)
+    }
+
+    @Test
+    fun testAutoDiscardBlipPredicateProtectsManualPinnedAndEditedTrips() {
+        val baseStart = 1_794_500_000L
+        fun untouchedSlice(endSec: Long) = listOf(
+            SessionSliceRecord(
+                id = 1L,
+                excursionId = 10L,
+                startEpochSec = baseStart,
+                endEpochSec = endSec,
+                includeInExport = true,
+                label = MetadataDatabase.DEFAULT_SLICE_LABEL,
+                notes = ""
+            )
+        )
+        fun autoExc(
+            durationSec: Long,
+            endNull: Boolean = false,
+            isManual: Boolean = false,
+            isPinned: Boolean = false,
+            title: String = "Trip (Nov 18, 2:14 PM)",
+            notes: String = ""
+        ) = ExcursionRecord(
+            id = 10L,
+            deviceId = 1L,
+            startEpochSec = baseStart,
+            endEpochSec = if (endNull) null else baseStart + durationSec,
+            isPinned = isPinned,
+            title = title,
+            notes = notes,
+            isManual = isManual
+        )
+
+        // Closed untouched 120s auto-trip past 90s grace window -> discarded
+        val end120 = baseStart + 120L
+        assertTrue(MetadataDatabase.isAutoDiscardableBlip(autoExc(120L), untouchedSlice(end120), end120 + 91L))
+
+        // Inside 90s coalesce grace window -> kept until grace elapses
+        assertFalse(MetadataDatabase.isAutoDiscardableBlip(autoExc(120L), untouchedSlice(end120), end120 + 90L))
+
+        // 180s (3m) auto-trip past grace window -> kept
+        val end180 = baseStart + 180L
+        assertFalse(MetadataDatabase.isAutoDiscardableBlip(autoExc(180L), untouchedSlice(end180), end180 + 120L))
+
+        // Ongoing, manual, pinned, renamed, annotated, split, or relabeled -> all protected
+        assertFalse(MetadataDatabase.isAutoDiscardableBlip(autoExc(60L, endNull = true), untouchedSlice(baseStart + 60L), baseStart + 300L))
+        assertFalse(MetadataDatabase.isAutoDiscardableBlip(autoExc(60L, isManual = true), untouchedSlice(baseStart + 60L), baseStart + 300L))
+        assertFalse(MetadataDatabase.isAutoDiscardableBlip(autoExc(60L, isPinned = true), untouchedSlice(baseStart + 60L), baseStart + 300L))
+        assertFalse(MetadataDatabase.isAutoDiscardableBlip(autoExc(60L, title = "Elevator Check"), untouchedSlice(baseStart + 60L), baseStart + 300L))
+        assertFalse(MetadataDatabase.isAutoDiscardableBlip(autoExc(60L, notes = "Hallway"), untouchedSlice(baseStart + 60L), baseStart + 300L))
+
+        val end60 = baseStart + 60L
+        val renamedSlice = listOf(untouchedSlice(end60).first().copy(label = "Elevator"))
+        assertFalse(MetadataDatabase.isAutoDiscardableBlip(autoExc(60L), renamedSlice, end60 + 200L))
+        val splitSlices = listOf(
+            SessionSliceRecord(1L, 10L, baseStart, baseStart + 30L, true, MetadataDatabase.DEFAULT_SLICE_LABEL, ""),
+            SessionSliceRecord(2L, 10L, baseStart + 30L, end60, true, MetadataDatabase.DEFAULT_SLICE_LABEL, "")
+        )
+        assertFalse(MetadataDatabase.isAutoDiscardableBlip(autoExc(60L), splitSlices, end60 + 200L))
+    }
+
+    @Test
+    fun testFormatTripPickerLabelShowsDurationAndLiveStatus() {
+        val baseStart = 1_794_500_000L
+        val closedShort = ExcursionRecord(1L, 1L, baseStart, baseStart + 45L, false, "Trip (Nov 18, 3:00 PM)", "")
+        assertEquals(
+            "Trip (Nov 18, 3:00 PM) • 45s • ⏳ 14d",
+            io.github.androidaql.ui.MainActivity.formatTripPickerLabel(closedShort, baseStart + 100L)
+        )
+
+        val closed42m = ExcursionRecord(2L, 1L, baseStart, baseStart + 42L * 60L, false, "Trip (Nov 18, 2:14 PM)", "")
+        assertEquals(
+            "Trip (Nov 18, 2:14 PM) • 42m • ⏳ 12d",
+            io.github.androidaql.ui.MainActivity.formatTripPickerLabel(closed42m, baseStart + 2L * 86_400L)
+        )
+
+        assertEquals(
+            "Trip (Nov 18, 2:14 PM) • 42m • ⏳ <1d",
+            io.github.androidaql.ui.MainActivity.formatTripPickerLabel(closed42m, baseStart + 13L * 86_400L + 12L * 3_600L)
+        )
+
+        val closedPinned = ExcursionRecord(3L, 1L, baseStart, baseStart + 75L * 60L, true, "Downtown Clinic", "")
+        assertEquals(
+            "Downtown Clinic • 1h 15m • 📌 Pinned",
+            io.github.androidaql.ui.MainActivity.formatTripPickerLabel(closedPinned, baseStart + 5000L)
+        )
+
+        val liveUnpinned = ExcursionRecord(4L, 1L, baseStart, null, false, "Trip (Nov 18, 7:20 PM)", "", isManual = true)
+        assertEquals(
+            "Trip (Nov 18, 7:20 PM) • Live (12m 30s)",
+            io.github.androidaql.ui.MainActivity.formatTripPickerLabel(liveUnpinned, baseStart + 12L * 60L + 30L)
+        )
+
+        val livePinned = ExcursionRecord(5L, 1L, baseStart, null, true, "Evening Walk", "", isManual = true)
+        assertEquals(
+            "Evening Walk • Live (5m) • 📌 Pinned",
+            io.github.androidaql.ui.MainActivity.formatTripPickerLabel(livePinned, baseStart + 5L * 60L)
         )
     }
 }

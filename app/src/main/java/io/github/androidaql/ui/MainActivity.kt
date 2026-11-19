@@ -1402,7 +1402,9 @@ class MainActivity : AppCompatActivity() {
             banner.visibility = View.GONE
             return
         }
-        banner.text = "⏳ Auto-recorded trip (expires in 14d). Tap here or '⏳ 14d • 📌 Pin' above to retain this trip forever."
+        val retentionSec = collectorService?.ringStore?.getArchiveWindowSec(0) ?: DEFAULT_RETENTION_WINDOW_SEC
+        val remLabel = formatRemainingRetentionCompact(exc, System.currentTimeMillis() / 1000L, retentionSec)
+        banner.text = "⏳ Unpinned trip (expires in $remLabel). Tap here or '⏳ $remLabel • 📌 Pin' above to retain this trip forever."
         banner.visibility = View.VISIBLE
     }
 
@@ -1948,12 +1950,17 @@ class MainActivity : AppCompatActivity() {
         val slices = svc.metadataDb.getSlicesForExcursion(currentExc.id)
         val slots = svc.metadataDb.resolveSlotsForExcursion(currentExc.id, svc.ringStore)
 
-        val pinBadge = if (currentExc.isPinned) "📌" else "14d"
+        val remLabel = formatRemainingRetentionCompact(
+            currentExc,
+            System.currentTimeMillis() / 1000L,
+            svc.ringStore.getArchiveWindowSec(0)
+        )
+        val pinBadge = if (currentExc.isPinned) "📌" else "⏳ $remLabel"
         tripSelectorLabel.text = if (isLandscape()) "${currentExc.title} [$pinBadge]" else currentExc.title
         manageTripBtn?.visibility = View.VISIBLE
         pinTripBtn?.apply {
             visibility = View.VISIBLE
-            text = if (currentExc.isPinned) "📌 Pinned" else "⏳ 14d • 📌 Pin"
+            text = if (currentExc.isPinned) "📌 Pinned" else "⏳ $remLabel • 📌 Pin"
             if (currentExc.isPinned) {
                 background = roundedRect("#1E293B", dp(6), strokeHex = "#334155", strokeWidthPx = dp(1))
                 setTextColor(Color.parseColor("#94A3B8"))
@@ -2468,7 +2475,7 @@ class MainActivity : AppCompatActivity() {
     private fun carveCustomWindowAsTrip(startSec: Long, endSec: Long) {
         val svc = collectorService ?: return
         val title = "Carved Trip (${dateShortTimeFmt.format(Instant.ofEpochSecond(startSec))})"
-        val exc = svc.metadataDb.startExcursion(deviceId = 1L, startEpochSec = startSec, title = title)
+        val exc = svc.metadataDb.startExcursion(deviceId = 1L, startEpochSec = startSec, title = title, isManual = true)
         svc.metadataDb.updateOngoingExcursionEnd(exc.id, endSec, closeExcursion = true, ringStore = svc.ringStore)
         svc.metadataDb.setExcursionPinned(exc.id, true, svc.ringStore)
         customWindowStartEpochSec = null
@@ -2619,6 +2626,41 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { promptAddCurrentWifiToSavedPlaces() }
         }
         col.addView(addPlaceBtn)
+
+        // Wi-Fi Disconnect Debounce (Auto-Trip Start)
+        val debounceHeader = TextView(this).apply {
+            text = "Wi-Fi Disconnect Debounce (Auto-Trip Start)"
+            setTypeface(typeface, Typeface.BOLD)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setPadding(0, dp(14), 0, dp(4))
+        }
+        col.addView(debounceHeader)
+
+        val debounceLabels = listOf(
+            "0s — Immediate (captures elevators/hallways)",
+            "15s — Ignore brief Wi-Fi glitches",
+            "30s — Default • delay GPS on short dropouts",
+            "60s — Only start after 1m away from Wi-Fi"
+        )
+        val currentDebounceSec = svc.getWifiLossDebounceSec()
+        val debounceSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                debounceLabels
+            )
+            setSelection(
+                WIFI_LOSS_DEBOUNCE_OPTIONS_SEC.indexOf(currentDebounceSec).takeIf { it >= 0 }
+                    ?: WIFI_LOSS_DEBOUNCE_OPTIONS_SEC.indexOf(ExcursionStateMachine.DEFAULT_WIFI_LOSS_DEBOUNCE_SEC).coerceAtLeast(0)
+            )
+        }
+        val debounceHelpView = TextView(this).apply {
+            text = "Wait before starting an auto-trip and waking GPS when Saved Place Wi-Fi drops. Untouched auto-recorded trips under 3m are automatically discarded after closing (manual trips are always kept; all 15s readings remain in the 14d ring)."
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(0, dp(4), 0, dp(4))
+        }
+        col.addView(debounceSpinner)
+        col.addView(debounceHelpView)
 
         // 3. In-Place Alert Thresholds
         val ev = svc.alertEvaluator
@@ -2800,6 +2842,10 @@ class MainActivity : AppCompatActivity() {
                         "Keep-Alive mode: ${chosenKeepAlive.statusBadge}",
                         Toast.LENGTH_SHORT
                     ).show()
+                }
+                val chosenDebounceSec = WIFI_LOSS_DEBOUNCE_OPTIONS_SEC[debounceSpinner.selectedItemPosition]
+                if (chosenDebounceSec != currentDebounceSec) {
+                    svc.setWifiLossDebounceSec(chosenDebounceSec)
                 }
                 val chosenGraceSec = dropoutValuesSec[dropoutSpinner.selectedItemPosition]
                 setDropoutGracePeriodSec(chosenGraceSec)
@@ -3059,9 +3105,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun showTripPickerDialog() {
         val svc = collectorService ?: return
+        svc.metadataDb.coalesceMicroExcursionsAndRestoreRingPlaceIds(svc.ringStore)
         val excursions = svc.metadataDb.getExcursions()
         val demo = isDemoDataEnabled()
-        val options = excursions.map { "${it.title} (${if (it.isPinned) "Pinned" else "14d Ring"})" }.toMutableList()
+        val nowSec = System.currentTimeMillis() / 1000L
+        val retentionWindowSec = svc.ringStore.getArchiveWindowSec(0)
+        val options = excursions.map { formatTripPickerLabel(it, nowSec, retentionWindowSec) }.toMutableList()
         if (demo) {
             options.add("🔄 Reload Canned Demo Trip")
             options.add("📂 Import / Replay CSV File...")
@@ -3281,20 +3330,6 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun formatElapsedAge(ageSec: Long): String = when {
-        ageSec < 60L -> "${ageSec}s"
-        ageSec < 3600L -> {
-            val m = ageSec / 60L
-            val s = ageSec % 60L
-            if (s == 0L) "${m}m" else "${m}m ${s}s"
-        }
-        else -> {
-            val h = ageSec / 3600L
-            val m = (ageSec % 3600L) / 60L
-            "${h}h ${m}m"
-        }
-    }
-
     private fun dp(value: Int): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), resources.displayMetrics).toInt()
 
@@ -3323,6 +3358,58 @@ class MainActivity : AppCompatActivity() {
         const val COLOR_ZOOM_BTN_IDLE_LANDSCAPE_HEX = "#334155"
         const val COLOR_ZOOM_STATUS_ACTIVE_HEX = "#38BDF8"
         const val COLOR_ZOOM_STATUS_IDLE_HEX = "#94A3B8"
+        const val DEFAULT_RETENTION_WINDOW_SEC = 14L * 86_400L
+        val WIFI_LOSS_DEBOUNCE_OPTIONS_SEC = listOf(0L, 15L, 30L, 60L)
+
+        fun formatElapsedAge(ageSec: Long): String = when {
+            ageSec < 60L -> "${ageSec}s"
+            ageSec < 3600L -> {
+                val m = ageSec / 60L
+                val s = ageSec % 60L
+                if (s == 0L) "${m}m" else "${m}m ${s}s"
+            }
+            else -> {
+                val h = ageSec / 3600L
+                val m = (ageSec % 3600L) / 60L
+                "${h}h ${m}m"
+            }
+        }
+
+        fun formatRemainingRetentionCompact(
+            excursion: ExcursionRecord,
+            nowEpochSec: Long = System.currentTimeMillis() / 1000L,
+            retentionWindowSec: Long = DEFAULT_RETENTION_WINDOW_SEC
+        ): String {
+            val ageSec = (nowEpochSec - excursion.startEpochSec).coerceAtLeast(0L)
+            val remainingSec = (retentionWindowSec - ageSec).coerceAtLeast(0L)
+            if (remainingSec < 86_400L) return "<1d"
+            val maxDays = (retentionWindowSec / 86_400L).coerceAtLeast(1L)
+            val days = ((remainingSec + 43_200L) / 86_400L).coerceIn(1L, maxDays)
+            return "${days}d"
+        }
+
+        fun formatTripPickerLabel(
+            excursion: ExcursionRecord,
+            nowEpochSec: Long = System.currentTimeMillis() / 1000L,
+            retentionWindowSec: Long = DEFAULT_RETENTION_WINDOW_SEC
+        ): String {
+            val endSec = excursion.endEpochSec ?: nowEpochSec
+            val duration = formatElapsedAge((endSec - excursion.startEpochSec).coerceAtLeast(0L))
+            return if (excursion.endEpochSec == null) {
+                if (excursion.isPinned) {
+                    "${excursion.title} • Live ($duration) • 📌 Pinned"
+                } else {
+                    "${excursion.title} • Live ($duration)"
+                }
+            } else {
+                val badge = if (excursion.isPinned) {
+                    "📌 Pinned"
+                } else {
+                    "⏳ ${formatRemainingRetentionCompact(excursion, nowEpochSec, retentionWindowSec)}"
+                }
+                "${excursion.title} • $duration • $badge"
+            }
+        }
 
         /**
          * Computes a responsive portrait chart height in dp based on the current window height,
