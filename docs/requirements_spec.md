@@ -1,7 +1,7 @@
 # Requirements Specification: Portable Qingping Air Monitor Lite (`CGDN1`) Logger
 
 ## 1. Purpose & Core Value Proposition
-An Android application designed to collect, analyze, and export environmental data ($\text{CO}_2$, PM2.5, PM10, Temperature, Humidity) from a **Qingping Air Monitor Lite (`CGDN1`)** with first-class support for **portability and advocacy**:
+An Android application designed to collect, analyze, and export environmental data (CO₂, PM2.5, PM10, Temperature, Humidity) from a **Qingping Air Monitor Lite (`CGDN1`)** with first-class support for **portability and advocacy**:
 1. **Home vs. Field Context Awareness:** Automatically distinguish between stationary monitoring at known "Home" locations (via known Wi-Fi APs) and portable excursions (transit + destinations).
 2. **Retrospective Session Slicing:** Allow users to divide and adjust excursion timelines *after the fact* into distinct segments (e.g., *Bus Ride Out*, *Waiting Room*, *Exam Room*, *Cab Ride Back*) by inspecting synchronized air quality and movement speed/accuracy charts.
 3. **Advocacy-Grade Retention & Privacy by Default:** Retain full-resolution telemetry during a 14-day rolling review window and indefinitely for flagged/pinned excursions (e.g., to share air quality evidence for healthcare/facility advocacy), while automatically overwriting unflagged data after 14 days and immediately discarding raw GPS coordinates.
@@ -32,7 +32,7 @@ stateDiagram-v2
 
 ### 2.1 Decoupled Timeout Thresholds & Excursion Confirmation
 To handle real-world RF occlusion (e.g., monitor muffled inside a backpack on the CTA, or stepping out of an exam room for 3 minutes while leaving the bag on a chair) without either draining battery/logging phantom trips or fragmenting a single outing into multiple excursions:
-* **Post-Wi-Fi-Disconnect BLE Confirmation (Anti-Phantom-Trip Gate):** Because Home Wi-Fi can reach the sidewalk or drop 30–60 seconds *after* the user walks out the front door leaving the monitor behind at home, a trip is only marked **Confirmed Portable** once at least $K$ BLE packets (default: $K = 2$ packets or $\ge 30\text{s}$ of BLE presence) are received *after* Known Wi-Fi disconnects. If no BLE packets arrive after Wi-Fi disconnects, the tentative excursion is silently discarded at `T_gps_pause` with zero alerts.
+* **Post-Wi-Fi-Disconnect BLE Confirmation (Anti-Phantom-Trip Gate):** Because Home Wi-Fi can reach the sidewalk or drop 30–60 seconds *after* the user walks out the front door leaving the monitor behind at home, a trip is only marked **Confirmed Portable** once at least `K` BLE packets (default: `K = 2` packets or ≥ 30s of BLE presence) are received *after* Known Wi-Fi disconnects. If no BLE packets arrive after Wi-Fi disconnects, the tentative excursion is silently discarded at `T_gps_pause` with zero alerts.
 * **`T_gps_pause` (Default: 90 seconds):** How quickly `FusedLocationProviderClient` is stopped after the last received `CGDN1` BLE packet. Protects battery and privacy immediately if the user walks away from the monitor.
 * **`T_signal_lost_alert` (Default: 180 seconds / ~12–18 missed packets, configurable):** When a **Confirmed Portable** excursion remains in `Field_Excursion_SignalPaused` beyond this window, the app triggers an in-place **Monitor Signal Lost** remediation alert (see Section 6.1) so the user can check whether the monitor hit its battery auto-power-off timer or was accidentally left behind at a stop.
 * **`T_excursion_close` (Default: 45 minutes, configurable):** How long an ongoing `EXCURSION` remains open in `Field_Excursion_SignalPaused` waiting for the monitor's BLE advertisements to resume (unless closed immediately by reconnecting to a Known Wi-Fi AP or manual user action).
@@ -65,10 +65,10 @@ Using SQLite for continuous 10–15 second time-series ingestion (`~8,640 rows/d
 
 1. **Constant-Size Circular Time-Series Store (`.aqlring` Binary Ring Buffer):**
    * Pre-allocated binary file per `MONITOR_DEVICE` using fixed-width 32-byte binary slots accessed via `FileChannel` / `RandomAccessFile`.
-   * **Inline Slot Update on Write:** Consolidation (`MEAN`, `MIN`, `MAX`, `COUNT`) into each 15-second bucket happens in $O(1)$ in-place—no background SQLite compaction or pruning jobs required.
+   * **Inline Slot Update on Write:** Consolidation (`MEAN`, `MIN`, `MAX`, `COUNT`) into each 15-second bucket happens in `O(1)` in-place—no background SQLite compaction or pruning jobs required.
    * **Predictable, Constant Disk Footprint:**
-     * *Archive 0 (High-Res, 15s step, 14-day retention):* $80,640\text{ slots} \times 32\text{ bytes} + 96\text{ bytes header/descriptor} = \mathbf{2,580,576\text{ bytes}}\ (\approx \mathbf{2.58\text{ MB}})$
-     * **Total Constant Footprint per Monitor:** **$\approx 2.58\text{ MB}$** on disk forever.
+     * *Archive 0 (High-Res, 15s step, 14-day retention):* `80,640 slots × 32 bytes + 96 bytes header/descriptor = 2,580,576 bytes` (**≈ 2.58 MB**)
+     * **Total Constant Footprint per Monitor:** **≈ 2.58 MB** on disk forever.
 2. **Pinned Excursion Archive ("Freeze on Pin"):**
    * During the 14-day full-resolution window (Archive 0), retrospective session slicing reads directly from the ring buffer.
    * When a user flags an `EXCURSION` for indefinite retention (`is_pinned = true`), the raw Archive 0 sensor and movement slots covering `[excursion.start_ts, excursion.end_ts]` are copied into a dedicated immutable **Pinned Excursion Store** (either a per-excursion binary/CSV/SQLite archive table), allowing the ring buffer to keep wrapping around indefinitely without losing advocacy data.
@@ -161,9 +161,9 @@ erDiagram
 
 ### 3.2 Multi-Pane Slicing UI Requirements (AQ + Temp/Humidity + Speed/Accuracy)
 * **Synchronized 3-Pane Time Axis (`DualPaneSlicerView`):**
-  * **Pane 1 — Upper (Air Quality, 42% height):** Plots $\text{CO}_2$ ($\text{ppm}$, blue) and **PM2.5 ($\mu\text{g/m}^3$, purple, enabled by default)** on a dual scale with a $1000\text{ ppm}$ dashed reference threshold.
-  * **Pane 2 — Middle (Microclimate, 29% height):** Plots **Temperature (orange)** and **Relative Humidity ($\%$, cyan)** with a parsimonious header (`"Temp (°F, orange) & RH (%, cyan)"` or `"°C"`), providing a clear physical signal for indoor/outdoor and transit/building HVAC transitions even when high-rise buildings block GPS.
-  * **Pane 3 — Lower (Movement & Urban Canyon Context, 29% height):** Plots movement speed ($\text{m/s}$, green) when GPS collection is active (`knownPlaceId == 0 && speedMps != null`), visualizes `horizontal_accuracy_m > 50m` directly as a shaded red **"Weak GPS (>50m)"** band so downtown skyscraper multipath spikes are visually obvious, and renders intervals where GPS is disabled (such as at a recognized **Saved Place** like Home/Office or when `speedMps == null`) as a distinct slate **"🏠 GPS Off (Saved Place)"** (or **"GPS Off"**) band and callout rather than plotting a misleading green line sitting at $0\text{ m/s}$.
+  * **Pane 1 — Upper (Air Quality, 42% height):** Plots CO₂ (ppm, blue) and **PM2.5 (µg/m³, purple, enabled by default)** on a dual scale with a 1000 ppm dashed reference threshold.
+  * **Pane 2 — Middle (Microclimate, 29% height):** Plots **Temperature (orange)** and **Relative Humidity (%, cyan)** with a parsimonious header (`"Temp (°F, orange) & RH (%, cyan)"` or `"°C"`), providing a clear physical signal for indoor/outdoor and transit/building HVAC transitions even when high-rise buildings block GPS.
+  * **Pane 3 — Lower (Movement & Urban Canyon Context, 29% height):** Plots movement speed (m/s, green) when GPS collection is active (`knownPlaceId == 0 && speedMps != null`), visualizes `horizontal_accuracy_m > 50m` directly as a shaded red **"Weak GPS (>50m)"** band so downtown skyscraper multipath spikes are visually obvious, and renders intervals where GPS is disabled (such as at a recognized **Saved Place** like Home/Office or when `speedMps == null`) as a distinct slate **"🏠 GPS Off (Saved Place)"** (or **"GPS Off"**) band and callout rather than plotting a misleading green line sitting at 0 m/s.
   * **Header Headroom & Inline Cursor Callouts:** Each pane reserves a `14dp` top header band so plotted lines never collide with pane titles. Scrubbing or tapping the chart draws a vertical cursor line with a **floating timestamp pill** at the top and **inline color-coded value badges** directly next to each curve intersection (with automatic vertical collision avoidance), eliminating the need for a separate external text header bar.
   * **Telemetry Dropout & Interpolation Visualization (Configurable Grace Period):**
     * Rather than silently drawing a solid straight line across arbitrary time gaps between non-adjacent samples (`slot[i].timestampEpochSec - slot[i-1].timestampEpochSec > gracePeriodSec`), the 3-pane graph stack must visually distinguish continuous telemetry from missing/interpolated intervals once a configurable dropout threshold is exceeded (e.g., default grace period of `45s` / `3` missed Archive 0 slots, configurable in **⚙️ Settings**):
@@ -176,7 +176,13 @@ erDiagram
   * **View Mode (Default):** Hides divider drag handles (`⇔ 1|2`) and hides the boundary split/nudge toolbar while keeping the color-coded Segment Strip (`#1`, `#2`, ...) visible below Pane 3 so users can cleanly view and scrub the 3-pane timeline without visual clutter or accidental boundary edits.
   * **Edit Mode (`✏️ Edit Trip`):** Reveals the `⇔ 1|2` / `⇔ N|(N+1)` thumb pill handles on shared dividers and the **`✂️ Split` / `-1m` / `-15s` / `+15s` / `+1m`** single-row toolbar with contextual divider/cursor helper text. When no divider is selected yet (or before any split is created), the `-1m / -15s / +15s / +1m` buttons nudge the cursor line for precise split placement; when a divider is selected, they nudge that shared boundary.
   * **v1 Manual Slicing vs. v2 Auto-Drafting:** Newly recorded excursions open as a single contiguous timeline (`[start_ts, end_ts]`). Once real-world v1 trips and user-created `SESSION_SLICE` boundaries are collected, those manual slices will serve as ground-truth labeled data to tune and validate automatic boundary-detection heuristics for v2.
-  * Statistics ($\text{CO}_2$ and PM2.5/PM10 min, max, time-weighted mean, median, 95th percentile, and minutes above threshold) recalculate live from the Archive 0 ring buffer (or `PINNED_SLICE_DATA` if pinned) within `[start_ts, end_ts]`.
+  * Statistics (CO₂ and PM2.5/PM10 min, max, time-weighted mean, median, 95th percentile, and minutes above threshold) recalculate live from the Archive 0 ring buffer (or `PINNED_SLICE_DATA` if pinned) within `[start_ts, end_ts]`.
+  * **Long-Trip Zoom, Pan & Minimap Scrubbing (Option A):** For multi-hour excursions, `DualPaneSlicerView` and the `Trips` tab keep zoom/minimap navigation active across all trips:
+    * **Overview Minimap:** A navigator bar below the Trips time axis renders whole-trip CO₂ / PM2.5 sparklines, divider ticks, the cursor marker, and a draggable/tappable viewport thumb.
+    * **Multi-Modal Gestures & Auto-Scroll:** Supports two-finger horizontal pinch-to-zoom and pan, double-tap chart zoom toggle, double-tap Segment Strip block focus, and edge auto-scroll when dragging the cursor or a `⇔` boundary near the chart edge while zoomed in.
+    * **Viewport-Scoped Y-Axes:** Sub-window Y-axes auto-scale dynamically to the visible samples while preserving baseline floors/ceilings (`400–1600 ppm` CO₂, `35 µg/m³` PM2.5, `0–28°C`, `12 m/s` speed).
+    * **Quick-Zoom & Focus Ergonomics:** Portrait displays a `🔍 View` / `🔍 Zoom` status row and quick buttons (`Full`, `30m`, `10m`, `3m`, `🎯 Seg`) plus a per-card `🔍` focus button (while single-tapping a card pans to reveal it without changing zoom). Landscape adds compact top-bar toggles (`🔍 10m` / `🔍 3m` / `🔍 Full` and `🎯 Seg`). Zoom bounds persist across orientation changes via `onSaveInstanceState`.
+    * **Responsive Bottom Chrome & Height:** `DualPaneSlicerView.BottomChromeMetrics` derives strip, time-axis (with narrow label overlap guard), and minimap heights dynamically from view height and font metrics; Portrait slicer height scales between `320dp` and `460dp` (`45%` of screen height).
 
 ---
 
@@ -216,24 +222,24 @@ To allow an external desktop/CLI tool to generate rich PDF advocacy reports dire
 ### 5.2 Visual Summary Card (Nice-to-Have / Post-MVP)
 An in-app shareable image card (PNG rendered via Compose Canvas) summarizing an excursion or specific slice with:
 * Annotated timeline chart with color-coded session slices (e.g., Transit → Waiting Room → Exam Room)
-* Per-slice summary table (Duration, Mean $\text{CO}_2$, Peak $\text{CO}_2$, Mean/Peak PM2.5)
+* Per-slice summary table (Duration, Mean CO₂, Peak CO₂, Mean/Peak PM2.5)
 * Privacy-safe header (customizable title & date; no MAC addresses or Wi-Fi SSIDs)
 
 ---
 
 ## 6. Configurable Real-Time Threshold & Low-Battery Alerts (In-Place Lifecycle)
 
-Users can configure local notifications when air quality degrades beyond user-defined thresholds ($\text{CO}_2$, PM2.5) or when the **Qingping monitor's battery runs low (`BATTERY_LOW`, default Warning $\le 20\%$, Critical $\le 10\%$, auto-clearing at $\ge 25\%$)**, managed as **stateful, in-place notifications** rather than a spammy log of discrete alert events:
+Users can configure local notifications when air quality degrades beyond user-defined thresholds (CO₂, PM2.5) or when the **Qingping monitor's battery runs low (`BATTERY_LOW`, default Warning ≤ 20%, Critical ≤ 10%, auto-clearing at ≥ 25%)**, managed as **stateful, in-place notifications** rather than a spammy log of discrete alert events:
 
 * **Deterministic Notification IDs & In-Place Updates:**
   * Active alerts are keyed by `(device_id, metric_type)` using a stable Android notification ID.
-  * While a metric remains above threshold, subsequent BLE packets update the **existing** notification in-place using `setOnlyAlertOnce(true)`—displaying the **current value**, **peak value** during this excursion/spike, **time above threshold**, and **trend arrow** ($\uparrow$ rising / $\downarrow$ falling) without re-playing sound or vibration.
+  * While a metric remains above threshold, subsequent BLE packets update the **existing** notification in-place using `setOnlyAlertOnce(true)`—displaying the **current value**, **peak value** during this excursion/spike, **time above threshold**, and **trend arrow** (↑ rising / ↓ falling) without re-playing sound or vibration.
 * **Automatic In-Place Clearing:**
-  * As soon as the metric drops below `threshold - hysteresis_margin` (e.g., drops below $850\text{ ppm}$ after a $1000\text{ ppm}$ trigger) or the monitor goes out of BLE range, the notification is automatically dismissed in-place via `NotificationManager.cancel(notificationId)`.
+  * As soon as the metric drops below `threshold - hysteresis_margin` (e.g., drops below 850 ppm after a 1000 ppm trigger) or the monitor goes out of BLE range, the notification is automatically dismissed in-place via `NotificationManager.cancel(notificationId)`.
 * **Implicit Snooze on User Dismissal:**
-  * If the user manually swipes away an active alert while the metric is still elevated, a `deleteIntent` marks the current spike as acknowledged so in-place updates do not re-post the notification unless the reading either (a) drops below the hysteresis recovery threshold and spikes again later, or (b) crosses into a higher configured severity tier (e.g., escalating from *Warning* at $1000\text{ ppm}$ to *Critical* at $2000\text{ ppm}$).
+  * If the user manually swipes away an active alert while the metric is still elevated, a `deleteIntent` marks the current spike as acknowledged so in-place updates do not re-post the notification unless the reading either (a) drops below the hysteresis recovery threshold and spikes again later, or (b) crosses into a higher configured severity tier (e.g., escalating from *Warning* at 1000 ppm to *Critical* at 2000 ppm).
 * **Context Scoping & Persistence:**
-  * Rules can be scoped to *Field Excursions Only*, *Known Places (Home) Only*, or *Always*, and require $N$ consecutive seconds (default 30s) above threshold before initial trigger.
+  * Rules can be scoped to *Field Excursions Only*, *Known Places (Home) Only*, or *Always*, and require `N` consecutive seconds (default 30s) above threshold before initial trigger.
 
 ### 6.1 Excursion Signal-Lost Remediation Alert
 Entering `Field_Excursion_SignalPaused` during a confirmed portable trip indicates one of three situations: (1) brief RF shadowing, (2) the `CGDN1` hit its battery auto-power-off timer inside the user's bag, or (3) the user accidentally left the monitor behind at a destination.
@@ -268,7 +274,7 @@ The Qingping Air Monitor Lite (`CGDN1`) broadcasts passive BLE advertisements co
   * **`0x12` (Length `4`):** Particulate Matter (PM2.5 & PM10)
     * `pm25_ugm3 = uint16_le(bytes[0..1])`
     * `pm10_ugm3 = uint16_le(bytes[2..3])`
-  * **`0x13` (Length `2`):** Carbon Dioxide ($\text{CO}_2$)
+  * **`0x13` (Length `2`):** Carbon Dioxide (CO₂)
     * `co2_ppm = uint16_le(bytes[0..1])`
 * **Physical Hardware Pairing / Wakeup Behavior (`CGDN1` `0x24`, Firmware `4.8.5` — see [full empirical report](hardware_observations.md)):**
   * To initiate BLE broadcasts on an unpaired `CGDN1`, the user must **hold down the top capacitive touchbar until the Wi-Fi/radio icon displays** on the monitor's screen (rather than merely bringing the phone near the device).
@@ -314,7 +320,7 @@ flowchart TD
 ### 8.3 Key Screen Workflows & Ergonomics
 
 #### A. "Now" Screen (Live Telemetry + Recent-History 3-Pane Graph Stack) & Settings Modal
-* **Live Statistics + Recent-History Graph Stack:** Below the context status pill and the live $\text{CO}_2$ / PM2.5 / Temperature Hero card, the **1. Now** tab renders a read-only **Recent History (Last 15–20 Minutes) 3-Pane Graph Stack** (`DualPaneSlicerView` with `isEditMode = false`) so the user can immediately see recent trends and touch/scrub to inspect values over the last several minutes.
+* **Live Statistics + Recent-History Graph Stack:** Below the context status pill and the live CO₂ / PM2.5 / Temperature Hero card, the **1. Now** tab renders a read-only **Recent History (Last 15–20 Minutes) 3-Pane Graph Stack** (`DualPaneSlicerView` with `isEditMode = false`) so the user can immediately see recent trends and touch/scrub to inspect values over the last several minutes.
 * **Dedicated Settings Modal (`⚙️ Settings`):**
   * To keep the primary navigation parsimonious, **Saved Wi-Fi Places**, **Temperature Display Unit** (`Auto (Follow Device Settings)` / `°F` / `°C`), **In-Place Alert Thresholds**, and **Reusable Segment Presets** live inside the **`⚙️ Settings`** modal accessible from the top-right header bar.
 * **Multiple Saved Places (Multiple Homes, Partner's Place, Office):**

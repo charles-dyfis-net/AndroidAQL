@@ -17,6 +17,7 @@ import android.os.Bundle
 import android.os.IBinder
 import android.text.Editable
 import android.text.InputType
+import android.text.TextUtils
 import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
@@ -60,6 +61,7 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
 
@@ -74,6 +76,12 @@ class MainActivity : AppCompatActivity() {
     // Optional custom 14-day ring buffer time window (when inspecting raw ring buffer before carving a trip)
     private var customWindowStartEpochSec: Long? = null
     private var customWindowEndEpochSec: Long? = null
+
+    // Persisted zoom viewport across orientation / lifecycle recreation
+    private var savedViewStartEpochSec: Long? = null
+    private var savedViewEndEpochSec: Long? = null
+    private var lastViewportExcursionId: Long? = null
+    private var lastViewportCustomWindow: Pair<Long, Long>? = null
 
     private var pendingScreenshotPreset: String? = null
     private var activeSegmentModalDialog: AlertDialog? = null
@@ -103,6 +111,15 @@ class MainActivity : AppCompatActivity() {
     private var manageTripBtn: TextView? = null
     private lateinit var modeToggleBtn: Button
     private lateinit var dualPaneSlicerView: DualPaneSlicerView
+    private var zoomControlBar: LinearLayout? = null
+    private var zoomStatusView: TextView? = null
+    private var zoomFullBtn: Button? = null
+    private var zoom30mBtn: Button? = null
+    private var zoom10mBtn: Button? = null
+    private var zoom3mBtn: Button? = null
+    private var zoomSegBtn: Button? = null
+    private var landZoomToggleBtn: Button? = null
+    private var landFocusSegBtn: Button? = null
     private lateinit var dividerNudgeBar: LinearLayout
     private lateinit var cursorModeBtn: Button
     private lateinit var editHelperView: TextView
@@ -210,6 +227,15 @@ class MainActivity : AppCompatActivity() {
             if (cwStart > 0L && cwEnd > cwStart) {
                 customWindowStartEpochSec = cwStart
                 customWindowEndEpochSec = cwEnd
+                lastViewportCustomWindow = cwStart to cwEnd
+            }
+            val savedLastVpExc = savedInstanceState.getLong("lastViewportExcursionId", -1L)
+            if (savedLastVpExc > 0L) lastViewportExcursionId = savedLastVpExc
+            val savedVs = savedInstanceState.getLong("viewStartEpochSec", -1L)
+            val savedVe = savedInstanceState.getLong("viewEndEpochSec", -1L)
+            if (savedVs > 0L && savedVe > savedVs) {
+                savedViewStartEpochSec = savedVs
+                savedViewEndEpochSec = savedVe
             }
         } else {
             captureScreenshotPresetFromIntent(intent)
@@ -264,6 +290,19 @@ class MainActivity : AppCompatActivity() {
         outState.putBoolean("isTripEditMode", isTripEditMode)
         outState.putLong("customWindowStartEpochSec", customWindowStartEpochSec ?: -1L)
         outState.putLong("customWindowEndEpochSec", customWindowEndEpochSec ?: -1L)
+        outState.putLong("lastViewportExcursionId", lastViewportExcursionId ?: -1L)
+        val saveVs = if (::dualPaneSlicerView.isInitialized && dualPaneSlicerView.isViewportZoomed()) {
+            dualPaneSlicerView.viewStartEpochSec ?: -1L
+        } else {
+            savedViewStartEpochSec ?: -1L
+        }
+        val saveVe = if (::dualPaneSlicerView.isInitialized && dualPaneSlicerView.isViewportZoomed()) {
+            dualPaneSlicerView.viewEndEpochSec ?: -1L
+        } else {
+            savedViewEndEpochSec ?: -1L
+        }
+        outState.putLong("viewStartEpochSec", saveVs)
+        outState.putLong("viewEndEpochSec", saveVe)
     }
 
     override fun onDestroy() {
@@ -342,6 +381,12 @@ class MainActivity : AppCompatActivity() {
             TemperatureUnitFormatter.setPreference(this, TempUnitPreference.FAHRENHEIT)
             customWindowStartEpochSec = null
             customWindowEndEpochSec = null
+            savedViewStartEpochSec = null
+            savedViewEndEpochSec = null
+            lastViewportCustomWindow = null
+            if (::dualPaneSlicerView.isInitialized) {
+                dualPaneSlicerView.resetZoom(notify = false)
+            }
             val demoId = prepareDemoExcursion(reseed)
             selectedExcursionId = demoId
             lastSeenLatestExcursionId = svc.metadataDb.getExcursions().firstOrNull()?.id ?: demoId
@@ -398,23 +443,6 @@ class MainActivity : AppCompatActivity() {
                 updateEditModeUi()
                 updateSliceCardHighlights(dualPaneSlicerView.cursorEpochSec)
                 dualPaneSlicerView.invalidate()
-            }
-            "real_trip_overview" -> {
-                svc.setManualKnownPlaceOverride(0)
-                setDeveloperModeEnabled(false)
-                customWindowStartEpochSec = null
-                customWindowEndEpochSec = null
-                val excursions = svc.metadataDb.getExcursions()
-                val realExc = excursions.firstOrNull { !it.title.startsWith("Demo:") } ?: excursions.firstOrNull()
-                if (realExc != null) {
-                    selectedExcursionId = realExc.id
-                    lastSeenLatestExcursionId = excursions.firstOrNull()?.id
-                }
-                isTripEditMode = false
-                switchTab(1)
-                dualPaneSlicerView.selectedDividerIndex = -1
-                updateEditModeUi()
-                (tabContainers.getOrNull(1) as? ScrollView)?.apply { post { scrollTo(0, 0) } }
             }
             "demo_now_dashboard" -> {
                 setDeveloperModeEnabled(false)
@@ -884,7 +912,8 @@ class MainActivity : AppCompatActivity() {
 
         dualPaneSlicerView = DualPaneSlicerView(this).apply {
             isEditMode = isTripEditMode
-            desiredHeightDp = 365
+            enableZoomAndMinimap = true
+            desiredHeightDp = computePortraitSlicerHeightDp(resources.configuration.screenHeightDp)
             dropoutGracePeriodSec = getDropoutGracePeriodSec()
             onCursorChanged = { ts ->
                 updateSliceCardHighlights(ts)
@@ -898,6 +927,9 @@ class MainActivity : AppCompatActivity() {
             onDividerSelected = { _ ->
                 updateEditModeUi()
                 refreshTripsTab()
+            }
+            onViewportChanged = { _, _, _ ->
+                updateZoomControlsUi()
             }
         }
 
@@ -950,6 +982,16 @@ class MainActivity : AppCompatActivity() {
         if (landscape) {
             // LANDSCAPE MODE: Fit all 3 panes on screen at once with ZERO scrolling!
             // Segment list and 14d ring-buffer carving controls are omitted in Landscape.
+            tripSelectorLabel.maxLines = 1
+            tripSelectorLabel.ellipsize = TextUtils.TruncateAt.END
+            zoomControlBar = null
+            zoomStatusView = null
+            zoomFullBtn = null
+            zoom30mBtn = null
+            zoom10mBtn = null
+            zoom3mBtn = null
+            zoomSegBtn = null
+
             val landRoot = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(8), dp(4), dp(8), dp(4))
@@ -969,8 +1011,48 @@ class MainActivity : AppCompatActivity() {
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
                 setOnClickListener { showTripPickerDialog() }
             }
+            val landZoomBtn = Button(this).apply {
+                text = "🔍 10m"
+                isAllCaps = false
+                maxLines = 1
+                minWidth = 0
+                minimumWidth = 0
+                setPadding(dp(6), dp(4), dp(6), dp(4))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                setOnClickListener {
+                    if (dualPaneSlicerView.isViewportZoomed()) {
+                        dualPaneSlicerView.resetZoom()
+                    } else {
+                        val (tStart, tEnd) = dualPaneSlicerView.getTripBoundsEpochSec()
+                        val span = maxOf(DualPaneSlicerView.STEP_SEC, tEnd - tStart)
+                        val target = if (span <= DualPaneSlicerView.ZOOM_PRESET_10M_SEC &&
+                            span > DualPaneSlicerView.ZOOM_PRESET_3M_SEC
+                        ) {
+                            DualPaneSlicerView.ZOOM_PRESET_3M_SEC
+                        } else {
+                            DualPaneSlicerView.ZOOM_PRESET_10M_SEC
+                        }
+                        dualPaneSlicerView.zoomToWindowAroundCursor(target)
+                    }
+                }
+            }
+            val landSegBtn = Button(this).apply {
+                text = "🎯 Seg"
+                isAllCaps = false
+                maxLines = 1
+                minWidth = 0
+                minimumWidth = 0
+                setPadding(dp(6), dp(4), dp(6), dp(4))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                setOnClickListener { focusCurrentSegmentOrDivider() }
+            }
+            landZoomToggleBtn = landZoomBtn
+            landFocusSegBtn = landSegBtn
+
             compactTopBar.addView(tripSelectorLabel)
             compactTopBar.addView(switchTripBtn)
+            compactTopBar.addView(landZoomBtn)
+            compactTopBar.addView(landSegBtn)
             compactTopBar.addView(modeToggleBtn)
             compactTopBar.addView(dividerNudgeBar)
             landRoot.addView(compactTopBar)
@@ -986,10 +1068,14 @@ class MainActivity : AppCompatActivity() {
             manageTripBtn = null
             tripRetentionBanner = null
             updateEditModeUi()
+            updateZoomControlsUi()
             return landRoot
         } else {
             // PORTRAIT MODE: Offer 14d ring-buffer time-window selector, View/Edit mode toggle,
-            // 3-Pane Graph Stack, and clean Segment Cards with Edit Modal.
+            // 3-Pane Graph Stack with Overview Minimap + Quick Zoom bar, and clean Segment Cards.
+            landZoomToggleBtn = null
+            landFocusSegBtn = null
+
             val scroll = ScrollView(this).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1063,6 +1149,70 @@ class MainActivity : AppCompatActivity() {
             col.addView(titleRow)
 
             col.addView(dualPaneSlicerView)
+
+            val zStatus = TextView(this).apply {
+                text = "🔍 View: Full"
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                setTextColor(Color.parseColor("#94A3B8"))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setPadding(dp(2), dp(2), dp(2), dp(2))
+            }
+            zoomStatusView = zStatus
+
+            fun makeZoomBtn(label: String, weight: Float, onClick: () -> Unit): Button =
+                Button(this).apply {
+                    text = label
+                    isAllCaps = false
+                    maxLines = 1
+                    minWidth = 0
+                    minimumWidth = 0
+                    minHeight = 0
+                    minimumHeight = 0
+                    setPadding(dp(4), dp(5), dp(4), dp(5))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, weight).apply {
+                        marginStart = dp(2)
+                        marginEnd = dp(2)
+                    }
+                    setOnClickListener { onClick() }
+                }
+
+            val fullBtn = makeZoomBtn("Full", 1f) { dualPaneSlicerView.resetZoom() }
+            val z30Btn = makeZoomBtn("30m", 1f) {
+                dualPaneSlicerView.zoomToWindowAroundCursor(DualPaneSlicerView.ZOOM_PRESET_30M_SEC)
+            }
+            val z10Btn = makeZoomBtn("10m", 1f) {
+                dualPaneSlicerView.zoomToWindowAroundCursor(DualPaneSlicerView.ZOOM_PRESET_10M_SEC)
+            }
+            val z3Btn = makeZoomBtn("3m", 1f) {
+                dualPaneSlicerView.zoomToWindowAroundCursor(DualPaneSlicerView.ZOOM_PRESET_3M_SEC)
+            }
+            val segBtn = makeZoomBtn("🎯 Seg", 1.15f) { focusCurrentSegmentOrDivider() }
+            zoomFullBtn = fullBtn
+            zoom30mBtn = z30Btn
+            zoom10mBtn = z10Btn
+            zoom3mBtn = z3Btn
+            zoomSegBtn = segBtn
+
+            val zoomBtnRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(fullBtn)
+                addView(z30Btn)
+                addView(z10Btn)
+                addView(z3Btn)
+                addView(segBtn)
+            }
+            val zBar = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, dp(2), 0, dp(2))
+                addView(zStatus)
+                addView(zoomBtnRow)
+            }
+            zoomControlBar = zBar
+            col.addView(zBar)
+
             col.addView(dividerNudgeBar)
             col.addView(editHelperView)
 
@@ -1090,6 +1240,7 @@ class MainActivity : AppCompatActivity() {
 
             scroll.addView(col)
             updateEditModeUi()
+            updateZoomControlsUi()
             return scroll
         }
     }
@@ -1119,6 +1270,110 @@ class MainActivity : AppCompatActivity() {
             updateTripRetentionBanner(currentExc, dualPaneSlicerView.slices)
         } else {
             tripRetentionBanner?.visibility = View.GONE
+        }
+        updateZoomControlsUi()
+    }
+
+    private fun focusCurrentSegmentOrDivider() {
+        val slices = dualPaneSlicerView.slices
+        if (slices.isEmpty() || dualPaneSlicerView.slots.isEmpty()) return
+        val divIdx = dualPaneSlicerView.selectedDividerIndex
+        val (tripStart, tripEnd) = dualPaneSlicerView.getTripBoundsEpochSec()
+        val tripSpan = maxOf(DualPaneSlicerView.STEP_SEC, tripEnd - tripStart)
+        if (isTripEditMode && divIdx in 0 until (slices.size - 1)) {
+            val boundaryTs = slices[divIdx].endEpochSec
+            val halfWindow = maxOf(
+                DualPaneSlicerView.DIVIDER_FOCUS_MIN_HALF_SPAN_SEC,
+                ((tripSpan * DualPaneSlicerView.DIVIDER_FOCUS_SPAN_FRACTION).toLong() / DualPaneSlicerView.STEP_SEC) * DualPaneSlicerView.STEP_SEC
+            ).coerceAtMost(DualPaneSlicerView.DIVIDER_FOCUS_MAX_HALF_SPAN_SEC)
+            dualPaneSlicerView.setViewportEpochSec(boundaryTs - halfWindow, boundaryTs + halfWindow)
+            return
+        }
+        val cursorTs = dualPaneSlicerView.cursorEpochSec
+        val targetSlice = slices.firstOrNull { cursorTs in it.startEpochSec..it.endEpochSec }
+            ?: slices.first()
+        dualPaneSlicerView.focusOnSegment(targetSlice.startEpochSec, targetSlice.endEpochSec)
+    }
+
+    private fun applyPendingSavedViewportIfNeeded() {
+        val vs = savedViewStartEpochSec
+        val ve = savedViewEndEpochSec
+        savedViewStartEpochSec = null
+        savedViewEndEpochSec = null
+        if (vs != null && ve != null && ve > vs && dualPaneSlicerView.slots.isNotEmpty()) {
+            dualPaneSlicerView.setViewportEpochSec(vs, ve, notify = false)
+        }
+    }
+
+    private fun updateZoomControlsUi() {
+        if (!::dualPaneSlicerView.isInitialized) return
+        val hasSlots = dualPaneSlicerView.slots.isNotEmpty()
+        val (tripStart, tripEnd) = dualPaneSlicerView.getTripBoundsEpochSec()
+        val (viewStart, viewEnd) = dualPaneSlicerView.getEffectiveViewportEpochSec()
+        val tripSpanSec = maxOf(0L, tripEnd - tripStart)
+        val viewSpanSec = maxOf(0L, viewEnd - viewStart)
+        val isZoomed = dualPaneSlicerView.isViewportZoomed()
+
+        zoomControlBar?.visibility = if (hasSlots) View.VISIBLE else View.GONE
+        zoomStatusView?.apply {
+            if (isZoomed) {
+                setTextColor(Color.parseColor(COLOR_ZOOM_STATUS_ACTIVE_HEX))
+                text = "🔍 Zoom: ${formatElapsedAge(viewSpanSec)} of ${formatElapsedAge(tripSpanSec)}"
+            } else {
+                setTextColor(Color.parseColor(COLOR_ZOOM_STATUS_IDLE_HEX))
+                text = "🔍 View: Full (${formatElapsedAge(tripSpanSec)})"
+            }
+        }
+
+        fun stylePresetButton(btn: Button?, active: Boolean, enabledHint: Boolean) {
+            btn ?: return
+            btn.alpha = if (enabledHint) ENABLED_BUTTON_ALPHA else DISABLED_BUTTON_ALPHA
+            btn.backgroundTintList = ColorStateList.valueOf(
+                Color.parseColor(if (active) COLOR_ZOOM_BTN_ACTIVE_HEX else COLOR_ZOOM_BTN_IDLE_PORTRAIT_HEX)
+            )
+            btn.setTextColor(Color.parseColor(if (active) "#FFFFFF" else "#CBD5E1"))
+        }
+
+        stylePresetButton(zoomFullBtn, active = !isZoomed, enabledHint = hasSlots)
+        stylePresetButton(
+            zoom30mBtn,
+            active = isZoomed && abs(viewSpanSec - DualPaneSlicerView.ZOOM_PRESET_30M_SEC) <= DualPaneSlicerView.STEP_SEC,
+            enabledHint = hasSlots && tripSpanSec > DualPaneSlicerView.ZOOM_PRESET_30M_SEC
+        )
+        stylePresetButton(
+            zoom10mBtn,
+            active = isZoomed && abs(viewSpanSec - DualPaneSlicerView.ZOOM_PRESET_10M_SEC) <= DualPaneSlicerView.STEP_SEC,
+            enabledHint = hasSlots && tripSpanSec > DualPaneSlicerView.ZOOM_PRESET_10M_SEC
+        )
+        stylePresetButton(
+            zoom3mBtn,
+            active = isZoomed && abs(viewSpanSec - DualPaneSlicerView.ZOOM_PRESET_3M_SEC) <= DualPaneSlicerView.STEP_SEC,
+            enabledHint = hasSlots && tripSpanSec > DualPaneSlicerView.ZOOM_PRESET_3M_SEC
+        )
+        val canFocusSeg = hasSlots && (dualPaneSlicerView.slices.size > 1 ||
+            (isTripEditMode && dualPaneSlicerView.selectedDividerIndex >= 0))
+        stylePresetButton(zoomSegBtn, active = false, enabledHint = canFocusSeg)
+
+        landZoomToggleBtn?.apply {
+            visibility = if (hasSlots) View.VISIBLE else View.GONE
+            text = when {
+                isZoomed -> "🔍 Full"
+                tripSpanSec in (DualPaneSlicerView.ZOOM_PRESET_3M_SEC + 1L)..DualPaneSlicerView.ZOOM_PRESET_10M_SEC -> "🔍 3m"
+                else -> "🔍 10m"
+            }
+            alpha = if (hasSlots && (isZoomed || tripSpanSec > DualPaneSlicerView.MIN_VIEWPORT_SPAN_SEC)) {
+                ENABLED_BUTTON_ALPHA
+            } else {
+                DISABLED_BUTTON_ALPHA
+            }
+            backgroundTintList = ColorStateList.valueOf(
+                Color.parseColor(if (isZoomed) COLOR_ZOOM_BTN_ACTIVE_HEX else COLOR_ZOOM_BTN_IDLE_LANDSCAPE_HEX)
+            )
+            setTextColor(Color.WHITE)
+        }
+        landFocusSegBtn?.apply {
+            visibility = if (hasSlots && dualPaneSlicerView.slices.isNotEmpty()) View.VISIBLE else View.GONE
+            alpha = if (canFocusSeg) ENABLED_BUTTON_ALPHA else DISABLED_BUTTON_ALPHA
         }
     }
 
@@ -1607,6 +1862,12 @@ class MainActivity : AppCompatActivity() {
         val cwStart = customWindowStartEpochSec
         val cwEnd = customWindowEndEpochSec
         if (cwStart != null && cwEnd != null && cwEnd > cwStart) {
+            val windowPair = cwStart to cwEnd
+            if (lastViewportCustomWindow != windowPair) {
+                lastViewportCustomWindow = windowPair
+                lastViewportExcursionId = null
+                dualPaneSlicerView.resetZoom(notify = false)
+            }
             val slots = svc.ringStore.queryRange(0, cwStart, cwEnd)
             val spanLabel = "${dateShortTimeFmt.format(Instant.ofEpochSecond(cwStart))} – ${shortTimeFmt.format(Instant.ofEpochSecond(cwEnd))}"
             tripSelectorLabel.text = "14d Window: $spanLabel"
@@ -1615,6 +1876,8 @@ class MainActivity : AppCompatActivity() {
             tripRetentionBanner?.visibility = View.GONE
             dualPaneSlicerView.slices = emptyList()
             dualPaneSlicerView.slots = slots
+            applyPendingSavedViewportIfNeeded()
+            updateZoomControlsUi()
             slicesContainer?.removeAllViews()
             slicesContainer?.let { container ->
                 val carveBtn = Button(this).apply {
@@ -1633,12 +1896,16 @@ class MainActivity : AppCompatActivity() {
         if (excursions.isEmpty()) {
             selectedExcursionId = null
             lastSeenLatestExcursionId = null
+            lastViewportExcursionId = null
+            lastViewportCustomWindow = null
             tripSelectorLabel.text = "No Trips Recorded Yet"
             pinTripBtn?.visibility = View.GONE
             manageTripBtn?.visibility = View.GONE
             tripRetentionBanner?.visibility = View.GONE
+            dualPaneSlicerView.resetZoom(notify = false)
             dualPaneSlicerView.slots = emptyList()
             dualPaneSlicerView.slices = emptyList()
+            updateZoomControlsUi()
             slicesContainer?.removeAllViews()
             if (isDemoDataEnabled()) {
                 slicesContainer?.addView(Button(this).apply {
@@ -1673,6 +1940,11 @@ class MainActivity : AppCompatActivity() {
         selectedExcursionId = resolvedId
         lastSeenLatestExcursionId = newestId
         val currentExc = excursions.firstOrNull { it.id == resolvedId } ?: excursions.first()
+        lastViewportCustomWindow = null
+        if (lastViewportExcursionId != currentExc.id) {
+            lastViewportExcursionId = currentExc.id
+            dualPaneSlicerView.resetZoom(notify = false)
+        }
         val slices = svc.metadataDb.getSlicesForExcursion(currentExc.id)
         val slots = svc.metadataDb.resolveSlotsForExcursion(currentExc.id, svc.ringStore)
 
@@ -1692,7 +1964,9 @@ class MainActivity : AppCompatActivity() {
         }
         dualPaneSlicerView.slices = slices
         dualPaneSlicerView.slots = slots
+        applyPendingSavedViewportIfNeeded()
         updateEditHelperText()
+        updateZoomControlsUi()
         updateTripRetentionBanner(currentExc, slices)
 
         if (!isLandscape()) {
@@ -1742,6 +2016,10 @@ class MainActivity : AppCompatActivity() {
                     dualPaneSlicerView.selectedDividerIndex = -1
                     val mid = (((slice.startEpochSec + slice.endEpochSec) / 2L) / 15L) * 15L
                     dualPaneSlicerView.cursorEpochSec = mid.coerceIn(slice.startEpochSec, slice.endEpochSec)
+                    dualPaneSlicerView.ensureTimestampVisibleInViewport(
+                        dualPaneSlicerView.cursorEpochSec,
+                        centerIfOutside = true
+                    )
                     updateEditModeUi()
                     updateSliceCardHighlights(dualPaneSlicerView.cursorEpochSec)
                     dualPaneSlicerView.invalidate()
@@ -1771,6 +2049,26 @@ class MainActivity : AppCompatActivity() {
                     setOnClickListener { confirmAndTrimSlice(slice, isStart = isStart, idx = idx) }
                 }
                 headerRow.addView(dropBtn)
+            }
+            if (slices.size > 1) {
+                val focusBtn = Button(this).apply {
+                    text = "🔍"
+                    isAllCaps = false
+                    minWidth = 0
+                    minimumWidth = 0
+                    setPadding(dp(8), dp(4), dp(8), dp(4))
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+                    setOnClickListener {
+                        dualPaneSlicerView.selectedDividerIndex = -1
+                        val mid = (((slice.startEpochSec + slice.endEpochSec) / 2L) / 15L) * 15L
+                        dualPaneSlicerView.cursorEpochSec = mid.coerceIn(slice.startEpochSec, slice.endEpochSec)
+                        dualPaneSlicerView.focusOnSegment(slice.startEpochSec, slice.endEpochSec)
+                        updateEditModeUi()
+                        updateSliceCardHighlights(dualPaneSlicerView.cursorEpochSec)
+                        (tabContainers.getOrNull(1) as? ScrollView)?.smoothScrollTo(0, 0)
+                    }
+                }
+                headerRow.addView(focusBtn)
             }
             val editSegmentBtn = Button(this).apply {
                 text = "✏️ Edit"
@@ -2544,6 +2842,10 @@ class MainActivity : AppCompatActivity() {
                 val mid = (((newRight.startEpochSec + newRight.endEpochSec) / 2L) / 15L) * 15L
                 dualPaneSlicerView.cursorEpochSec = mid.coerceIn(newRight.startEpochSec, newRight.endEpochSec)
             }
+            dualPaneSlicerView.ensureTimestampVisibleInViewport(
+                dualPaneSlicerView.cursorEpochSec,
+                centerIfOutside = false
+            )
             updateEditModeUi()
             updateSliceCardHighlights(dualPaneSlicerView.cursorEpochSec)
             dualPaneSlicerView.invalidate()
@@ -2564,6 +2866,10 @@ class MainActivity : AppCompatActivity() {
         val newBoundary = left.endEpochSec + deltaSec
         if (svc.metadataDb.moveSharedDivider(left.id, right.id, newBoundary, svc.ringStore)) {
             dualPaneSlicerView.cursorEpochSec = (newBoundary / 15L) * 15L
+            dualPaneSlicerView.ensureTimestampVisibleInViewport(
+                dualPaneSlicerView.cursorEpochSec,
+                centerIfOutside = false
+            )
             refreshTripsTab()
         }
     }
@@ -2588,6 +2894,10 @@ class MainActivity : AppCompatActivity() {
             val focusSlice = if (trimStart) remaining.first() else remaining.last()
             val mid = (((focusSlice.startEpochSec + focusSlice.endEpochSec) / 2L) / 15L) * 15L
             dualPaneSlicerView.cursorEpochSec = mid.coerceIn(focusSlice.startEpochSec, focusSlice.endEpochSec)
+            dualPaneSlicerView.ensureTimestampVisibleInViewport(
+                dualPaneSlicerView.cursorEpochSec,
+                centerIfOutside = false
+            )
         }
         updateEditModeUi()
         updateSliceCardHighlights(dualPaneSlicerView.cursorEpochSec)
@@ -3001,4 +3311,29 @@ class MainActivity : AppCompatActivity() {
                 setStroke(strokeWidthPx, Color.parseColor(strokeHex))
             }
         }
+
+    companion object {
+        const val MIN_PORTRAIT_SLICER_HEIGHT_DP = 320
+        const val MAX_PORTRAIT_SLICER_HEIGHT_DP = 460
+        const val PORTRAIT_SLICER_HEIGHT_FRACTION = 0.45f
+        const val ENABLED_BUTTON_ALPHA = 1.0f
+        const val DISABLED_BUTTON_ALPHA = 0.45f
+        const val COLOR_ZOOM_BTN_ACTIVE_HEX = "#0284C7"
+        const val COLOR_ZOOM_BTN_IDLE_PORTRAIT_HEX = "#1E293B"
+        const val COLOR_ZOOM_BTN_IDLE_LANDSCAPE_HEX = "#334155"
+        const val COLOR_ZOOM_STATUS_ACTIVE_HEX = "#38BDF8"
+        const val COLOR_ZOOM_STATUS_IDLE_HEX = "#94A3B8"
+
+        /**
+         * Computes a responsive portrait chart height in dp based on the current window height,
+         * preventing the 3-pane slicer + zoom/nudge controls from crowding small phones while taking
+         * better advantage of larger phones and tablets.
+         */
+        fun computePortraitSlicerHeightDp(screenHeightDp: Int): Int {
+            if (screenHeightDp <= 0) return DualPaneSlicerView.DEFAULT_PORTRAIT_HEIGHT_DP
+            return (screenHeightDp * PORTRAIT_SLICER_HEIGHT_FRACTION)
+                .toInt()
+                .coerceIn(MIN_PORTRAIT_SLICER_HEIGHT_DP, MAX_PORTRAIT_SLICER_HEIGHT_DP)
+        }
+    }
 }

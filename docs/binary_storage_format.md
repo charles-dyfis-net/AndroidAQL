@@ -4,7 +4,7 @@
 `AirSlice` stores continuous environmental and scalar movement time-series data in a constant-size, circular binary file (`.aqlring`), inspired by RRDtool and Graphite Whisper.
 
 * **Strictly Bounded Disk Footprint:** Each monitored device is allocated a single `.aqlring` file of **2,580,576 bytes (~2.58 MB)** covering a 14-day rolling window at 15-second resolution.
-* **$O(1)$ Inline Consolidation & Gap Clearing:** Writing a sample updates Archive 0 (15s) in-place via `java.nio.channels.FileChannel` without background compaction or SQLite WAL/VACUUM overhead.
+* **`O(1)` Inline Consolidation & Gap Clearing:** Writing a sample updates Archive 0 (15s) in-place via `java.nio.channels.FileChannel` without background compaction or SQLite WAL/VACUUM overhead.
 * **Endianness:** All multi-byte integers are stored in **Little-Endian** (`ByteOrder.LITTLE_ENDIAN`) format.
 
 ---

@@ -1306,4 +1306,189 @@ class AqlCoreEngineTest {
             tmpRing.delete()
         }
     }
+
+    @Test
+    fun testTimelineViewportClampAndMinimumSpan() {
+        val tripStart = 900L
+        val tripEnd = 8100L // 2h, 15s-aligned
+
+        // Requests narrower than MIN_VIEWPORT_SPAN_SEC (180s) expand to 180s and clamp negative offset to tripStart
+        val leftClamped = DualPaneSlicerView.clampViewport(tripStart, tripEnd, 850L, 1000L)
+        assertEquals(900L, leftClamped.first)
+        assertEquals(1080L, leftClamped.second)
+        assertEquals(0L, leftClamped.first % DualPaneSlicerView.STEP_SEC)
+        assertEquals(0L, leftClamped.second % DualPaneSlicerView.STEP_SEC)
+
+        // Requests exceeding tripEnd clamp cleanly to the right boundary while preserving snapped span
+        val rightClamped = DualPaneSlicerView.clampViewport(tripStart, tripEnd, 8000L, 8200L)
+        assertEquals(7905L, rightClamped.first)
+        assertEquals(8100L, rightClamped.second)
+        assertEquals(195L, rightClamped.second - rightClamped.first)
+
+        // Unaligned interior bounds snap cleanly to 15s grid
+        val snapped = DualPaneSlicerView.clampViewport(tripStart, tripEnd, 1806L, 2708L)
+        assertEquals(1800L, snapped.first)
+        assertEquals(2700L, snapped.second)
+
+        // Trips shorter than 180s gracefully return [tripStart, tripEnd]
+        val shortTrip = DualPaneSlicerView.clampViewport(900L, 990L, 915L, 960L)
+        assertEquals(900L, shortTrip.first)
+        assertEquals(990L, shortTrip.second)
+    }
+
+    @Test
+    fun testTimelineViewportZoomAroundAnchorPreservesFocalTimestamp() {
+        val tripStart = 900L
+        val tripEnd = 8100L // 7200s (2h)
+        val anchorRatio = 0.25f
+        // Focal timestamp at 0.25 of [900, 8100] is 2700L
+        val zoomedIn = DualPaneSlicerView.zoomViewportAroundAnchor(
+            tripStartSec = tripStart,
+            tripEndSec = tripEnd,
+            curStartSec = tripStart,
+            curEndSec = tripEnd,
+            scaleFactor = 4.0f,
+            anchorRatio = anchorRatio
+        )
+        assertEquals(2250L, zoomedIn.first)
+        assertEquals(4050L, zoomedIn.second)
+        val span = zoomedIn.second - zoomedIn.first
+        assertEquals(1800L, span)
+        assertEquals(2700L, zoomedIn.first + (anchorRatio * span).toLong())
+
+        // Zooming back out past 1.0x clamps cleanly to full trip bounds
+        val zoomedOut = DualPaneSlicerView.zoomViewportAroundAnchor(
+            tripStartSec = tripStart,
+            tripEndSec = tripEnd,
+            curStartSec = zoomedIn.first,
+            curEndSec = zoomedIn.second,
+            scaleFactor = 0.10f,
+            anchorRatio = 0.5f
+        )
+        assertEquals(tripStart, zoomedOut.first)
+        assertEquals(tripEnd, zoomedOut.second)
+    }
+
+    @Test
+    fun testTimelineViewportPanAndEnsureTimestampVisible() {
+        val tripStart = 900L
+        val tripEnd = 8100L
+
+        // Panning past left and right edges preserves exact span
+        val pannedLeft = DualPaneSlicerView.panViewportByDeltaSec(tripStart, tripEnd, 1200L, 3000L, -600L)
+        assertEquals(900L, pannedLeft.first)
+        assertEquals(2700L, pannedLeft.second)
+
+        val pannedRight = DualPaneSlicerView.panViewportByDeltaSec(tripStart, tripEnd, 6000L, 7800L, +900L)
+        assertEquals(6300L, pannedRight.first)
+        assertEquals(8100L, pannedRight.second)
+
+        // Target already inside safe interior -> no jump
+        val noJump = DualPaneSlicerView.ensureTimestampVisible(tripStart, tripEnd, 1800L, 3600L, 2700L)
+        assertEquals(1800L, noJump.first)
+        assertEquals(3600L, noJump.second)
+
+        // Target near/beyond right edge with centerIfOutside=false -> minimal shift leaving 10% (180s) margin
+        val shiftedMin = DualPaneSlicerView.ensureTimestampVisible(
+            tripStartSec = tripStart,
+            tripEndSec = tripEnd,
+            curStartSec = 1800L,
+            curEndSec = 3600L,
+            targetTs = 3510L,
+            marginRatio = 0.10f,
+            centerIfOutside = false
+        )
+        assertEquals(1890L, shiftedMin.first)
+        assertEquals(3690L, shiftedMin.second)
+
+        // Target outside with centerIfOutside=true -> centers around targetTs
+        val centered = DualPaneSlicerView.ensureTimestampVisible(
+            tripStartSec = tripStart,
+            tripEndSec = tripEnd,
+            curStartSec = 1800L,
+            curEndSec = 3600L,
+            targetTs = 5400L,
+            marginRatio = 0.10f,
+            centerIfOutside = true
+        )
+        assertEquals(4500L, centered.first)
+        assertEquals(6300L, centered.second)
+    }
+
+    @Test
+    fun testComputeSegmentFocusViewportIncludesBothDividerMargins() {
+        val tripStart = 900L
+        val tripEnd = 8100L
+
+        // 10-minute segment (3000..3600) gets 15% (90s) margin on both sides so both dividers remain visible
+        val focused = DualPaneSlicerView.computeSegmentFocusViewport(tripStart, tripEnd, 3000L, 3600L)
+        assertEquals(2910L, focused.first)
+        assertEquals(3690L, focused.second)
+        assertTrue(3000L > focused.first && 3600L < focused.second)
+
+        // 30-second micro-segment expands symmetrically to MIN_VIEWPORT_SPAN_SEC (180s)
+        val microFocused = DualPaneSlicerView.computeSegmentFocusViewport(tripStart, tripEnd, 3000L, 3030L)
+        assertEquals(2925L, microFocused.first)
+        assertEquals(3105L, microFocused.second)
+        assertEquals(DualPaneSlicerView.MIN_VIEWPORT_SPAN_SEC, microFocused.second - microFocused.first)
+    }
+
+    @Test
+    fun testBottomChromeMetricsNeverOverlapAcrossFormFactors() {
+        val cases = listOf(
+            // (heightDp, density, hasSegmentStrip, hasMinimap, textAscentPx, textDescentPx)
+            listOf(260f, 2.625f, true, true, 26f, 7f),   // Phone landscape (compact)
+            listOf(390f, 2.625f, true, true, 26f, 7f),   // Phone portrait
+            listOf(390f, 2.625f, true, true, 42f, 12f),  // Large accessibility font metrics
+            listOf(390f, 2.625f, false, true, 26f, 7f),  // 14d Window preview (no segments, minimap enabled)
+            listOf(720f, 2.0f, true, true, 20f, 6f)      // 10-inch tablet
+        )
+        for (c in cases) {
+            val heightDp = c[0] as Float
+            val density = c[1] as Float
+            val hasSegments = c[2] as Boolean
+            val hasMinimap = c[3] as Boolean
+            val ascentPx = c[4] as Float
+            val descentPx = c[5] as Float
+            val viewHeightPx = heightDp * density
+
+            val chrome = DualPaneSlicerView.computeBottomChromeMetrics(
+                viewHeightPx = viewHeightPx,
+                density = density,
+                hasSegmentStrip = hasSegments,
+                hasMinimap = hasMinimap,
+                textAscentPx = ascentPx,
+                textDescentPx = descentPx
+            )
+            val botPaneBot = viewHeightPx - chrome.effectivePadBottomPx
+            val segTop = botPaneBot + chrome.segTopGapPx
+            val segBot = segTop + chrome.segHeightPx
+            val timeAxisTop = segBot + chrome.timeAxisTopGapPx
+            val timeAxisBaseline = timeAxisTop + chrome.timeAxisAscentPx
+            val timeAxisBot = timeAxisTop + chrome.timeAxisTextHeightPx
+            val minimapTop = timeAxisBot + chrome.minimapTopGapPx
+            val minimapBot = minimapTop + chrome.minimapHeightPx
+
+            assertTrue("Plot height collapsed for heightDp=$heightDp", botPaneBot > (DualPaneSlicerView.PAD_TOP_DP + 2f * DualPaneSlicerView.PANE_GAP_DP) * density)
+            assertTrue("Segment strip overlapped bottom pane for heightDp=$heightDp", segTop >= botPaneBot)
+            assertTrue("Time axis overlapped segment strip for heightDp=$heightDp", timeAxisTop > segBot)
+            assertTrue("Time axis baseline above top for heightDp=$heightDp", timeAxisBaseline >= timeAxisTop + ascentPx - 0.01f)
+            assertTrue("Time axis bottom below baseline for heightDp=$heightDp", timeAxisBot >= timeAxisBaseline + descentPx - 0.01f)
+            if (hasMinimap) {
+                assertTrue("Minimap overlapped time axis for heightDp=$heightDp", minimapTop > timeAxisBot)
+                assertTrue("Minimap clipped view bottom for heightDp=$heightDp", minimapBot <= viewHeightPx + 0.01f)
+            } else {
+                assertTrue("Time axis clipped view bottom for heightDp=$heightDp", timeAxisBot <= viewHeightPx + 0.01f)
+            }
+        }
+
+        // Responsive portrait height clamping across compact phone, Pixel 9a, and 10" tablet
+        assertEquals(320, io.github.androidaql.ui.MainActivity.computePortraitSlicerHeightDp(640))
+        assertEquals(400, io.github.androidaql.ui.MainActivity.computePortraitSlicerHeightDp(890))
+        assertEquals(460, io.github.androidaql.ui.MainActivity.computePortraitSlicerHeightDp(1280))
+        assertEquals(
+            DualPaneSlicerView.DEFAULT_PORTRAIT_HEIGHT_DP,
+            io.github.androidaql.ui.MainActivity.computePortraitSlicerHeightDp(0)
+        )
+    }
 }

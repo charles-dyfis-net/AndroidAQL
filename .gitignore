@@ -24,4 +24,5 @@
 build/
 keystore.properties
 local.properties
+release/
 tmp/

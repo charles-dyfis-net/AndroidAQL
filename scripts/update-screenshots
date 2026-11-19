@@ -137,6 +137,27 @@ def set_rotation(adb: str, serial: str, accel: str, user_rot: str) -> None:
         run_cmd([*adb_base(adb, serial), "shell", "wm", "user-rotation", "free"], check=False)
 
 
+def detect_rotations(adb: str, serial: str) -> tuple[str, str]:
+    """Return (portrait_user_rotation, landscape_user_rotation) for the device's natural orientation."""
+    out = run_cmd([*adb_base(adb, serial), "shell", "wm", "size"]).stdout.decode("utf-8", errors="replace")
+    size_line = None
+    for prefix in ("Override size:", "Physical size:"):
+        for line in out.splitlines():
+            if line.strip().startswith(prefix):
+                size_line = line.split(":", 1)[1].strip()
+                break
+        if size_line:
+            break
+    if size_line and "x" in size_line:
+        w_str, h_str = size_line.split("x", 1)
+        try:
+            if int(w_str.strip()) > int(h_str.strip()):
+                return ("1", "0")
+        except ValueError:
+            pass
+    return ("0", "1")
+
+
 def backup_app_data(adb: str, serial: str) -> bytes:
     """Force-stop app to flush SQLite WAL, then tar databases/files/shared_prefs via run-as."""
     run_cmd([*adb_base(adb, serial), "shell", "am", "force-stop", PACKAGE_ID])
@@ -288,11 +309,6 @@ def main() -> int:
     )
     parser.add_argument("--serial", help="Target adb device serial (optional when only 1 device connected)")
     parser.add_argument(
-        "--include-real-trip",
-        action="store_true",
-        help="Also capture docs/screenshots/real_trip_overview.webp from the device's real trip history",
-    )
-    parser.add_argument(
         "--install-debug",
         action="store_true",
         help="Install app/build/outputs/apk/debug/app-debug.apk onto the device before capturing",
@@ -308,6 +324,11 @@ def main() -> int:
         choices=("webp", "png"),
         default="webp",
         help="Output image format (defaults to webp)",
+    )
+    parser.add_argument(
+        "--include-now-landscape",
+        action="store_true",
+        help="Also capture now_dashboard_landscape.<ext> in landscape orientation",
     )
     args = parser.parse_args()
 
@@ -328,6 +349,7 @@ def main() -> int:
 
     orig_accel = get_setting(adb, serial, "system", "accelerometer_rotation", "0")
     orig_rot = get_setting(adb, serial, "system", "user_rotation", "0")
+    portrait_rot, landscape_rot = detect_rotations(adb, serial)
     backup_bytes = backup_app_data(adb, serial)
     emergency_backup_path: Path | None = None
     captured_paths: list[Path] = []
@@ -336,17 +358,11 @@ def main() -> int:
         # Ensure device screen is awake, dismiss any lingering system dialogs, & lock portrait
         run_cmd([*adb_base(adb, serial), "shell", "input", "keyevent", "KEYCODE_WAKEUP"], check=False)
         run_cmd([*adb_base(adb, serial), "shell", "input", "keyevent", "KEYCODE_BACK"], check=False)
-        set_rotation(adb, serial, "0", "0")
+        set_rotation(adb, serial, "0", portrait_rot)
         time.sleep(1.0)
 
         with tempfile.TemporaryDirectory(prefix="aql_shots_") as td:
             tmp_dir = Path(td)
-
-            if args.include_real_trip:
-                send_screenshot_preset(adb, serial, "real_trip_overview", wait_sec=3.5)
-                real_path = screenshots_dir / f"real_trip_overview.{ext}"
-                capture_image(adb, serial, ffmpeg, tmp_dir, real_path, ext)
-                captured_paths.append(real_path)
 
             clear_demo_databases_and_files(adb, serial)
 
@@ -354,6 +370,19 @@ def main() -> int:
             p_now = screenshots_dir / f"now_dashboard.{ext}"
             capture_image(adb, serial, ffmpeg, tmp_dir, p_now, ext)
             captured_paths.append(p_now)
+
+            if args.include_now_landscape:
+                run_cmd([*adb_base(adb, serial), "shell", "am", "force-stop", PACKAGE_ID])
+                set_rotation(adb, serial, "0", landscape_rot)
+                send_screenshot_preset(adb, serial, "demo_now_dashboard", wait_sec=3.5)
+                set_rotation(adb, serial, "0", landscape_rot)
+                time.sleep(2.0)
+                p_now_land = screenshots_dir / f"now_dashboard_landscape.{ext}"
+                capture_image(adb, serial, ffmpeg, tmp_dir, p_now_land, ext)
+                captured_paths.append(p_now_land)
+                run_cmd([*adb_base(adb, serial), "shell", "am", "force-stop", PACKAGE_ID])
+                set_rotation(adb, serial, "0", portrait_rot)
+                time.sleep(1.0)
 
             clear_demo_databases_and_files(adb, serial)
 
@@ -373,9 +402,9 @@ def main() -> int:
             captured_paths.append(p_modal)
 
             run_cmd([*adb_base(adb, serial), "shell", "am", "force-stop", PACKAGE_ID])
-            set_rotation(adb, serial, "0", "1")
+            set_rotation(adb, serial, "0", landscape_rot)
             send_screenshot_preset(adb, serial, "demo_landscape_edit", wait_sec=3.0)
-            set_rotation(adb, serial, "0", "1")
+            set_rotation(adb, serial, "0", landscape_rot)
             time.sleep(2.5)
             p_land = screenshots_dir / f"trips_landscape.{ext}"
             capture_image(adb, serial, ffmpeg, tmp_dir, p_land, ext)

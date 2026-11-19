@@ -4,7 +4,7 @@
 
 | Live **Now** Dashboard (`BTHome v2` Passive BLE) | **Trips** — 3-Pane Synchronized Telemetry Timeline |
 | :---: | :---: |
-| [<img src="docs/screenshots/now_dashboard.webp" width="260" alt="Live Now Dashboard captured on Pixel 6a">](docs/screenshots/now_dashboard.webp) | [<img src="docs/screenshots/real_trip_overview.webp" width="260" alt="Trips 3-Pane Slicer with real 30m multi-segment telemetry captured on Pixel 6a">](docs/screenshots/real_trip_overview.webp) |
+| [<img src="docs/screenshots/now_dashboard.webp" width="260" alt="Live Now Dashboard">](docs/screenshots/now_dashboard.webp) | [<img src="docs/screenshots/trips_view_mode.webp" width="260" alt="Trips 3-Pane Slicer with Overview Minimap and Zoom Controls">](docs/screenshots/trips_view_mode.webp) |
 
 ---
 
@@ -58,8 +58,9 @@ The **Qingping Air Monitor Lite (`CGDN1`)** packs research-grade environmental s
 ### 2. Synchronized 3-Pane **Trip Slicer & History**
 * **Pane 1 — Air Quality:** CO₂ (`ppm`) & PM2.5 (`µg/m³`) with non-overlapping scrubber callout pills and leader lines.
 * **Pane 2 — Thermal Comfort:** Temperature & Relative Humidity (`%`).
-* **Pane 3 — Mobility & Context:** Movement speed (`m/s`, cumulative-anchor filtered to suppress stationary indoor GPS jitter), amber shading for weak/urban-canyon GPS (`> 50 m`), and green bands for `🏠 GPS Off (Saved Place)`.
+* **Pane 3 — Mobility & Context:** Log-scale movement speed (`m/s`, cumulative-anchor filtered to suppress stationary indoor GPS jitter) with `Green=GPS` movement, `Amber=Steps` step-fused speed, red shading for weak/urban-canyon GPS (`> 50 m`), and slate bands for `🏠 GPS Off (Saved Place)` / `GPS Off`.
 * **View vs. Edit Modes & Zero-Scroll Landscape:** Clean read-only scrubbing by default with a color-coded **Segment Strip** (`#1`, `#2`, ...) directly below Pane 3; toggle **Edit Mode** to drag shared `⇔ 1|2` divider boundaries, nudge dividers or the cursor by `-1m / -15s / +15s / +1m`, split segments at the cursor, trim the trip start or end (`🗑️ Drop #1` / `🗑️ Drop #N`), and label each leg (Location/Activity Label, Notes). Rotate to **Landscape** to see all three panes simultaneously with zero vertical scrolling. See **[How Trips, Segments, and Splits Work](docs/trip_slicing_guide.md)**.
+* **Long-Trip Zoom, Pan & Overview Minimap:** Drag or tap the **Overview Minimap** navigator below the time axis, pinch-to-zoom or two-finger pan, or use quick presets (`Full`, `30m`, `10m`, `3m`, `🎯 Seg` / Landscape toggles and per-card `🔍` focus buttons) to inspect individual legs or boundaries with edge auto-scroll and viewport-scoped Y-axis scaling.
 
 ### 3. **BLE & Hardware** Diagnostic Testbench & Provisioning CLI
 * **Gated behind `🛠️ Developer Mode` (off by default):** Toggle **`⚙️ Settings → Diagnostics & Support → 🛠️ Developer Mode`** to reveal the **`3. HW Test`** tab (live BLE/GATT inspector and experiment controls) along with UI options that inject demo data or simulate Saved Wi-Fi Places.
@@ -81,7 +82,7 @@ The **Qingping Air Monitor Lite (`CGDN1`)** packs research-grade environmental s
 
 ## Documentation
 
-* **[How Trips, Segments, and Splits Work](docs/trip_slicing_guide.md)** — End-user guide with screenshots explaining segments (`#1`, `#2`, ...), shared dividers (`⇔ 1|2`), splitting, nudging, labeling, merging, permanent pinning, zero-scroll landscape mode, and CSV export.
+* **[How Trips, Segments, and Splits Work](docs/trip_slicing_guide.md)** — End-user guide with screenshots explaining segments (`#1`, `#2`, ...), shared dividers (`⇔ 1|2`), Overview Minimap zooming/panning, splitting, nudging, labeling, merging, permanent pinning, zero-scroll landscape mode, and CSV export.
 * **[How Your Monitor Works with `AirSlice`](docs/how_cgdn1_works.md)** — Conceptual guide for curious users covering sensors inside the `CGDN1`, battery runtime, Setup Mode vs. Normal Mode, 5-second offline setup, fallback settings, and ESPHome support.
 * **[Upstream ESPHome Firmware (`nemethhh/esphome-qingping-cgdn1`, `main` ≥ `26642dcb`)](https://github.com/nemethhh/esphome-qingping-cgdn1)** — Compile `main` (commit [`26642dcb3d324e5619563279f77eef4a0f239d46`](https://github.com/nemethhh/esphome-qingping-cgdn1/commit/26642dcb3d324e5619563279f77eef4a0f239d46) / 2026-11-17 or newer) with `-s bthome true` (and optionally `-s portable true`) for passive BTHome v2 (`0xFCD2`) BLE broadcasts tuned for portable `AirSlice` use.
 * **[Requirements & Architecture Specification](docs/requirements_spec.md)** — State machine, decoupled BLE timeouts, 3-mode BLE/GATT privacy strategy, data model, 3-pane graph stack, View/Edit & Portrait/Landscape ergonomics, and hardware bring-up logger.

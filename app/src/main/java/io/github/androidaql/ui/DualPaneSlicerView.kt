@@ -7,8 +7,10 @@ import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import io.github.androidaql.storage.AqlRingBufferStore
 import io.github.androidaql.storage.SessionSliceRecord
 import io.github.androidaql.util.TemperatureUnitFormatter
@@ -20,6 +22,7 @@ import kotlin.math.abs
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToLong
 
 /**
  * Synchronized 3-pane timeline chart & interactive session slicer:
@@ -27,15 +30,35 @@ import kotlin.math.min
  * - Pane 2 (Middle, 29%): Temperature (°C, orange) & Relative Humidity (%, cyan) to highlight
  *   indoor/outdoor HVAC transitions when GPS is degraded indoors.
  * - Pane 3 (Bottom, 29%): Movement Speed (m/s, log-scaled green) with 1.5 m/s walking reference and shaded "Weak GPS (>50m Urban Canyon)" bands.
- * - Supports thumb-dragging shared dividers between adjacent segments and tapping/scrubbing a cursor timestamp.
+ * - Supports thumb-dragging shared dividers between adjacent segments, tapping/scrubbing a cursor timestamp,
+ *   and (when [enableZoomAndMinimap] is true) 2-finger pinch-to-zoom/pan, edge auto-scroll, and an overview minimap bar.
  */
 class DualPaneSlicerView(context: Context) : View(context) {
 
     var slots: List<AqlRingBufferStore.RingSlotRecord> = emptyList()
         set(value) {
             field = value
-            if (value.isNotEmpty() && cursorEpochSec < value.first().bucketEpochSec) {
-                cursorEpochSec = value[value.size / 2].bucketEpochSec
+            if (value.isEmpty()) {
+                viewStartEpochSec = null
+                viewEndEpochSec = null
+                stopEdgeAutoScroll()
+            } else {
+                val (tripStart, tripEnd) = getTripBoundsEpochSec()
+                if (cursorEpochSec < tripStart || cursorEpochSec > tripEnd) {
+                    cursorEpochSec = value[value.size / 2].bucketEpochSec
+                }
+                val curVs = viewStartEpochSec
+                val curVe = viewEndEpochSec
+                if (curVs != null && curVe != null) {
+                    val (clampedS, clampedE) = clampViewport(tripStart, tripEnd, curVs, curVe)
+                    if (clampedS <= tripStart && clampedE >= tripEnd) {
+                        viewStartEpochSec = null
+                        viewEndEpochSec = null
+                    } else {
+                        viewStartEpochSec = clampedS
+                        viewEndEpochSec = clampedE
+                    }
+                }
             }
             invalidate()
         }
@@ -60,7 +83,25 @@ class DualPaneSlicerView(context: Context) : View(context) {
             invalidate()
         }
 
-    var desiredHeightDp: Int = 370
+    var enableZoomAndMinimap: Boolean = false
+        set(value) {
+            field = value
+            if (!value) {
+                viewStartEpochSec = null
+                viewEndEpochSec = null
+                stopEdgeAutoScroll()
+            }
+            requestLayout()
+            invalidate()
+        }
+
+    var viewStartEpochSec: Long? = null
+        private set
+
+    var viewEndEpochSec: Long? = null
+        private set
+
+    var desiredHeightDp: Int = DEFAULT_PORTRAIT_HEIGHT_DP
         set(value) {
             field = value
             requestLayout()
@@ -94,13 +135,105 @@ class DualPaneSlicerView(context: Context) : View(context) {
     var onCursorChanged: ((Long) -> Unit)? = null
     var onSharedDividerMoved: ((leftSliceId: Long, rightSliceId: Long, newEpochSec: Long) -> Unit)? = null
     var onDividerSelected: ((dividerIndex: Int) -> Unit)? = null
+    var onViewportChanged: ((viewStartSec: Long, viewEndSec: Long, isZoomed: Boolean) -> Unit)? = null
+
+    fun getTripBoundsEpochSec(): Pair<Long, Long> {
+        if (slots.isEmpty()) return 0L to STEP_SEC
+        val tripStart = fixedWindowStartEpochSec ?: slots.first().bucketEpochSec
+        val maxDataEnd = max(
+            slots.last().bucketEpochSec,
+            slices.maxOfOrNull { it.endEpochSec } ?: 0L
+        )
+        val tripEnd = max(tripStart + STEP_SEC, fixedWindowEndEpochSec ?: maxDataEnd)
+        return tripStart to tripEnd
+    }
+
+    fun getEffectiveViewportEpochSec(): Pair<Long, Long> {
+        val (tripStart, tripEnd) = getTripBoundsEpochSec()
+        if (!enableZoomAndMinimap || slots.isEmpty()) {
+            return tripStart to tripEnd
+        }
+        val reqStart = viewStartEpochSec ?: tripStart
+        val reqEnd = viewEndEpochSec ?: tripEnd
+        return clampViewport(tripStart, tripEnd, reqStart, reqEnd)
+    }
+
+    fun isViewportZoomed(): Boolean {
+        if (!enableZoomAndMinimap || slots.isEmpty()) return false
+        val (tripStart, tripEnd) = getTripBoundsEpochSec()
+        val (effStart, effEnd) = getEffectiveViewportEpochSec()
+        return effStart > tripStart || effEnd < tripEnd
+    }
+
+    fun setViewportEpochSec(startSec: Long, endSec: Long, notify: Boolean = true) {
+        if (!enableZoomAndMinimap || slots.isEmpty()) return
+        val (tripStart, tripEnd) = getTripBoundsEpochSec()
+        val (effStart, effEnd) = clampViewport(tripStart, tripEnd, startSec, endSec)
+        if (effStart <= tripStart && effEnd >= tripEnd) {
+            viewStartEpochSec = null
+            viewEndEpochSec = null
+        } else {
+            viewStartEpochSec = effStart
+            viewEndEpochSec = effEnd
+        }
+        invalidate()
+        if (notify) {
+            onViewportChanged?.invoke(effStart, effEnd, isViewportZoomed())
+        }
+    }
+
+    fun resetZoom(notify: Boolean = true) {
+        viewStartEpochSec = null
+        viewEndEpochSec = null
+        stopEdgeAutoScroll()
+        invalidate()
+        if (notify) {
+            val (tripStart, tripEnd) = getTripBoundsEpochSec()
+            onViewportChanged?.invoke(tripStart, tripEnd, false)
+        }
+    }
+
+    fun zoomToWindowAroundCursor(windowDurationSec: Long) {
+        if (!enableZoomAndMinimap || slots.isEmpty()) return
+        val (tripStart, tripEnd) = getTripBoundsEpochSec()
+        val center = cursorEpochSec.coerceIn(tripStart, tripEnd)
+        val half = max(STEP_SEC, windowDurationSec / 2L)
+        setViewportEpochSec(center - half, center + half)
+    }
+
+    fun focusOnSegment(sliceStartSec: Long, sliceEndSec: Long) {
+        if (!enableZoomAndMinimap || slots.isEmpty()) return
+        val (tripStart, tripEnd) = getTripBoundsEpochSec()
+        val (focusStart, focusEnd) = computeSegmentFocusViewport(tripStart, tripEnd, sliceStartSec, sliceEndSec)
+        setViewportEpochSec(focusStart, focusEnd)
+    }
+
+    fun ensureTimestampVisibleInViewport(targetTs: Long, centerIfOutside: Boolean = false) {
+        if (!isViewportZoomed()) return
+        val (tripStart, tripEnd) = getTripBoundsEpochSec()
+        val (curStart, curEnd) = getEffectiveViewportEpochSec()
+        val (newStart, newEnd) = ensureTimestampVisible(
+            tripStartSec = tripStart,
+            tripEndSec = tripEnd,
+            curStartSec = curStart,
+            curEndSec = curEnd,
+            targetTs = targetTs,
+            centerIfOutside = centerIfOutside
+        )
+        if (newStart != curStart || newEnd != curEnd) {
+            setViewportEpochSec(newStart, newEnd)
+        }
+    }
 
     private val density = resources.displayMetrics.density
-    private val padLeft = 46f * density
-    private val padRight = 16f * density
-    private val padTop = 24f * density
-    private val padBottom = 26f * density
-    private val paneGap = 14f * density
+    private val viewConfig = ViewConfiguration.get(context)
+    private val tapSlopPx = viewConfig.scaledTouchSlop.toFloat()
+    private val doubleTapSlopPx = viewConfig.scaledDoubleTapSlop.toFloat()
+    private val doubleTapTimeoutMs = ViewConfiguration.getDoubleTapTimeout().toLong()
+    private val padLeft = PAD_LEFT_DP * density
+    private val padRight = PAD_RIGHT_DP * density
+    private val padTop = PAD_TOP_DP * density
+    private val paneGap = PANE_GAP_DP * density
 
     private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -251,6 +384,49 @@ class DualPaneSlicerView(context: Context) : View(context) {
         textAlign = Paint.Align.CENTER
     }
 
+    private val minimapTrackFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor(COLOR_MINIMAP_TRACK_HEX)
+        style = Paint.Style.FILL
+    }
+    private val minimapTrackBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor(COLOR_MINIMAP_BORDER_HEX)
+        strokeWidth = 1f * density
+        style = Paint.Style.STROKE
+    }
+    private val minimapSparklinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor(COLOR_MINIMAP_SPARKLINE_HEX)
+        strokeWidth = 1.2f * density
+        style = Paint.Style.STROKE
+    }
+    private val minimapSparklinePath = Path()
+    private val minimapDimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor(COLOR_MINIMAP_DIM_HEX)
+        style = Paint.Style.FILL
+    }
+    private val minimapWindowBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        strokeWidth = 1.8f * density
+        style = Paint.Style.STROKE
+    }
+    private val minimapCapPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val minimapCursorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor(COLOR_MINIMAP_CURSOR_HEX)
+        strokeWidth = 1.5f * density
+        style = Paint.Style.STROKE
+    }
+    private val minimapDividerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor(COLOR_MINIMAP_DIVIDER_HEX)
+        strokeWidth = 1f * density
+        style = Paint.Style.STROKE
+    }
+    private val zoomStatusCanvasTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor(COLOR_ZOOM_STATUS_HEX)
+        textSize = 10f * density
+        isFakeBoldText = true
+        textAlign = Paint.Align.CENTER
+    }
+
     private val co2Path = Path()
     private val pm25Path = Path()
     private val tempPath = Path()
@@ -268,10 +444,102 @@ class DualPaneSlicerView(context: Context) : View(context) {
         color = Color.parseColor("#F8FAFC")
         style = Paint.Style.FILL
     }
+
+    private enum class TouchMode {
+        NONE,
+        SCRUB_CURSOR,
+        DRAG_DIVIDER,
+        DRAG_MINIMAP,
+        TWO_FINGER_PINCH_PAN
+    }
+
+    private var touchMode: TouchMode = TouchMode.NONE
     private var draggingDividerIdx: Int = -1
     private var downX: Float = 0f
     private var downY: Float = 0f
     private var downDividerWasAlreadySelected: Boolean = false
+    private var minimapDragGrabOffsetSec: Long = 0L
+    private var pinchPrevSpanX: Float = 0f
+    private var pinchPrevMidX: Float = 0f
+    private var lastSegmentStripTapMs: Long = 0L
+    private var lastSegmentStripTapX: Float = 0f
+    private var lastSegmentStripTappedIdx: Int = -1
+    private var edgeScrollDirection: Int = 0
+    private var lastTouchX: Float = 0f
+    private var edgeScrollActive: Boolean = false
+
+    private val edgeScrollRunnable = object : Runnable {
+        override fun run() {
+            if (!edgeScrollActive ||
+                edgeScrollDirection == 0 ||
+                slots.isEmpty() ||
+                (touchMode != TouchMode.SCRUB_CURSOR && touchMode != TouchMode.DRAG_DIVIDER)
+            ) {
+                edgeScrollActive = false
+                return
+            }
+            val (tripMinTs, tripMaxTs) = getTripBoundsEpochSec()
+            val (curViewMin, curViewMax) = getEffectiveViewportEpochSec()
+            val viewSpan = max(STEP_SEC, curViewMax - curViewMin)
+            val stepMag = max(STEP_SEC, ((viewSpan * EDGE_AUTOSCROLL_STEP_FRACTION).toLong() / STEP_SEC) * STEP_SEC)
+            val (pStart, pEnd) = panViewportByDeltaSec(
+                tripStartSec = tripMinTs,
+                tripEndSec = tripMaxTs,
+                curStartSec = curViewMin,
+                curEndSec = curViewMax,
+                deltaSec = stepMag * edgeScrollDirection
+            )
+            if (pStart == curViewMin && pEnd == curViewMax) {
+                stopEdgeAutoScroll()
+                return
+            }
+            setViewportEpochSec(pStart, pEnd)
+            val plotW = max(1f, width - padLeft - padRight)
+            val ratio = ((lastTouchX - padLeft) / plotW).coerceIn(0f, 1f)
+            val rawTs = pStart + (ratio * (pEnd - pStart)).roundToLong()
+            val offsetAligned = ((rawTs - pStart).toDouble() / STEP_SEC.toDouble()).roundToLong() * STEP_SEC
+            val targetTs = (pStart + offsetAligned).coerceIn(pStart, pEnd)
+
+            if (touchMode == TouchMode.DRAG_DIVIDER &&
+                isEditMode &&
+                draggingDividerIdx in 0 until (slices.size - 1)
+            ) {
+                val left = slices[draggingDividerIdx]
+                val right = slices[draggingDividerIdx + 1]
+                if (targetTs > left.startEpochSec && targetTs < right.endEpochSec) {
+                    cursorEpochSec = targetTs
+                    onSharedDividerMoved?.invoke(left.id, right.id, targetTs)
+                }
+            } else {
+                cursorEpochSec = targetTs
+                onCursorChanged?.invoke(cursorEpochSec)
+            }
+            invalidate()
+            postDelayed(this, EDGE_AUTOSCROLL_INTERVAL_MS)
+        }
+    }
+
+    private fun startEdgeAutoScroll(direction: Int, touchX: Float) {
+        lastTouchX = touchX
+        if (edgeScrollActive && edgeScrollDirection == direction) return
+        edgeScrollDirection = direction
+        if (!edgeScrollActive) {
+            edgeScrollActive = true
+            removeCallbacks(edgeScrollRunnable)
+            postDelayed(edgeScrollRunnable, EDGE_AUTOSCROLL_INTERVAL_MS)
+        }
+    }
+
+    private fun stopEdgeAutoScroll() {
+        edgeScrollDirection = 0
+        edgeScrollActive = false
+        removeCallbacks(edgeScrollRunnable)
+    }
+
+    override fun onDetachedFromWindow() {
+        stopEdgeAutoScroll()
+        super.onDetachedFromWindow()
+    }
 
     private data class PaneLayout(
         val topPaneTop: Float,
@@ -283,22 +551,44 @@ class DualPaneSlicerView(context: Context) : View(context) {
         val topPaneH: Float,
         val midPaneH: Float,
         val botPaneH: Float,
-        val hasSegmentStrip: Boolean
+        val hasSegmentStrip: Boolean,
+        val segTop: Float,
+        val segBot: Float,
+        val hasMinimap: Boolean,
+        val minimapTop: Float,
+        val minimapBot: Float,
+        val timeAxisBaselineY: Float
     )
 
     private fun computePaneLayout(): PaneLayout {
         val hasSegmentStrip = slices.isNotEmpty()
-        val effectivePadBottom = if (hasSegmentStrip) 48f * density else padBottom
-        val totalPlotH = max(1f, height - padTop - effectivePadBottom - 2f * paneGap)
-        val topPaneH = totalPlotH * 0.42f
-        val midPaneH = totalPlotH * 0.29f
-        val botPaneH = totalPlotH * 0.29f
+        val hasMinimap = enableZoomAndMinimap && slots.isNotEmpty()
+        val fm = textPaint.fontMetrics
+        val chrome = computeBottomChromeMetrics(
+            viewHeightPx = height.toFloat(),
+            density = density,
+            hasSegmentStrip = hasSegmentStrip,
+            hasMinimap = hasMinimap,
+            textAscentPx = -fm.ascent,
+            textDescentPx = fm.descent
+        )
+        val totalPlotH = max(1f, height - padTop - chrome.effectivePadBottomPx - 2f * paneGap)
+        val topPaneH = totalPlotH * PANE_TOP_HEIGHT_FRACTION
+        val midPaneH = totalPlotH * PANE_MID_HEIGHT_FRACTION
+        val botPaneH = totalPlotH * PANE_BOT_HEIGHT_FRACTION
         val topPaneTop = padTop
         val topPaneBot = topPaneTop + topPaneH
         val midPaneTop = topPaneBot + paneGap
         val midPaneBot = midPaneTop + midPaneH
         val botPaneTop = midPaneBot + paneGap
         val botPaneBot = botPaneTop + botPaneH
+        val segTop = botPaneBot + chrome.segTopGapPx
+        val segBot = segTop + chrome.segHeightPx
+        val timeAxisTop = segBot + chrome.timeAxisTopGapPx
+        val timeAxisBaselineY = timeAxisTop + chrome.timeAxisAscentPx
+        val timeAxisBottom = timeAxisTop + chrome.timeAxisTextHeightPx
+        val minimapTop = timeAxisBottom + chrome.minimapTopGapPx
+        val minimapBot = minimapTop + chrome.minimapHeightPx
         return PaneLayout(
             topPaneTop = topPaneTop,
             topPaneBot = topPaneBot,
@@ -309,7 +599,13 @@ class DualPaneSlicerView(context: Context) : View(context) {
             topPaneH = topPaneH,
             midPaneH = midPaneH,
             botPaneH = botPaneH,
-            hasSegmentStrip = hasSegmentStrip
+            hasSegmentStrip = hasSegmentStrip,
+            segTop = segTop,
+            segBot = segBot,
+            hasMinimap = hasMinimap,
+            minimapTop = minimapTop,
+            minimapBot = minimapBot,
+            timeAxisBaselineY = timeAxisBaselineY
         )
     }
 
@@ -341,9 +637,11 @@ class DualPaneSlicerView(context: Context) : View(context) {
             return
         }
 
-        val minTs = fixedWindowStartEpochSec ?: slots.first().bucketEpochSec
-        val maxTs = max(minTs + 15L, fixedWindowEndEpochSec ?: slots.last().bucketEpochSec)
+        val (tripMinTs, tripMaxTs) = getTripBoundsEpochSec()
+        val (viewMinTs, viewMaxTs) = getEffectiveViewportEpochSec()
+        val isZoomed = isViewportZoomed()
         val plotW = max(1f, width - padLeft - padRight)
+        val plotRight = width - padRight
         val layout = computePaneLayout()
         val hasSegmentStrip = layout.hasSegmentStrip
         val topPaneH = layout.topPaneH
@@ -356,15 +654,31 @@ class DualPaneSlicerView(context: Context) : View(context) {
         val botPaneTop = layout.botPaneTop
         val botPaneBot = layout.botPaneBot
 
-        fun tsToX(ts: Long): Float {
-            val ratio = (ts - minTs).toFloat() / (maxTs - minTs).toFloat()
+        fun tsToViewX(ts: Long): Float {
+            val ratio = (ts - viewMinTs).toFloat() / max(STEP_SEC, viewMaxTs - viewMinTs).toFloat()
+            return padLeft + ratio * plotW
+        }
+
+        fun tsToTripX(ts: Long): Float {
+            val ratio = (ts - tripMinTs).toFloat() / max(STEP_SEC, tripMaxTs - tripMinTs).toFloat()
             return padLeft + ratio.coerceIn(0f, 1f) * plotW
         }
 
-        // 1. Draw Slice Background Zones across all 3 panes
+        val prevBeforeView = slots.indexOfLast { it.bucketEpochSec < viewMinTs }
+        val nextAfterView = slots.indexOfFirst { it.bucketEpochSec > viewMaxTs }
+        val startIdx = if (prevBeforeView >= 0) prevBeforeView else 0
+        val endIdx = if (nextAfterView >= 0) nextAfterView else slots.lastIndex
+        val visibleSlots = slots.filter { it.bucketEpochSec in viewMinTs..viewMaxTs }.ifEmpty { slots }
+
+        // 1 & 1b. Clip background zones and dropout bands to plot width across panes
+        canvas.save()
+        canvas.clipRect(padLeft, topPaneTop, plotRight, botPaneBot)
+
         for ((idx, slice) in slices.withIndex()) {
-            val x1 = tsToX(slice.startEpochSec)
-            val x2 = tsToX(slice.endEpochSec)
+            if (slice.endEpochSec <= viewMinTs || slice.startEpochSec >= viewMaxTs) continue
+            val x1 = max(padLeft, tsToViewX(slice.startEpochSec))
+            val x2 = min(plotRight, tsToViewX(slice.endEpochSec))
+            if (x2 <= x1) continue
             bgPaint.color = when (idx % 4) {
                 0 -> Color.parseColor("#1E3A8A33")
                 1 -> Color.parseColor("#065F4633")
@@ -376,13 +690,13 @@ class DualPaneSlicerView(context: Context) : View(context) {
             canvas.drawRect(x1, botPaneTop, x2, botPaneBot, bgPaint)
         }
 
-        // 1b. Draw Telemetry Dropout Shading Bands across all 3 panes when gap > dropoutGracePeriodSec
-        for (i in 1 until slots.size) {
+        for (i in max(1, startIdx)..endIdx) {
             val prevTs = slots[i - 1].bucketEpochSec
             val curTs = slots[i].bucketEpochSec
             if (curTs - prevTs > dropoutGracePeriodSec) {
-                val x1 = tsToX(prevTs)
-                val x2 = tsToX(curTs)
+                val x1 = tsToViewX(prevTs)
+                val x2 = tsToViewX(curTs)
+                if (x2 < padLeft || x1 > plotRight) continue
                 canvas.drawRect(x1, topPaneTop, x2, topPaneBot, dropoutBandPaint)
                 canvas.drawRect(x1, midPaneTop, x2, midPaneBot, dropoutBandPaint)
                 canvas.drawRect(x1, botPaneTop, x2, botPaneBot, dropoutBandPaint)
@@ -391,40 +705,38 @@ class DualPaneSlicerView(context: Context) : View(context) {
             }
         }
 
+        canvas.restore()
+
         // 2. Draw pane frames
-        canvas.drawRect(padLeft, topPaneTop, width - padRight, topPaneBot, gridPaint)
-        canvas.drawRect(padLeft, midPaneTop, width - padRight, midPaneBot, gridPaint)
-        canvas.drawRect(padLeft, botPaneTop, width - padRight, botPaneBot, gridPaint)
+        canvas.drawRect(padLeft, topPaneTop, plotRight, topPaneBot, gridPaint)
+        canvas.drawRect(padLeft, midPaneTop, plotRight, midPaneBot, gridPaint)
+        canvas.drawRect(padLeft, botPaneTop, plotRight, botPaneBot, gridPaint)
 
         // Reserve 14dp at the top of each pane for the pane header text so curves don't collide with labels
-        val headerBandPx = 14f * density
+        val headerBandPx = PANE_HEADER_BAND_DP * density
 
-        // 3. Pane 1 (Top): CO2 (ppm) & PM2.5
-        val maxCo2 = max(1600, slots.maxOf { it.co2PpmMax } + 150)
-        val minCo2 = min(400, slots.minOf { it.co2PpmMin })
+        // 3. Pane 1 (Top): CO2 (ppm) & PM2.5 (viewport-scoped Y-axis)
+        val maxCo2 = max(CO2_AXIS_MAX_FLOOR_PPM, visibleSlots.maxOf { it.co2PpmMax } + CO2_AXIS_HEADROOM_PPM)
+        val minCo2 = min(CO2_AXIS_MIN_CEILING_PPM, visibleSlots.minOf { it.co2PpmMin })
         fun co2ToY(co2: Int): Float {
             val r = (co2 - minCo2).toFloat() / max(1, maxCo2 - minCo2).toFloat()
             return topPaneBot - r.coerceIn(0f, 1f) * max(1f, topPaneH - headerBandPx)
         }
 
-        if (1000 in minCo2..maxCo2) {
-            val y1000 = co2ToY(1000)
-            canvas.drawLine(padLeft, y1000, width - padRight, y1000, thresholdPaint)
-        }
-
+        val maxPm25 = max(PM25_AXIS_MAX_FLOOR_UGM3, visibleSlots.maxOf { it.pm25Max }.toFloat() + PM25_AXIS_HEADROOM_UGM3)
         co2Path.reset()
         pm25Path.reset()
         co2InterpPath.reset()
         pm25InterpPath.reset()
-        val maxPm25 = max(35f, slots.maxOf { it.pm25Max }.toFloat() + 5f)
         var prevX = 0f
         var prevYCo2 = 0f
         var prevYPm = 0f
-        for ((i, s) in slots.withIndex()) {
-            val x = tsToX(s.bucketEpochSec)
+        for (i in startIdx..endIdx) {
+            val s = slots[i]
+            val x = tsToViewX(s.bucketEpochSec)
             val yCo2 = co2ToY(s.co2PpmMean)
             val yPm = topPaneBot - (s.pm25Mean / maxPm25).coerceIn(0f, 1f) * max(1f, topPaneH - headerBandPx)
-            if (i == 0) {
+            if (i == startIdx) {
                 co2Path.moveTo(x, yCo2)
                 pm25Path.moveTo(x, yPm)
             } else {
@@ -445,10 +757,18 @@ class DualPaneSlicerView(context: Context) : View(context) {
             prevYCo2 = yCo2
             prevYPm = yPm
         }
+
+        canvas.save()
+        canvas.clipRect(padLeft, topPaneTop, plotRight, topPaneBot)
+        if (CO2_THRESHOLD_PPM in minCo2..maxCo2) {
+            val y1000 = co2ToY(CO2_THRESHOLD_PPM)
+            canvas.drawLine(padLeft, y1000, plotRight, y1000, thresholdPaint)
+        }
         canvas.drawPath(pm25InterpPath, pm25InterpPaint)
         canvas.drawPath(co2InterpPath, co2InterpPaint)
         canvas.drawPath(pm25Path, pm25LinePaint)
         canvas.drawPath(co2Path, co2LinePaint)
+        canvas.restore()
 
         textPaint.textAlign = Paint.Align.RIGHT
         canvas.drawText("$maxCo2", padLeft - 4f * density, topPaneTop + 10f * density, textPaint)
@@ -459,8 +779,8 @@ class DualPaneSlicerView(context: Context) : View(context) {
         // 4. Pane 2 (Middle): Temperature (°F or °C per device/user setting, orange) & Relative Humidity (%, cyan)
         val useFahrenheit = TemperatureUnitFormatter.useFahrenheit(context)
         val unitSym = TemperatureUnitFormatter.unitSymbol(useFahrenheit)
-        val minTemp = min(0f, slots.minOf { it.tempCMean } - 2f)
-        val maxTemp = max(28f, slots.maxOf { it.tempCMean } + 2f)
+        val minTemp = min(TEMP_AXIS_MIN_CEILING_C, visibleSlots.minOf { it.tempCMean } - TEMP_AXIS_HEADROOM_C)
+        val maxTemp = max(TEMP_AXIS_MAX_FLOOR_C, visibleSlots.maxOf { it.tempCMean } + TEMP_AXIS_HEADROOM_C)
         fun tempToY(tC: Float): Float {
             val r = (tC - minTemp) / max(1f, maxTemp - minTemp)
             return midPaneBot - r.coerceIn(0f, 1f) * max(1f, midPaneH - headerBandPx)
@@ -476,11 +796,12 @@ class DualPaneSlicerView(context: Context) : View(context) {
         humidityInterpPath.reset()
         var prevYT = 0f
         var prevYH = 0f
-        for ((i, s) in slots.withIndex()) {
-            val x = tsToX(s.bucketEpochSec)
+        for (i in startIdx..endIdx) {
+            val s = slots[i]
+            val x = tsToViewX(s.bucketEpochSec)
             val yT = tempToY(s.tempCMean)
             val yH = humToY(s.humidityPctMean)
-            if (i == 0) {
+            if (i == startIdx) {
                 tempPath.moveTo(x, yT)
                 humidityPath.moveTo(x, yH)
             } else {
@@ -501,10 +822,14 @@ class DualPaneSlicerView(context: Context) : View(context) {
             prevYT = yT
             prevYH = yH
         }
+
+        canvas.save()
+        canvas.clipRect(padLeft, midPaneTop, plotRight, midPaneBot)
         canvas.drawPath(humidityInterpPath, humidityInterpPaint)
         canvas.drawPath(tempInterpPath, tempInterpPaint)
         canvas.drawPath(humidityPath, humidityLinePaint)
         canvas.drawPath(tempPath, tempLinePaint)
+        canvas.restore()
 
         textPaint.textAlign = Paint.Align.RIGHT
         canvas.drawText(TemperatureUnitFormatter.format(maxTemp, useFahrenheit, decimals = 0), padLeft - 4f * density, midPaneTop + 10f * density, textPaint)
@@ -513,26 +838,43 @@ class DualPaneSlicerView(context: Context) : View(context) {
         canvas.drawText("Temp ($unitSym, orange) & RH (%, cyan)", padLeft + 4f * density, midPaneTop + 11f * density, textPaint)
 
         // 5. Pane 3 (Bottom): Speed (m/s, shifted log scale) + Weak GPS (>50m accuracy) + Location Not Collected (Saved Place / GPS Off)
-        val maxSpeed = max(12f, (slots.mapNotNull { if (it.knownPlaceId == 0) it.speedMps else null }.maxOrNull() ?: 5f) + 2f)
+        val maxSpeed = max(
+            SPEED_AXIS_MAX_FLOOR_MPS,
+            (visibleSlots.mapNotNull { if (it.knownPlaceId == 0) it.speedMps else null }.maxOrNull() ?: 5f) + SPEED_AXIS_HEADROOM_MPS
+        )
         fun speedToY(spd: Float): Float {
             val r = normalizeLogSpeed(spd, maxSpeed)
             return botPaneBot - r * max(1f, botPaneH - headerBandPx)
         }
-        val yWalkRef = speedToY(1.5f)
-        canvas.drawLine(padLeft, yWalkRef, width - padRight, yWalkRef, speedRefPaint)
+        val yWalkRef = speedToY(WALK_SPEED_REF_MPS)
         fun isLocationCollected(s: AqlRingBufferStore.RingSlotRecord): Boolean =
             s.knownPlaceId == 0 && s.speedMps != null
 
-        val stepWidthPx = max(2f, plotW / max(1, slots.size))
+        val viewportSlotCount = max(1f, (viewMaxTs - viewMinTs).toFloat() / STEP_SEC.toFloat())
+        val stepWidthPx = max(2f, plotW / viewportSlotCount)
+
+        canvas.save()
+        canvas.clipRect(padLeft, botPaneTop, plotRight, botPaneBot)
+        canvas.drawLine(padLeft, yWalkRef, plotRight, yWalkRef, speedRefPaint)
 
         // 5a. Render "Location Not Collected (GPS Off)" spans across Pane 3
         var spanStartIdx = -1
         var spanHasSavedPlace = false
         val midBotY = botPaneTop + headerBandPx + max(1f, botPaneH - headerBandPx) * 0.5f
-        fun flushGpsNotCollectedSpan(endIdx: Int) {
+        fun flushGpsNotCollectedSpan(spanEndIdx: Int) {
             if (spanStartIdx < 0) return
-            val x1 = if (spanStartIdx == 0) padLeft else max(padLeft, tsToX(slots[spanStartIdx].bucketEpochSec) - stepWidthPx / 2f)
-            val x2 = if (endIdx == slots.lastIndex) (width - padRight) else min(width - padRight, tsToX(slots[endIdx].bucketEpochSec) + stepWidthPx / 2f)
+            val rawX1 = if (spanStartIdx == 0) {
+                tsToViewX(tripMinTs)
+            } else {
+                tsToViewX(slots[spanStartIdx].bucketEpochSec) - stepWidthPx / 2f
+            }
+            val rawX2 = if (spanEndIdx == slots.lastIndex) {
+                tsToViewX(tripMaxTs)
+            } else {
+                tsToViewX(slots[spanEndIdx].bucketEpochSec) + stepWidthPx / 2f
+            }
+            val x1 = max(padLeft, rawX1)
+            val x2 = min(plotRight, rawX2)
             if (x2 > x1) {
                 canvas.drawRect(x1, botPaneTop + headerBandPx, x2, botPaneBot, gpsNotCollectedBandPaint)
                 canvas.drawLine(x1, midBotY, x2, midBotY, gpsNotCollectedLinePaint)
@@ -545,7 +887,8 @@ class DualPaneSlicerView(context: Context) : View(context) {
             spanStartIdx = -1
             spanHasSavedPlace = false
         }
-        for ((i, s) in slots.withIndex()) {
+        for (i in startIdx..endIdx) {
+            val s = slots[i]
             if (!isLocationCollected(s)) {
                 if (spanStartIdx < 0) spanStartIdx = i
                 if (s.knownPlaceId > 0) spanHasSavedPlace = true
@@ -553,7 +896,7 @@ class DualPaneSlicerView(context: Context) : View(context) {
                 flushGpsNotCollectedSpan(i - 1)
             }
         }
-        flushGpsNotCollectedSpan(slots.lastIndex)
+        flushGpsNotCollectedSpan(endIdx)
 
         // 5b. Render active Speed curve (Green = GPS, Amber = Step-estimated without GPS) and Weak GPS (>50m) bands
         speedPath.reset()
@@ -561,9 +904,11 @@ class DualPaneSlicerView(context: Context) : View(context) {
         speedInterpPath.reset()
         var hasPrevCollectedSpeed = false
         var prevCollectedTs = 0L
+        var prevSpeedX = 0f
         var prevYSpd = 0f
-        for (s in slots) {
-            val x = tsToX(s.bucketEpochSec)
+        for (i in startIdx..endIdx) {
+            val s = slots[i]
+            val x = tsToViewX(s.bucketEpochSec)
             if (!isLocationCollected(s)) {
                 hasPrevCollectedSpeed = false
                 continue
@@ -578,7 +923,7 @@ class DualPaneSlicerView(context: Context) : View(context) {
                     botPaneBot,
                     stepSpeedBandPaint
                 )
-            } else if (acc!! > 50f) {
+            } else if (acc!! > WEAK_GPS_ACCURACY_THRESHOLD_M) {
                 canvas.drawRect(
                     x - stepWidthPx / 2f,
                     botPaneTop,
@@ -596,21 +941,22 @@ class DualPaneSlicerView(context: Context) : View(context) {
             } else {
                 val gapSec = s.bucketEpochSec - prevCollectedTs
                 if (gapSec > dropoutGracePeriodSec) {
-                    speedInterpPath.moveTo(prevX, prevYSpd)
+                    speedInterpPath.moveTo(prevSpeedX, prevYSpd)
                     speedInterpPath.lineTo(x, ySpd)
                     targetPath.moveTo(x, ySpd)
                 } else {
-                    targetPath.moveTo(prevX, prevYSpd)
+                    targetPath.moveTo(prevSpeedX, prevYSpd)
                     targetPath.lineTo(x, ySpd)
                 }
             }
-            prevX = x
+            prevSpeedX = x
             prevCollectedTs = s.bucketEpochSec
             prevYSpd = ySpd
         }
         canvas.drawPath(speedInterpPath, speedInterpPaint)
         canvas.drawPath(speedPath, speedLinePaint)
         canvas.drawPath(stepSpeedPath, stepSpeedLinePaint)
+        canvas.restore()
 
         textPaint.textAlign = Paint.Align.RIGHT
         canvas.drawText(String.format(Locale.US, "%.0fm/s", maxSpeed), padLeft - 4f * density, botPaneTop + 10f * density, textPaint)
@@ -621,13 +967,14 @@ class DualPaneSlicerView(context: Context) : View(context) {
         textPaint.textAlign = Paint.Align.LEFT
         canvas.drawText("Speed (log) • Green=GPS • Amber=Steps • Red=Weak", padLeft + 4f * density, botPaneTop + 11f * density, textPaint)
 
-        // 5c. Segment Strip beneath Pane 3 (shows numbered intervals #1, #2, ... and their boundaries)
-        val segTop = botPaneBot + 4f * density
-        val segBot = segTop + 20f * density
+        // 5c. Segment Strip beneath Pane 3 (shows numbered intervals #1, #2, ... clamped to viewport)
+        val segTop = layout.segTop
+        val segBot = layout.segBot
         if (hasSegmentStrip) {
             for ((idx, slice) in slices.withIndex()) {
-                val x1 = tsToX(slice.startEpochSec) + 1f * density
-                val x2 = tsToX(slice.endEpochSec) - 1f * density
+                if (slice.endEpochSec <= viewMinTs || slice.startEpochSec >= viewMaxTs) continue
+                val x1 = max(padLeft, tsToViewX(slice.startEpochSec)) + 1f * density
+                val x2 = min(plotRight, tsToViewX(slice.endEpochSec)) - 1f * density
                 val barW = x2 - x1
                 if (barW <= 2f * density) continue
                 val isCursorInside = cursorEpochSec in slice.startEpochSec..slice.endEpochSec
@@ -660,17 +1007,19 @@ class DualPaneSlicerView(context: Context) : View(context) {
                         ""
                     }
                     if (labelToDraw.isNotEmpty()) {
-                        canvas.drawText(labelToDraw, (x1 + x2) / 2f, segTop + 14f * density, segmentStripTextPaint)
+                        val baselineY = segTop + (segBot - segTop) * 0.72f
+                        canvas.drawText(labelToDraw, (x1 + x2) / 2f, baselineY, segmentStripTextPaint)
                     }
                 }
             }
         }
 
-        // 6. Shared Dividers & Thumb Handles across all 3 panes (+ Segment Strip)
+        // 6. Shared Dividers & Thumb Handles across all 3 panes (+ Segment Strip), active divider drawn last
         val dividerBottomY = if (hasSegmentStrip) segBot else botPaneBot
-        for (i in 0 until slices.size - 1) {
+        fun drawSingleDivider(i: Int) {
             val boundaryTs = slices[i].endEpochSec
-            val x = tsToX(boundaryTs)
+            if (boundaryTs !in viewMinTs..viewMaxTs) return
+            val x = tsToViewX(boundaryTs)
             dividerPaint.color = if (isEditMode && i == selectedDividerIndex) Color.parseColor("#F97316") else Color.parseColor("#FBBF24")
             canvas.drawLine(x, topPaneTop, x, dividerBottomY, dividerPaint)
 
@@ -690,10 +1039,16 @@ class DualPaneSlicerView(context: Context) : View(context) {
                 canvas.drawText(divText, cxPill, topPaneBot + 10f * density, badgeTextPaint)
             }
         }
+        for (i in 0 until slices.size - 1) {
+            if (i != selectedDividerIndex) drawSingleDivider(i)
+        }
+        if (selectedDividerIndex in 0 until (slices.size - 1)) {
+            drawSingleDivider(selectedDividerIndex)
+        }
 
         // 7. Interactive Scrubber Cursor, Top Floating Time Bubble & Inline Intersection Value Badges
-        if (cursorEpochSec in minTs..maxTs) {
-            val cx = tsToX(cursorEpochSec)
+        if (cursorEpochSec in viewMinTs..viewMaxTs) {
+            val cx = tsToViewX(cursorEpochSec)
             canvas.drawLine(cx, topPaneTop, cx, botPaneBot, cursorPaint)
             val nearest = slots.minByOrNull { abs(it.bucketEpochSec - cursorEpochSec) }
             if (nearest != null) {
@@ -717,7 +1072,7 @@ class DualPaneSlicerView(context: Context) : View(context) {
                 timeBubbleBgPaint.color = if (inDropoutGapSec > 0L) Color.parseColor("#FDE68A") else Color.parseColor("#F8FAFC")
                 val tbW = badgeTextPaint.measureText(timeLabel) + 12f * density
                 val tbH = 17f * density
-                val tbX = (cx - tbW / 2f).coerceIn(padLeft, width - padRight - tbW)
+                val tbX = (cx - tbW / 2f).coerceIn(padLeft, plotRight - tbW)
                 val tbRect = RectF(tbX, 3f * density, tbX + tbW, 3f * density + tbH)
                 canvas.drawRoundRect(tbRect, 5f * density, 5f * density, timeBubbleBgPaint)
                 badgeTextPaint.textAlign = Paint.Align.CENTER
@@ -751,7 +1106,7 @@ class DualPaneSlicerView(context: Context) : View(context) {
                     minDist = minBadgeDistPx
                 )
 
-                val placeLeft = cx > (width - padRight - 96f * density)
+                val placeLeft = cx > (plotRight - 96f * density)
                 drawIntersectionCallout(
                     canvas, cx, yCo2, labelYCo2,
                     "${nearest.co2PpmMean} ppm", Color.parseColor("#38BDF8"), placeLeft
@@ -772,7 +1127,7 @@ class DualPaneSlicerView(context: Context) : View(context) {
                     val acc = nearest.gpsAccuracyM
                     val (spdBadge, badgeColor) = when {
                         acc == null -> String.format(Locale.US, "%.1fm/s (Steps)", spd) to Color.parseColor("#FBBF24")
-                        acc > 50f -> String.format(Locale.US, "%.1fm/s (±%.0fm)", spd, acc) to Color.parseColor("#34D399")
+                        acc > WEAK_GPS_ACCURACY_THRESHOLD_M -> String.format(Locale.US, "%.1fm/s (±%.0fm)", spd, acc) to Color.parseColor("#34D399")
                         else -> String.format(Locale.US, "%.1fm/s", spd) to Color.parseColor("#34D399")
                     }
                     drawIntersectionCallout(
@@ -789,11 +1144,126 @@ class DualPaneSlicerView(context: Context) : View(context) {
             }
         }
 
-        // 8. Time Axis Labels
+        // 8. Time Axis Labels (Viewport Bounds + Zoom Span Indicator with narrow-screen overlap guard)
+        val leftTimeLabel = timeFmt.format(Instant.ofEpochSecond(viewMinTs))
+        val rightTimeLabel = timeFmt.format(Instant.ofEpochSecond(viewMaxTs))
         textPaint.textAlign = Paint.Align.LEFT
-        canvas.drawText(timeFmt.format(Instant.ofEpochSecond(minTs)), padLeft, height - 6f * density, textPaint)
+        canvas.drawText(leftTimeLabel, padLeft, layout.timeAxisBaselineY, textPaint)
         textPaint.textAlign = Paint.Align.RIGHT
-        canvas.drawText(timeFmt.format(Instant.ofEpochSecond(maxTs)), width - padRight, height - 6f * density, textPaint)
+        canvas.drawText(rightTimeLabel, plotRight, layout.timeAxisBaselineY, textPaint)
+        if (isZoomed) {
+            val zoomLabel = "🔍 ${formatSpanShort(viewMaxTs - viewMinTs)} of ${formatSpanShort(tripMaxTs - tripMinTs)}"
+            val leftW = textPaint.measureText(leftTimeLabel)
+            val rightW = textPaint.measureText(rightTimeLabel)
+            val centerW = zoomStatusCanvasTextPaint.measureText(zoomLabel)
+            if (leftW + centerW + rightW + TIME_AXIS_LABEL_MIN_GAP_DP * density <= plotW) {
+                canvas.drawText(zoomLabel, padLeft + plotW * 0.5f, layout.timeAxisBaselineY, zoomStatusCanvasTextPaint)
+            }
+        }
+
+        // 9. Overview Minimap Navigator Bar (Full Trip Context + Draggable Viewport Window)
+        if (layout.hasMinimap && layout.minimapBot > layout.minimapTop + 4f * density) {
+            val miniRect = RectF(padLeft, layout.minimapTop, plotRight, layout.minimapBot)
+            val miniRadius = MINIMAP_CORNER_RADIUS_DP * density
+            canvas.drawRoundRect(miniRect, miniRadius, miniRadius, minimapTrackFillPaint)
+
+            canvas.save()
+            canvas.clipRect(miniRect)
+
+            for ((idx, slice) in slices.withIndex()) {
+                val sx1 = tsToTripX(slice.startEpochSec)
+                val sx2 = tsToTripX(slice.endEpochSec)
+                if (sx2 > sx1) {
+                    bgPaint.color = when (idx % 4) {
+                        0 -> Color.parseColor("#1E3A8A66")
+                        1 -> Color.parseColor("#065F4666")
+                        2 -> Color.parseColor("#78350F66")
+                        else -> Color.parseColor("#33415566")
+                    }
+                    canvas.drawRect(sx1, layout.minimapTop, sx2, layout.minimapBot, bgPaint)
+                }
+                if (idx < slices.size - 1) {
+                    val dx = tsToTripX(slice.endEpochSec)
+                    canvas.drawLine(dx, layout.minimapTop, dx, layout.minimapBot, minimapDividerPaint)
+                }
+            }
+
+            // Full-trip CO2 sparkline
+            val globalMinCo2 = min(CO2_AXIS_MIN_CEILING_PPM, slots.minOf { it.co2PpmMin })
+            val globalMaxCo2 = max(CO2_AXIS_MAX_FLOOR_PPM, slots.maxOf { it.co2PpmMax } + CO2_AXIS_HEADROOM_PPM)
+            val sparkInset = MINIMAP_SPARKLINE_INSET_DP * density
+            val sparkTop = layout.minimapTop + sparkInset
+            val sparkBot = layout.minimapBot - sparkInset
+            val sparkH = max(1f, sparkBot - sparkTop)
+            minimapSparklinePath.reset()
+            for ((i, s) in slots.withIndex()) {
+                val sx = tsToTripX(s.bucketEpochSec)
+                val r = (s.co2PpmMean - globalMinCo2).toFloat() / max(1, globalMaxCo2 - globalMinCo2).toFloat()
+                val sy = sparkBot - r.coerceIn(0f, 1f) * sparkH
+                if (i == 0) {
+                    minimapSparklinePath.moveTo(sx, sy)
+                } else {
+                    minimapSparklinePath.lineTo(sx, sy)
+                }
+            }
+            canvas.drawPath(minimapSparklinePath, minimapSparklinePaint)
+
+            val vx1 = tsToTripX(viewMinTs)
+            val vx2 = tsToTripX(viewMaxTs)
+            if (isZoomed) {
+                if (vx1 > padLeft) {
+                    canvas.drawRect(padLeft, layout.minimapTop, vx1, layout.minimapBot, minimapDimPaint)
+                }
+                if (vx2 < plotRight) {
+                    canvas.drawRect(vx2, layout.minimapTop, plotRight, layout.minimapBot, minimapDimPaint)
+                }
+            }
+
+            if (cursorEpochSec in tripMinTs..tripMaxTs) {
+                val miniCx = tsToTripX(cursorEpochSec)
+                canvas.drawLine(miniCx, layout.minimapTop, miniCx, layout.minimapBot, minimapCursorPaint)
+            }
+            canvas.restore()
+
+            canvas.drawRoundRect(miniRect, miniRadius, miniRadius, minimapTrackBorderPaint)
+
+            val rawThumbW = vx2 - vx1
+            val minThumbW = min(plotW, MINIMAP_MIN_THUMB_WIDTH_DP * density)
+            val thumbCenter = (vx1 + vx2) * 0.5f
+            val halfThumb = max(rawThumbW, minThumbW) * 0.5f
+            val thumbX1 = (thumbCenter - halfThumb).coerceIn(padLeft, plotRight - minThumbW)
+            val thumbX2 = (thumbX1 + max(rawThumbW, minThumbW)).coerceAtMost(plotRight)
+            val thumbColor = Color.parseColor(
+                if (touchMode == TouchMode.DRAG_MINIMAP) COLOR_MINIMAP_THUMB_DRAG_HEX else COLOR_MINIMAP_THUMB_IDLE_HEX
+            )
+            minimapWindowBorderPaint.color = thumbColor
+            minimapCapPaint.color = thumbColor
+            val thumbRect = RectF(thumbX1, layout.minimapTop, thumbX2, layout.minimapBot)
+            val thumbRadius = MINIMAP_THUMB_CORNER_RADIUS_DP * density
+            canvas.drawRoundRect(thumbRect, thumbRadius, thumbRadius, minimapWindowBorderPaint)
+            val capW = MINIMAP_END_CAP_WIDTH_DP * density
+            if (isZoomed) {
+                canvas.drawRect(thumbX1, layout.minimapTop, min(thumbX2, thumbX1 + capW), layout.minimapBot, minimapCapPaint)
+                canvas.drawRect(max(thumbX1, thumbX2 - capW), layout.minimapTop, thumbX2, layout.minimapBot, minimapCapPaint)
+            }
+        }
+    }
+
+    private fun formatSpanShort(spanSec: Long): String {
+        val safe = max(0L, spanSec)
+        return when {
+            safe < 60L -> "${safe}s"
+            safe < 3600L -> {
+                val m = safe / 60L
+                val s = safe % 60L
+                if (s == 0L) "${m}m" else "${m}m ${s}s"
+            }
+            else -> {
+                val h = safe / 3600L
+                val m = (safe % 3600L) / 60L
+                if (m == 0L) "${h}h" else "${h}h ${m}m"
+            }
+        }
     }
 
     private val calloutBoxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -848,51 +1318,127 @@ class DualPaneSlicerView(context: Context) : View(context) {
 
     fun nudgeCursor(deltaSec: Long) {
         if (slots.isEmpty()) return
-        val minTs = slots.first().bucketEpochSec
-        val maxTs = slots.last().bucketEpochSec
-        cursorEpochSec = (cursorEpochSec + deltaSec).coerceIn(minTs, maxTs)
+        val (tripStart, tripEnd) = getTripBoundsEpochSec()
+        cursorEpochSec = (cursorEpochSec + deltaSec).coerceIn(tripStart, tripEnd)
+        ensureTimestampVisibleInViewport(cursorEpochSec, centerIfOutside = false)
         onCursorChanged?.invoke(cursorEpochSec)
         invalidate()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (slots.isEmpty()) return false
-        val minTs = fixedWindowStartEpochSec ?: slots.first().bucketEpochSec
-        val maxTs = max(minTs + 15L, fixedWindowEndEpochSec ?: slots.last().bucketEpochSec)
+        val (tripMinTs, tripMaxTs) = getTripBoundsEpochSec()
+        val (viewMinTs, viewMaxTs) = getEffectiveViewportEpochSec()
         val plotW = max(1f, width - padLeft - padRight)
 
-        fun xToTs(x: Float): Long {
+        fun xToViewTs(x: Float): Long {
             val ratio = ((x - padLeft) / plotW).coerceIn(0f, 1f)
-            val rawTs = minTs + (ratio * (maxTs - minTs)).toLong()
-            return (rawTs / 15L) * 15L
+            val rawTs = viewMinTs + (ratio * (viewMaxTs - viewMinTs)).roundToLong()
+            val offsetAligned = ((rawTs - viewMinTs).toDouble() / STEP_SEC.toDouble()).roundToLong() * STEP_SEC
+            return (viewMinTs + offsetAligned).coerceIn(viewMinTs, viewMaxTs)
         }
 
-        fun tsToX(ts: Long): Float {
-            val ratio = (ts - minTs).toFloat() / (maxTs - minTs).toFloat()
-            return padLeft + ratio.coerceIn(0f, 1f) * plotW
+        fun xToTripTs(x: Float): Long {
+            val ratio = ((x - padLeft) / plotW).coerceIn(0f, 1f)
+            val rawTs = tripMinTs + (ratio * (tripMaxTs - tripMinTs)).roundToLong()
+            val offsetAligned = ((rawTs - tripMinTs).toDouble() / STEP_SEC.toDouble()).roundToLong() * STEP_SEC
+            return (tripMinTs + offsetAligned).coerceIn(tripMinTs, tripMaxTs)
+        }
+
+        fun tsToViewX(ts: Long): Float {
+            val ratio = (ts - viewMinTs).toFloat() / max(STEP_SEC, viewMaxTs - viewMinTs).toFloat()
+            return padLeft + ratio * plotW
         }
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 parent?.requestDisallowInterceptTouchEvent(true)
+                stopEdgeAutoScroll()
                 val layout = computePaneLayout()
-                val inPillBand = event.y in (layout.topPaneBot - 20f * density)..(layout.midPaneTop + 20f * density)
-                val inSegmentStrip = layout.hasSegmentStrip && event.y >= (layout.botPaneBot - 6f * density)
+
+                // Case A: Overview Minimap Zone
+                if (layout.hasMinimap && event.y >= layout.minimapTop - MINIMAP_TOUCH_SLOP_TOP_DP * density) {
+                    touchMode = TouchMode.DRAG_MINIMAP
+                    draggingDividerIdx = -1
+                    downDividerWasAlreadySelected = false
+                    val touchTripTs = xToTripTs(event.x)
+                    if (isViewportZoomed()) {
+                        if (touchTripTs in viewMinTs..viewMaxTs) {
+                            minimapDragGrabOffsetSec = touchTripTs - viewMinTs
+                        } else {
+                            val viewSpan = max(STEP_SEC, viewMaxTs - viewMinTs)
+                            minimapDragGrabOffsetSec = viewSpan / 2L
+                            setViewportEpochSec(touchTripTs - minimapDragGrabOffsetSec, touchTripTs - minimapDragGrabOffsetSec + viewSpan)
+                        }
+                    } else {
+                        cursorEpochSec = touchTripTs
+                        onCursorChanged?.invoke(cursorEpochSec)
+                    }
+                    invalidate()
+                    return true
+                }
+
+                // Case B: Segment Strip Double-Tap to Focus / Toggle Zoom
+                val stripSlopY = SEGMENT_STRIP_TOUCH_SLOP_Y_DP * density
+                val inSegmentStripExact = layout.hasSegmentStrip &&
+                    event.y in (layout.segTop - stripSlopY)..(layout.segBot + stripSlopY)
+                if (inSegmentStripExact) {
+                    val nowMs = SystemClock.uptimeMillis()
+                    val tapViewTs = xToViewTs(event.x)
+                    val tappedSliceIdx = slices.indexOfFirst { tapViewTs in it.startEpochSec..it.endEpochSec }
+                    if (enableZoomAndMinimap &&
+                        nowMs - lastSegmentStripTapMs <= doubleTapTimeoutMs &&
+                        abs(event.x - lastSegmentStripTapX) <= doubleTapSlopPx &&
+                        tappedSliceIdx >= 0 &&
+                        tappedSliceIdx == lastSegmentStripTappedIdx
+                    ) {
+                        lastSegmentStripTapMs = 0L
+                        val targetSlice = slices[tappedSliceIdx]
+                        val (focusStart, focusEnd) = computeSegmentFocusViewport(
+                            tripStartSec = tripMinTs,
+                            tripEndSec = tripMaxTs,
+                            sliceStartSec = targetSlice.startEpochSec,
+                            sliceEndSec = targetSlice.endEpochSec
+                        )
+                        if (isViewportZoomed() &&
+                            abs(viewMinTs - focusStart) <= STEP_SEC &&
+                            abs(viewMaxTs - focusEnd) <= STEP_SEC
+                        ) {
+                            resetZoom()
+                        } else {
+                            setViewportEpochSec(focusStart, focusEnd)
+                        }
+                        touchMode = TouchMode.NONE
+                        draggingDividerIdx = -1
+                        downDividerWasAlreadySelected = false
+                        return true
+                    }
+                    lastSegmentStripTapMs = nowMs
+                    lastSegmentStripTapX = event.x
+                    lastSegmentStripTappedIdx = tappedSliceIdx
+                }
+
+                // Case C: Main 3 Panes & Segment Strip Single-Finger (Divider Drag or Cursor Scrub)
+                val pillBandSlop = DIVIDER_PILL_BAND_SLOP_DP * density
+                val inPillBand = event.y in (layout.topPaneBot - pillBandSlop)..(layout.midPaneTop + pillBandSlop)
+                val inSegmentStrip = layout.hasSegmentStrip &&
+                    event.y in (layout.botPaneBot - MINIMAP_TOUCH_SLOP_TOP_DP * density)..(layout.segBot + 8f * density)
                 var hitDivider = -1
                 if (isEditMode) {
                     var bestDist = Float.MAX_VALUE
                     for (i in 0 until slices.size - 1) {
                         val boundaryTs = slices[i].endEpochSec
+                        if (boundaryTs !in viewMinTs..viewMaxTs) continue
                         val allowedDist = when {
-                            inPillBand -> 28f * density
-                            inSegmentStrip -> 20f * density
+                            inPillBand -> DIVIDER_PILL_HIT_RADIUS_DP * density
+                            inSegmentStrip -> DIVIDER_STRIP_HIT_RADIUS_DP * density
                             i == selectedDividerIndex && cursorEpochSec == boundaryTs ->
                                 // Co-located cyan cursor inside Panes 1/2/3: let user drag cursor away freely
                                 -1f
-                            else -> 9f * density
+                            else -> DIVIDER_LINE_HIT_RADIUS_DP * density
                         }
                         if (allowedDist <= 0f) continue
-                        val dx = abs(event.x - tsToX(boundaryTs))
+                        val dx = abs(event.x - tsToViewX(boundaryTs))
                         if (dx <= allowedDist && dx < bestDist) {
                             bestDist = dx
                             hitDivider = i
@@ -903,47 +1449,133 @@ class DualPaneSlicerView(context: Context) : View(context) {
                 downY = event.y
                 downDividerWasAlreadySelected = (hitDivider >= 0 && hitDivider == selectedDividerIndex)
                 if (isEditMode && hitDivider >= 0) {
+                    touchMode = TouchMode.DRAG_DIVIDER
                     draggingDividerIdx = hitDivider
                     selectedDividerIndex = hitDivider
                     onDividerSelected?.invoke(hitDivider)
                 } else {
+                    touchMode = TouchMode.SCRUB_CURSOR
                     val wasSelected = selectedDividerIndex >= 0
                     draggingDividerIdx = -1
                     selectedDividerIndex = -1
                     if (wasSelected) {
                         onDividerSelected?.invoke(-1)
                     }
-                    cursorEpochSec = xToTs(event.x)
+                    cursorEpochSec = xToViewTs(event.x)
                     onCursorChanged?.invoke(cursorEpochSec)
                 }
                 invalidate()
+                return true
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                if (enableZoomAndMinimap && event.pointerCount >= 2 && touchMode != TouchMode.DRAG_MINIMAP) {
+                    draggingDividerIdx = -1
+                    downDividerWasAlreadySelected = false
+                    stopEdgeAutoScroll()
+                    touchMode = TouchMode.TWO_FINGER_PINCH_PAN
+                    pinchPrevMidX = (event.getX(0) + event.getX(1)) * 0.5f
+                    pinchPrevSpanX = max(MIN_PINCH_SPAN_DP * density, abs(event.getX(1) - event.getX(0)))
+                }
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
-                val targetTs = xToTs(event.x)
-                if (isEditMode && draggingDividerIdx in 0 until (slices.size - 1)) {
-                    val left = slices[draggingDividerIdx]
-                    val right = slices[draggingDividerIdx + 1]
-                    if (targetTs > left.startEpochSec && targetTs < right.endEpochSec) {
-                        cursorEpochSec = targetTs
-                        onSharedDividerMoved?.invoke(left.id, right.id, targetTs)
+                when (touchMode) {
+                    TouchMode.NONE -> return true
+                    TouchMode.TWO_FINGER_PINCH_PAN -> {
+                        if (event.pointerCount < 2) return true
+                        val curMidX = (event.getX(0) + event.getX(1)) * 0.5f
+                        val curSpanX = max(MIN_PINCH_SPAN_DP * density, abs(event.getX(1) - event.getX(0)))
+                        if (enableZoomAndMinimap) {
+                            val scaleFactor = (curSpanX / max(1f, pinchPrevSpanX))
+                                .coerceIn(PINCH_STEP_SCALE_MIN, PINCH_STEP_SCALE_MAX)
+                            val anchorRatio = ((curMidX - padLeft) / plotW).coerceIn(0f, 1f)
+                            val (zStart, zEnd) = zoomViewportAroundAnchor(
+                                tripStartSec = tripMinTs,
+                                tripEndSec = tripMaxTs,
+                                curStartSec = viewMinTs,
+                                curEndSec = viewMaxTs,
+                                scaleFactor = scaleFactor,
+                                anchorRatio = anchorRatio
+                            )
+                            val dx = curMidX - pinchPrevMidX
+                            val panDeltaSec = -((dx / plotW) * (zEnd - zStart).toFloat()).roundToLong()
+                            val (pStart, pEnd) = panViewportByDeltaSec(
+                                tripStartSec = tripMinTs,
+                                tripEndSec = tripMaxTs,
+                                curStartSec = zStart,
+                                curEndSec = zEnd,
+                                deltaSec = panDeltaSec
+                            )
+                            setViewportEpochSec(pStart, pEnd)
+                        }
+                        pinchPrevMidX = curMidX
+                        pinchPrevSpanX = curSpanX
+                        return true
                     }
-                } else {
-                    cursorEpochSec = targetTs
-                    onCursorChanged?.invoke(cursorEpochSec)
+                    TouchMode.DRAG_MINIMAP -> {
+                        val touchTripTs = xToTripTs(event.x)
+                        if (isViewportZoomed()) {
+                            val span = max(STEP_SEC, viewMaxTs - viewMinTs)
+                            val reqStart = touchTripTs - minimapDragGrabOffsetSec
+                            val (pStart, pEnd) = clampViewport(tripMinTs, tripMaxTs, reqStart, reqStart + span)
+                            setViewportEpochSec(pStart, pEnd)
+                        } else {
+                            cursorEpochSec = touchTripTs
+                            onCursorChanged?.invoke(cursorEpochSec)
+                            invalidate()
+                        }
+                        return true
+                    }
+                    TouchMode.DRAG_DIVIDER, TouchMode.SCRUB_CURSOR -> {
+                        val targetTs = xToViewTs(event.x)
+                        if (touchMode == TouchMode.DRAG_DIVIDER &&
+                            isEditMode &&
+                            draggingDividerIdx in 0 until (slices.size - 1)
+                        ) {
+                            val left = slices[draggingDividerIdx]
+                            val right = slices[draggingDividerIdx + 1]
+                            if (targetTs > left.startEpochSec && targetTs < right.endEpochSec) {
+                                cursorEpochSec = targetTs
+                                onSharedDividerMoved?.invoke(left.id, right.id, targetTs)
+                            }
+                        } else {
+                            cursorEpochSec = targetTs
+                            onCursorChanged?.invoke(cursorEpochSec)
+                        }
+                        if (isViewportZoomed()) {
+                            val edgeZonePx = EDGE_AUTOSCROLL_ZONE_DP * density
+                            if (event.x < padLeft + edgeZonePx && viewMinTs > tripMinTs) {
+                                startEdgeAutoScroll(-1, event.x)
+                            } else if (event.x > (width - padRight - edgeZonePx) && viewMaxTs < tripMaxTs) {
+                                startEdgeAutoScroll(+1, event.x)
+                            } else {
+                                stopEdgeAutoScroll()
+                            }
+                        } else {
+                            stopEdgeAutoScroll()
+                        }
+                        invalidate()
+                        return true
+                    }
                 }
-                invalidate()
-                return true
+            }
+            MotionEvent.ACTION_POINTER_UP -> {
+                if (touchMode == TouchMode.TWO_FINGER_PINCH_PAN) {
+                    return true
+                }
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                stopEdgeAutoScroll()
                 if (event.actionMasked == MotionEvent.ACTION_UP &&
+                    touchMode == TouchMode.DRAG_DIVIDER &&
                     downDividerWasAlreadySelected &&
-                    abs(event.x - downX) < 6f * density &&
-                    abs(event.y - downY) < 6f * density
+                    abs(event.x - downX) < tapSlopPx &&
+                    abs(event.y - downY) < tapSlopPx
                 ) {
                     selectedDividerIndex = -1
                     onDividerSelected?.invoke(-1)
                 }
+                touchMode = TouchMode.NONE
                 draggingDividerIdx = -1
                 downDividerWasAlreadySelected = false
                 parent?.requestDisallowInterceptTouchEvent(false)
@@ -965,6 +1597,286 @@ class DualPaneSlicerView(context: Context) : View(context) {
     }
 
     companion object {
+        // Timeline & Zoom Presets
+        const val STEP_SEC = 15L
+        const val MIN_VIEWPORT_SPAN_SEC = 180L
+        const val ZOOM_PRESET_30M_SEC = 30L * 60L
+        const val ZOOM_PRESET_10M_SEC = 10L * 60L
+        const val ZOOM_PRESET_3M_SEC = MIN_VIEWPORT_SPAN_SEC
+        const val MAX_ZOOM_FACTOR = 64f
+        const val DEFAULT_VISIBLE_MARGIN_RATIO = 0.10f
+        const val MAX_VISIBLE_MARGIN_RATIO = 0.45f
+        const val DEFAULT_SEGMENT_FOCUS_PADDING_RATIO = 0.15f
+        const val MIN_SEGMENT_FOCUS_PADDING_SEC = 30L
+        const val DIVIDER_FOCUS_SPAN_FRACTION = 0.08f
+        const val DIVIDER_FOCUS_MIN_HALF_SPAN_SEC = MIN_VIEWPORT_SPAN_SEC
+        const val DIVIDER_FOCUS_MAX_HALF_SPAN_SEC = 5L * 60L
+
+        // Layout & Geometry (dp / fractions)
+        const val DEFAULT_PORTRAIT_HEIGHT_DP = 390
+        const val COMPACT_HEIGHT_THRESHOLD_DP = 290f
+        const val PAD_LEFT_DP = 46f
+        const val PAD_RIGHT_DP = 16f
+        const val PAD_TOP_DP = 24f
+        const val PANE_GAP_DP = 14f
+        const val PANE_HEADER_BAND_DP = 14f
+        const val PANE_TOP_HEIGHT_FRACTION = 0.42f
+        const val PANE_MID_HEIGHT_FRACTION = 0.29f
+        const val PANE_BOT_HEIGHT_FRACTION = 0.29f
+        const val SEGMENT_STRIP_TOP_GAP_DP = 3f
+        const val SEGMENT_STRIP_HEIGHT_DP = 20f
+        const val SEGMENT_STRIP_HEIGHT_COMPACT_DP = 18f
+        const val TIME_AXIS_TOP_GAP_DP = 4f
+        const val TIME_AXIS_BOTTOM_PADDING_DP = 4f
+        const val TIME_AXIS_MIN_TEXT_HEIGHT_DP = 10f
+        const val TIME_AXIS_LABEL_MIN_GAP_DP = 16f
+        const val MINIMAP_TOP_GAP_DP = 4f
+        const val MINIMAP_HEIGHT_DP = 20f
+        const val MINIMAP_HEIGHT_COMPACT_DP = 16f
+        const val MINIMAP_BOTTOM_MARGIN_DP = 4f
+        const val MINIMAP_CORNER_RADIUS_DP = 4f
+        const val MINIMAP_THUMB_CORNER_RADIUS_DP = 3f
+        const val MINIMAP_MIN_THUMB_WIDTH_DP = 16f
+        const val MINIMAP_END_CAP_WIDTH_DP = 3f
+        const val MINIMAP_SPARKLINE_INSET_DP = 2f
+
+        // Touch & Edge Auto-Scroll
+        const val MINIMAP_TOUCH_SLOP_TOP_DP = 6f
+        const val SEGMENT_STRIP_TOUCH_SLOP_Y_DP = 4f
+        const val DIVIDER_PILL_BAND_SLOP_DP = 20f
+        const val DIVIDER_PILL_HIT_RADIUS_DP = 28f
+        const val DIVIDER_STRIP_HIT_RADIUS_DP = 20f
+        const val DIVIDER_LINE_HIT_RADIUS_DP = 9f
+        const val MIN_PINCH_SPAN_DP = 16f
+        const val PINCH_STEP_SCALE_MIN = 0.5f
+        const val PINCH_STEP_SCALE_MAX = 2.0f
+        const val EDGE_AUTOSCROLL_ZONE_DP = 24f
+        const val EDGE_AUTOSCROLL_INTERVAL_MS = 60L
+        const val EDGE_AUTOSCROLL_STEP_FRACTION = 0.04f
+
+        // Y-Axis Scale Floors & Headroom
+        const val CO2_AXIS_MAX_FLOOR_PPM = 1600
+        const val CO2_AXIS_MIN_CEILING_PPM = 400
+        const val CO2_AXIS_HEADROOM_PPM = 150
+        const val CO2_THRESHOLD_PPM = 1000
+        const val PM25_AXIS_MAX_FLOOR_UGM3 = 35f
+        const val PM25_AXIS_HEADROOM_UGM3 = 5f
+        const val TEMP_AXIS_MIN_CEILING_C = 0f
+        const val TEMP_AXIS_MAX_FLOOR_C = 28f
+        const val TEMP_AXIS_HEADROOM_C = 2f
+        const val SPEED_AXIS_MAX_FLOOR_MPS = 12f
+        const val SPEED_AXIS_HEADROOM_MPS = 2f
+        const val WALK_SPEED_REF_MPS = 1.5f
+        const val WEAK_GPS_ACCURACY_THRESHOLD_M = 50f
+
+        // Zoom & Minimap Colors
+        const val COLOR_MINIMAP_TRACK_HEX = "#0B1120"
+        const val COLOR_MINIMAP_BORDER_HEX = "#334155"
+        const val COLOR_MINIMAP_SPARKLINE_HEX = "#8838BDF8"
+        const val COLOR_MINIMAP_DIM_HEX = "#99090D16"
+        const val COLOR_MINIMAP_THUMB_IDLE_HEX = "#38BDF8"
+        const val COLOR_MINIMAP_THUMB_DRAG_HEX = "#F59E0B"
+        const val COLOR_MINIMAP_CURSOR_HEX = "#F8FAFC"
+        const val COLOR_MINIMAP_DIVIDER_HEX = "#FBBF24"
+        const val COLOR_ZOOM_STATUS_HEX = "#38BDF8"
+
+        data class BottomChromeMetrics(
+            val effectivePadBottomPx: Float,
+            val segTopGapPx: Float,
+            val segHeightPx: Float,
+            val timeAxisTopGapPx: Float,
+            val timeAxisAscentPx: Float,
+            val timeAxisTextHeightPx: Float,
+            val minimapTopGapPx: Float,
+            val minimapHeightPx: Float,
+            val bottomMarginPx: Float
+        )
+
+        /**
+         * Derives non-overlapping bottom chrome heights and total bottom padding from named layout
+         * constants and actual font metrics so the segment strip, time axis labels, and minimap
+         * remain cleanly separated across phone/tablet and portrait/landscape dimensions.
+         */
+        fun computeBottomChromeMetrics(
+            viewHeightPx: Float,
+            density: Float,
+            hasSegmentStrip: Boolean,
+            hasMinimap: Boolean,
+            textAscentPx: Float,
+            textDescentPx: Float
+        ): BottomChromeMetrics {
+            val isCompact = viewHeightPx > 0f && viewHeightPx < COMPACT_HEIGHT_THRESHOLD_DP * density
+            val segTopGapPx = if (hasSegmentStrip) SEGMENT_STRIP_TOP_GAP_DP * density else 0f
+            val segHeightPx = if (hasSegmentStrip) {
+                (if (isCompact) SEGMENT_STRIP_HEIGHT_COMPACT_DP else SEGMENT_STRIP_HEIGHT_DP) * density
+            } else {
+                0f
+            }
+            val timeAxisTopGapPx = TIME_AXIS_TOP_GAP_DP * density
+            val minAscentPx = TIME_AXIS_MIN_TEXT_HEIGHT_DP * density
+            val timeAxisAscentPx = max(minAscentPx, textAscentPx)
+            val timeAxisTextHeightPx = max(minAscentPx, timeAxisAscentPx + max(0f, textDescentPx))
+            val minimapTopGapPx = if (hasMinimap) MINIMAP_TOP_GAP_DP * density else 0f
+            val minimapHeightPx = if (hasMinimap) {
+                (if (isCompact) MINIMAP_HEIGHT_COMPACT_DP else MINIMAP_HEIGHT_DP) * density
+            } else {
+                0f
+            }
+            val bottomMarginPx = if (hasMinimap) {
+                MINIMAP_BOTTOM_MARGIN_DP * density
+            } else {
+                TIME_AXIS_BOTTOM_PADDING_DP * density
+            }
+            val effectivePadBottomPx = segTopGapPx +
+                segHeightPx +
+                timeAxisTopGapPx +
+                timeAxisTextHeightPx +
+                minimapTopGapPx +
+                minimapHeightPx +
+                bottomMarginPx
+            return BottomChromeMetrics(
+                effectivePadBottomPx = effectivePadBottomPx,
+                segTopGapPx = segTopGapPx,
+                segHeightPx = segHeightPx,
+                timeAxisTopGapPx = timeAxisTopGapPx,
+                timeAxisAscentPx = timeAxisAscentPx,
+                timeAxisTextHeightPx = timeAxisTextHeightPx,
+                minimapTopGapPx = minimapTopGapPx,
+                minimapHeightPx = minimapHeightPx,
+                bottomMarginPx = bottomMarginPx
+            )
+        }
+
+        /**
+         * Clamps and snaps a requested viewport `[reqStartSec, reqEndSec]` to the 15-second grid
+         * strictly within `[tripStartSec, tripEndSec]`, preserving at least [minSpanSec] (or the full
+         * trip duration if shorter).
+         */
+        fun clampViewport(
+            tripStartSec: Long,
+            tripEndSec: Long,
+            reqStartSec: Long,
+            reqEndSec: Long,
+            minSpanSec: Long = MIN_VIEWPORT_SPAN_SEC
+        ): Pair<Long, Long> {
+            val safeTripEnd = max(tripStartSec + STEP_SEC, tripEndSec)
+            val tripSpan = safeTripEnd - tripStartSec
+            val alignedMinReq = ((minSpanSec.toDouble() / STEP_SEC.toDouble()).roundToLong() * STEP_SEC)
+            val effectiveMinSpan = min(tripSpan, max(STEP_SEC, alignedMinReq))
+            val rawSpan = (reqEndSec - reqStartSec).coerceIn(effectiveMinSpan, tripSpan)
+            val alignedSpan = (((rawSpan.toDouble() / STEP_SEC.toDouble()).roundToLong()) * STEP_SEC)
+                .coerceIn(effectiveMinSpan, tripSpan)
+            if (alignedSpan >= tripSpan) {
+                return tripStartSec to safeTripEnd
+            }
+            val offsetFromTripStart = ((reqStartSec - tripStartSec).toDouble() / STEP_SEC.toDouble()).roundToLong() * STEP_SEC
+            val maxStart = safeTripEnd - alignedSpan
+            val start = (tripStartSec + offsetFromTripStart).coerceIn(tripStartSec, maxStart)
+            return start to (start + alignedSpan)
+        }
+
+        /**
+         * Zooms the current viewport `[curStartSec, curEndSec]` by [scaleFactor] (> 1 zooms in,
+         * < 1 zooms out) while keeping the timestamp at [anchorRatio] stationary before edge clamping.
+         */
+        fun zoomViewportAroundAnchor(
+            tripStartSec: Long,
+            tripEndSec: Long,
+            curStartSec: Long,
+            curEndSec: Long,
+            scaleFactor: Float,
+            anchorRatio: Float,
+            minSpanSec: Long = MIN_VIEWPORT_SPAN_SEC
+        ): Pair<Long, Long> {
+            val curSpan = max(STEP_SEC, curEndSec - curStartSec).toDouble()
+            val safeScale = scaleFactor.coerceIn(1f / MAX_ZOOM_FACTOR, MAX_ZOOM_FACTOR).toDouble()
+            val safeRatio = anchorRatio.coerceIn(0f, 1f).toDouble()
+            val anchorTs = curStartSec.toDouble() + safeRatio * curSpan
+            val newSpan = curSpan / safeScale
+            val reqStart = (anchorTs - safeRatio * newSpan).roundToLong()
+            val reqEnd = reqStart + newSpan.roundToLong()
+            return clampViewport(tripStartSec, tripEndSec, reqStart, reqEnd, minSpanSec)
+        }
+
+        /**
+         * Shifts the current viewport `[curStartSec, curEndSec]` by [deltaSec] snapped to the 15-second
+         * grid while preserving the exact viewport span inside `[tripStartSec, tripEndSec]`.
+         */
+        fun panViewportByDeltaSec(
+            tripStartSec: Long,
+            tripEndSec: Long,
+            curStartSec: Long,
+            curEndSec: Long,
+            deltaSec: Long
+        ): Pair<Long, Long> {
+            val safeTripEnd = max(tripStartSec + STEP_SEC, tripEndSec)
+            val tripSpan = safeTripEnd - tripStartSec
+            val span = max(STEP_SEC, curEndSec - curStartSec).coerceAtMost(tripSpan)
+            val alignedDelta = (deltaSec.toDouble() / STEP_SEC.toDouble()).roundToLong() * STEP_SEC
+            val maxStart = max(tripStartSec, safeTripEnd - span)
+            val newStart = (curStartSec + alignedDelta).coerceIn(tripStartSec, maxStart)
+            return newStart to (newStart + span)
+        }
+
+        /**
+         * Ensures [targetTs] sits comfortably within `[curStartSec, curEndSec]` with [marginRatio]
+         * edge headroom. Leaves the viewport untouched if [targetTs] is already inside the safe interior.
+         */
+        fun ensureTimestampVisible(
+            tripStartSec: Long,
+            tripEndSec: Long,
+            curStartSec: Long,
+            curEndSec: Long,
+            targetTs: Long,
+            marginRatio: Float = DEFAULT_VISIBLE_MARGIN_RATIO,
+            centerIfOutside: Boolean = false
+        ): Pair<Long, Long> {
+            val span = max(STEP_SEC, curEndSec - curStartSec)
+            val safeMarginRatio = marginRatio.coerceIn(0f, MAX_VISIBLE_MARGIN_RATIO)
+            val marginSec = ((span * safeMarginRatio).toDouble() / STEP_SEC.toDouble()).roundToLong() * STEP_SEC
+            val innerStart = curStartSec + marginSec
+            val innerEnd = curEndSec - marginSec
+            if (innerStart <= innerEnd && targetTs in innerStart..innerEnd) {
+                return curStartSec to curEndSec
+            }
+            val reqStart = if (centerIfOutside) {
+                targetTs - span / 2L
+            } else if (targetTs < innerStart) {
+                targetTs - marginSec
+            } else {
+                targetTs - (span - marginSec)
+            }
+            return clampViewport(tripStartSec, tripEndSec, reqStart, reqStart + span)
+        }
+
+        /**
+         * Computes a zoomed viewport framing `[sliceStartSec, sliceEndSec]` with [paddingRatio] margin
+         * (at least 30s) on both sides so adjacent dividers remain visible and draggable.
+         */
+        fun computeSegmentFocusViewport(
+            tripStartSec: Long,
+            tripEndSec: Long,
+            sliceStartSec: Long,
+            sliceEndSec: Long,
+            paddingRatio: Float = DEFAULT_SEGMENT_FOCUS_PADDING_RATIO,
+            minSpanSec: Long = MIN_VIEWPORT_SPAN_SEC
+        ): Pair<Long, Long> {
+            val sliceSpan = max(STEP_SEC, sliceEndSec - sliceStartSec)
+            val padSec = max(
+                MIN_SEGMENT_FOCUS_PADDING_SEC,
+                ((sliceSpan * paddingRatio.coerceAtLeast(0f)).toDouble() / STEP_SEC.toDouble()).roundToLong() * STEP_SEC
+            )
+            var reqStart = sliceStartSec - padSec
+            var reqEnd = sliceEndSec + padSec
+            if (reqEnd - reqStart < minSpanSec) {
+                val mid = (sliceStartSec + sliceEndSec) / 2L
+                val half = minSpanSec / 2L
+                reqStart = mid - half
+                reqEnd = reqStart + minSpanSec
+            }
+            return clampViewport(tripStartSec, tripEndSec, reqStart, reqEnd, minSpanSec)
+        }
+
         /**
          * Given two raw curve Y coordinates [yA] and [yB] within a pane bounded by [minY]..[maxY],
          * returns adjusted badge center Y coordinates `(labelYA, labelYB)` guaranteed to stay
