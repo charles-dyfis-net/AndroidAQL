@@ -99,6 +99,14 @@ The **Qingping Air Monitor Lite (`CGDN1`)** packs research-grade environmental s
 ./gradlew test assembleDebug
 ```
 
+Android instrumentation tests (SQLite schema migrations, ring rotation, timeline notes, ART XML/XLSX parsing, and `FileProvider` export checks) run on a headless API 35 AOSP ATD emulator via Gradle Managed Devices without prior local AVD setup (first run downloads the ATD system image and caches its snapshot):
+
+```bash
+./gradlew pixel6Api35DebugAndroidTest
+```
+
+Or run the same suite against a USB-attached phone with `./gradlew connectedDebugAndroidTest`.
+
 Host-side OOXML validation of generated and bundled `.xlsx` workbooks uses [`openxml-audit`](https://pypi.org/project/openxml-audit/) (run automatically during `./gradlew test` when `openxml-audit` or `uvx` is available, or manually via [`./scripts/validate-xlsx`](scripts/validate-xlsx)).
 
 Debug-only screenshot capture automation (requires `adb`, `ffmpeg`, and a connected Android device or emulator; safely backs up and restores live app data afterward):

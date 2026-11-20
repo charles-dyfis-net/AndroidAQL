@@ -2100,4 +2100,74 @@ class AqlCoreEngineTest {
             tmpDir.deleteRecursively()
         }
     }
+
+    @Test
+    fun testParseXmlDocumentNamespacesEntitiesBomMalformedAndXxeSafety() {
+        val nsDocXml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                      xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+                <sheets>
+                    <sheet name="Morning &amp; Noon" sheetId="1" r:id="rId1"/>
+                    <sheet name="Clinic Visit" sheetId="2" r:id="rId2"/>
+                </sheets>
+            </workbook>""".trimIndent()
+        val nsDoc = XlsxWorkbook.parseXmlDocument(nsDocXml.toByteArray(Charsets.UTF_8))
+        val sheets = nsDoc.getElementsByTagNameNS("*", "sheet")
+        assertEquals(2, sheets.length)
+        val firstSheet = sheets.item(0) as org.w3c.dom.Element
+        assertEquals("Morning & Noon", firstSheet.getAttribute("name"))
+        assertEquals(
+            "rId1",
+            firstSheet.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id")
+        )
+        val secondSheet = sheets.item(1) as org.w3c.dom.Element
+        assertEquals(
+            "rId2",
+            secondSheet.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id")
+        )
+
+        val bom = byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte())
+        val richXml = """<?xml version="1.0" encoding="UTF-8"?>
+            <!-- top comment -->
+            <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                <si><t xml:space="preserve">  &amp;&lt;&gt;&quot;&apos;&#10;&#x1F4CD; literal: 📍  </t></si>
+                <si><t><![CDATA[a < b & c]]></t></si>
+            </sst>""".trimIndent()
+        val richDoc = XlsxWorkbook.parseXmlDocument(bom + richXml.toByteArray(Charsets.UTF_8))
+        val textNodes = richDoc.getElementsByTagNameNS("*", "t")
+        assertEquals(2, textNodes.length)
+        assertEquals(
+            "  &<>\"'\n📍 literal: 📍  ",
+            textNodes.item(0).textContent
+        )
+        assertEquals("a < b & c", textNodes.item(1).textContent)
+
+        val invalidPayloads = listOf(
+            ByteArray(0),
+            "<root><unclosed>".toByteArray(Charsets.UTF_8),
+            """<?xml version="1.0" encoding="UTF-8"?><workbook><sheets><sheet""".toByteArray(Charsets.UTF_8)
+        )
+        for (bad in invalidPayloads) {
+            val threw = runCatching { XlsxWorkbook.parseXmlDocument(bad) }.isFailure
+            assertTrue("Malformed/empty XML must fail parsing", threw)
+        }
+
+        val secretPath = Files.createTempFile("aql_xxe_probe_", ".txt")
+        try {
+            Files.write(secretPath, "XXE_SECRET_TOKEN_12345".toByteArray(Charsets.UTF_8))
+            val xxeXml = """<?xml version="1.0" encoding="UTF-8"?>
+                <!DOCTYPE root [
+                    <!ENTITY ext SYSTEM "${secretPath.toUri().toASCIIString()}">
+                ]>
+                <root>&ext;</root>""".trimIndent()
+            val xxeOutcome = runCatching { XlsxWorkbook.parseXmlDocument(xxeXml.toByteArray(Charsets.UTF_8)) }
+            val leaked = xxeOutcome.getOrNull()?.documentElement?.textContent.orEmpty()
+            assertFalse(
+                "External entity must not leak local file contents",
+                leaked.contains("XXE_SECRET_TOKEN_12345")
+            )
+        } finally {
+            Files.deleteIfExists(secretPath)
+        }
+    }
 }
