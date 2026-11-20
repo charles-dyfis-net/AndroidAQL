@@ -28,6 +28,7 @@
     <!-- Companion Device Presence Association -->
     <uses-feature android:name="android.software.companion_device_setup" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+    <uses-feature android:name="android.hardware.wifi" android:required="false" />
 
     <application
         android:allowBackup="true"
