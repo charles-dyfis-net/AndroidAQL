@@ -1,11 +1,14 @@
 package io.github.androidaql.export
 
+import org.w3c.dom.Document
 import org.w3c.dom.Element
 import org.w3c.dom.Node
+import org.xml.sax.InputSource
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.StringReader
 import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
@@ -16,9 +19,9 @@ import javax.xml.parsers.DocumentBuilderFactory
  * Zero-dependency pure-Kotlin OOXML (`.xlsx`) workbook reader and writer backed by Android's
  * standard `java.util.zip` and `javax.xml.parsers` APIs.
  *
- * Writes `t="inlineStr"` strings, unquoted decimal numbers, booleans, and frozen bold header rows;
- * reads both `inlineStr` and `xl/sharedStrings.xml` workbooks produced by Excel, Google Sheets,
- * LibreOffice Calc, Apple Numbers, or Python/pandas.
+ * Writes `xl/sharedStrings.xml` (`t="s"`), `xl/theme/theme1.xml`, unquoted decimal numbers,
+ * booleans, and frozen bold header rows; reads both `inlineStr` and `xl/sharedStrings.xml`
+ * workbooks produced by Excel, Google Sheets, LibreOffice Calc, Apple Numbers, or Python/pandas.
  */
 object XlsxWorkbook {
 
@@ -427,15 +430,17 @@ object XlsxWorkbook {
         return sb.toString()
     }
 
-    private fun parseXmlDocument(bytes: ByteArray) = DocumentBuilderFactory.newInstance().apply {
+    fun parseXmlDocument(bytes: ByteArray): Document = DocumentBuilderFactory.newInstance().apply {
         isNamespaceAware = true
-        isExpandEntityReferences = false
-        isXIncludeAware = false
+        runCatching { isExpandEntityReferences = false }
+        runCatching { isXIncludeAware = false }
         runCatching { setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) }
         runCatching { setFeature("http://xml.org/sax/features/external-general-entities", false) }
         runCatching { setFeature("http://xml.org/sax/features/external-parameter-entities", false) }
         runCatching { setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false) }
-    }.newDocumentBuilder().parse(ByteArrayInputStream(bytes))
+    }.newDocumentBuilder().apply {
+        setEntityResolver { _, _ -> InputSource(StringReader("")) }
+    }.parse(ByteArrayInputStream(bytes))
 
     private fun localNameOf(node: Node): String =
         node.localName ?: node.nodeName.substringAfter(':')
