@@ -82,6 +82,7 @@ The **Qingping Air Monitor Lite (`CGDN1`)** packs research-grade environmental s
 
 ## Documentation
 
+* **[Frequently Asked Questions (FAQ)](docs/FAQ.md)** — Testing without hardware (**Demo Data Mode**), why `AirSlice` records direct BLE instead of vendor cloud, measuring CO₂ + PM2.5 together, permissions/privacy, ESPHome firmware, and community links.
 * **[How Trips, Segments, and Splits Work](docs/trip_slicing_guide.md)** — End-user guide with screenshots explaining segments (`#1`, `#2`, ...), shared dividers (`⇔ 1|2`), Overview Minimap zooming/panning, splitting, nudging, labeling, merging, permanent pinning, zero-scroll landscape mode, and XLSX export/import.
 * **[How Your Monitor Works with `AirSlice`](docs/how_cgdn1_works.md)** — Conceptual guide for curious users covering sensors inside the `CGDN1`, battery runtime, Setup Mode vs. Normal Mode, 5-second offline setup, fallback settings, and ESPHome support.
 * **[Upstream ESPHome Firmware (`nemethhh/esphome-qingping-cgdn1`, `main` ≥ `26642dcb`)](https://github.com/nemethhh/esphome-qingping-cgdn1)** — Compile `main` (commit [`26642dcb3d324e5619563279f77eef4a0f239d46`](https://github.com/nemethhh/esphome-qingping-cgdn1/commit/26642dcb3d324e5619563279f77eef4a0f239d46) / 2026-11-17 or newer) with `-s bthome true` (and optionally `-s portable true`) for passive BTHome v2 (`0xFCD2`) BLE broadcasts tuned for portable `AirSlice` use.

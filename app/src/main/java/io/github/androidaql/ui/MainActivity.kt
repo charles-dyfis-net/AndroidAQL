@@ -13,6 +13,7 @@ import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.os.IBinder
 import android.text.Editable
@@ -87,6 +88,7 @@ class MainActivity : AppCompatActivity() {
     private var pendingScreenshotPreset: String? = null
     private var activeSegmentModalDialog: AlertDialog? = null
     private var activeDisclosureDialog: AlertDialog? = null
+    private var activeHelpDialog: AlertDialog? = null
 
     private lateinit var topHeaderBar: LinearLayout
     private lateinit var bottomNavBar: LinearLayout
@@ -337,6 +339,8 @@ class MainActivity : AppCompatActivity() {
         activeSegmentModalDialog = null
         activeDisclosureDialog?.dismiss()
         activeDisclosureDialog = null
+        activeHelpDialog?.dismiss()
+        activeHelpDialog = null
         if (isBound) {
             collectorService?.removeListener(serviceListener)
             unbindService(serviceConnection)
@@ -375,6 +379,8 @@ class MainActivity : AppCompatActivity() {
         activeSegmentModalDialog = null
         activeDisclosureDialog?.dismiss()
         activeDisclosureDialog = null
+        activeHelpDialog?.dismiss()
+        activeHelpDialog = null
 
         fun prepareDemoExcursion(reseed: Boolean): Long {
             if (svc.metadataDb.getKnownPlaces().isEmpty()) {
@@ -684,6 +690,16 @@ class MainActivity : AppCompatActivity() {
             setTypeface(typeface, Typeface.BOLD)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
+        val helpBtn = Button(this).apply {
+            text = "❓ Help"
+            isAllCaps = false
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { marginEnd = dp(6) }
+            setOnClickListener { showHelpDialog() }
+        }
         val settingsBtn = Button(this).apply {
             text = "⚙️ Settings"
             isAllCaps = false
@@ -691,6 +707,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { showSettingsModal() }
         }
         topHeaderBar.addView(titleView)
+        topHeaderBar.addView(helpBtn)
         topHeaderBar.addView(settingsBtn)
         root.addView(topHeaderBar)
 
@@ -815,7 +832,7 @@ class MainActivity : AppCompatActivity() {
             setTypeface(typeface, Typeface.BOLD)
         }
         co2VentilationBadgeView = TextView(this).apply {
-            text = "Hold down the top touchbar on your Qingping Air Monitor Lite until the Wi-Fi icon displays to begin."
+            text = "Hold down the top touchbar on your Qingping Air Monitor Lite until the Wi-Fi icon displays to begin.\n\nNo monitor handy? Tap ❓ Help above to enable Demo Data Mode or read the FAQ."
             setTextColor(Color.parseColor("#CBD5E1"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
         }
@@ -3033,6 +3050,14 @@ class MainActivity : AppCompatActivity() {
         }
         col.addView(diagHeader)
 
+        val helpFaqBtn = Button(this).apply {
+            text = "❓ Help, FAQ & User Guides"
+            isAllCaps = false
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setOnClickListener { showHelpDialog() }
+        }
+        col.addView(helpFaqBtn)
+
         val shareLogBtn = Button(this).apply {
             text = "📤 Share Diagnostic Log (JSONL)"
             isAllCaps = false
@@ -3147,6 +3172,95 @@ class MainActivity : AppCompatActivity() {
                 dualPaneSlicerView.invalidate()
                 liveRecentHistoryView.invalidate()
             }
+            .show()
+    }
+
+    private fun openExternalUrl(url: String) {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        runCatching {
+            startActivity(intent)
+        }.onFailure {
+            Toast.makeText(this, "No browser available to open $url", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun showHelpDialog() {
+        val scroll = ScrollView(this)
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(14), dp(20), dp(10))
+        }
+
+        val introView = TextView(this).apply {
+            text = buildString {
+                append("AirSlice is a 100% local, cloud-free Bluetooth companion and Trip Slicer for the Qingping Air Monitor Lite (CGDN1) and compatible BTHome v2 sensors.\n\n")
+                append("• With a CGDN1 Monitor: Turn on the monitor (or hold its top touchbar ~7s until the Wi-Fi icon appears if unconfigured). AirSlice completes offline Bluetooth setup in ~5s and records continuously—no cloud or account needed.\n\n")
+                append("• No Monitor Handy? (Testing & Evaluation): Enable Demo Data Mode below to unlock a simulated live sensor stream on the Now tab and a sample multi-leg excursion on the Trips tab. You can also import shared .xlsx trip files.")
+            }
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+        }
+        col.addView(introView)
+
+        val demoActionBtn = Button(this).apply {
+            isAllCaps = false
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(12) }
+            fun syncLabel() {
+                text = if (isDemoDataEnabled()) {
+                    "✅ Demo Data Mode Enabled (Tap to Turn Off)"
+                } else {
+                    "🎭 Enable Demo Data Mode (No Hardware Needed)"
+                }
+            }
+            syncLabel()
+            setOnClickListener {
+                val nextEnabled = !isDemoDataEnabled()
+                setDemoDataEnabled(nextEnabled)
+                refreshTripsTab()
+                syncLabel()
+                val msg = if (nextEnabled) {
+                    "Demo Data Mode enabled! Try 'Toggle Live Demo Replay Stream' on Now or 'Load Canned Demo Trip' on Trips."
+                } else {
+                    "Demo Data Mode disabled."
+                }
+                Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
+            }
+        }
+        col.addView(demoActionBtn)
+
+        val linkHeader = TextView(this).apply {
+            text = "Documentation & Community (Opens in Browser)"
+            setTypeface(typeface, Typeface.BOLD)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setPadding(0, dp(14), 0, dp(4))
+        }
+        col.addView(linkHeader)
+
+        val links = listOf(
+            "📖 Frequently Asked Questions (FAQ)" to FAQ_DOC_URL,
+            "🗺️ How Trips, Segments, and Splits Work" to SLICING_GUIDE_URL,
+            "📡 How Your CGDN1 Monitor Works" to HARDWARE_GUIDE_URL,
+            "💬 androidaql-users Group (Google Groups)" to USERS_GROUP_URL
+        )
+        for ((label, url) in links) {
+            val btn = Button(this).apply {
+                text = label
+                isAllCaps = false
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+                setOnClickListener { openExternalUrl(url) }
+            }
+            col.addView(btn)
+        }
+
+        scroll.addView(col)
+        activeHelpDialog?.dismiss()
+        activeHelpDialog = AlertDialog.Builder(this)
+            .setTitle("❓ AirSlice Help & FAQ")
+            .setView(scroll)
+            .setPositiveButton("Close", null)
             .show()
     }
 
@@ -4038,6 +4152,10 @@ class MainActivity : AppCompatActivity() {
         const val COLOR_ZOOM_STATUS_IDLE_HEX = "#94A3B8"
         const val DEFAULT_RETENTION_WINDOW_SEC = 14L * 86_400L
         val WIFI_LOSS_DEBOUNCE_OPTIONS_SEC = listOf(0L, 15L, 30L, 60L)
+        const val FAQ_DOC_URL = "https://github.com/charles-dyfis-net/AndroidAQL/blob/main/docs/FAQ.md"
+        const val SLICING_GUIDE_URL = "https://github.com/charles-dyfis-net/AndroidAQL/blob/main/docs/trip_slicing_guide.md"
+        const val HARDWARE_GUIDE_URL = "https://github.com/charles-dyfis-net/AndroidAQL/blob/main/docs/how_cgdn1_works.md"
+        const val USERS_GROUP_URL = "https://groups.google.com/g/androidaql-users"
 
         fun formatElapsedAge(ageSec: Long): String = when {
             ageSec < 60L -> "${ageSec}s"
