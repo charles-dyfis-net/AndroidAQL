@@ -1663,7 +1663,7 @@ class AqlCoreEngineTest {
         assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tRecover.currentState)
         assertFalse(sm.isPendingWifiLossDebounce)
 
-        // Real departure: Wi-Fi stays dropped across 30s threshold -> confirms excursion back-dated to 1100L
+        // Real departure: Wi-Fi stays dropped across 30s threshold with BLE still present -> confirms excursion back-dated to 1100L
         sm.onBleAdvertisement(1095L, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
         val tDrop2 = sm.onWifiContextChanged(1100L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
         assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tDrop2.currentState)
@@ -1672,7 +1672,7 @@ class AqlCoreEngineTest {
         assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tBefore.currentState)
         assertFalse(tBefore.startedNewExcursion)
 
-        val tConfirm = sm.onTimerTick(1130L)
+        val tConfirm = sm.onBleAdvertisement(1130L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
         assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, tConfirm.currentState)
         assertTrue(tConfirm.startedNewExcursion)
         assertTrue(tConfirm.shouldRunGps)
@@ -1759,6 +1759,163 @@ class AqlCoreEngineTest {
             SessionSliceRecord(2L, 10L, baseStart + 30L, end60, true, MetadataDatabase.DEFAULT_SLICE_LABEL, "")
         )
         assertFalse(MetadataDatabase.isAutoDiscardableBlip(autoExc(60L), splitSlices, end60 + 200L))
+    }
+
+    @Test
+    fun testLeavingSavedWifiWithoutMonitorDoesNotStartGhostExcursion() {
+        val sm = ExcursionStateMachine(
+            gpsPauseTimeoutSec = 90L,
+            excursionCloseTimeoutSec = 2700L,
+            wifiLossDebounceSec = 30L
+        )
+        // Stationary at Home with monitor broadcasting at 08:20:00
+        val t0 = 1_795_184_400L
+        val tHome = sm.onBleAdvertisement(t0, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tHome.currentState)
+
+        // Leave Home Wi-Fi at 08:20:32 without the monitor (even with one stray porch packet at +8s)
+        val tWifiDrop = t0 + 32L
+        val tDrop = sm.onWifiContextChanged(tWifiDrop, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tDrop.currentState)
+        assertFalse(tDrop.startedNewExcursion)
+
+        val tPorch = sm.onBleAdvertisement(tWifiDrop + 8L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tPorch.currentState)
+        assertFalse(tPorch.startedNewExcursion)
+
+        // 30s debounce elapses at 08:21:02, but no post-debounce BLE packet arrived -> must NOT start ghost trip
+        val tDebounce = sm.onTimerTick(tWifiDrop + 30L)
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tDebounce.currentState)
+        assertFalse(tDebounce.startedNewExcursion)
+        assertFalse(tDebounce.shouldRunGps)
+
+        // Once BLE freshness expires (>90s after stray porch packet), transitions cleanly to IDLE_OUT_OF_RANGE
+        val tIdle = sm.onTimerTick(tWifiDrop + 8L + 91L)
+        assertEquals(ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE, tIdle.currentState)
+        assertFalse(tIdle.startedNewExcursion)
+
+        // Returning home 20m later: BLE seen 7s before Wi-Fi reconnects -> starts at return time, NOT 08:20:32
+        val tReturnBle = tWifiDrop + 1198L
+        val tReturnStart = sm.onBleAdvertisement(tReturnBle, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, tReturnStart.currentState)
+        assertTrue(tReturnStart.startedNewExcursion)
+        assertEquals(tReturnBle, tReturnStart.startedExcursionStartEpochSec)
+
+        val tReturnWifi = sm.onWifiContextChanged(tReturnBle + 7L, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, tReturnWifi.currentState)
+        assertTrue(tReturnWifi.closedExcursion)
+        assertEquals(tReturnBle + 7L, tReturnWifi.closedExcursionEndEpochSec)
+    }
+
+    @Test
+    fun testClosingFromSignalPausedClampsEndToLastBlePacket() {
+        val sm = ExcursionStateMachine(
+            gpsPauseTimeoutSec = 90L,
+            excursionCloseTimeoutSec = 2700L,
+            wifiLossDebounceSec = 0L
+        )
+        // Start excursion away from home and receive BLE for 10 minutes (1000..1600)
+        val tStart = sm.onBleAdvertisement(1000L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        assertTrue(tStart.startedNewExcursion)
+        sm.onBleAdvertisement(1600L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+
+        // BLE stops -> enters FIELD_EXCURSION_SIGNAL_PAUSED at 1691
+        val tPaused = sm.onTimerTick(1691L)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED, tPaused.currentState)
+        assertFalse(tPaused.closedExcursion)
+
+        // Reconnect to Saved Wi-Fi 15 minutes later (2500) -> closes with end clamped to last BLE (1600), not 2500
+        val tCloseWifi = sm.onWifiContextChanged(2500L, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE, tCloseWifi.currentState)
+        assertTrue(tCloseWifi.closedExcursion)
+        assertEquals(1600L, tCloseWifi.closedExcursionEndEpochSec)
+
+        // Same clamping on 45-minute signal-paused timeout close
+        val smTimeout = ExcursionStateMachine(
+            gpsPauseTimeoutSec = 90L,
+            excursionCloseTimeoutSec = 2700L,
+            wifiLossDebounceSec = 0L
+        )
+        smTimeout.onBleAdvertisement(1000L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        smTimeout.onBleAdvertisement(1600L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED, smTimeout.onTimerTick(1691L).currentState)
+        val tTimeoutClose = smTimeout.onTimerTick(1600L + 2701L)
+        assertEquals(ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE, tTimeoutClose.currentState)
+        assertTrue(tTimeoutClose.closedExcursion)
+        assertEquals(1600L, tTimeoutClose.closedExcursionEndEpochSec)
+    }
+
+    @Test
+    fun testAutoDiscardBlipPrunesSparseSignalPausedGhostTrips() {
+        val start = 1_795_184_432L
+        val end = 1_795_185_637L // 20m 5s (1205s) wall-clock span
+        val ghostExc = ExcursionRecord(
+            id = 15L,
+            deviceId = 1L,
+            startEpochSec = start,
+            endEpochSec = end,
+            isPinned = false,
+            title = "Trip (Nov 20, 8:20 AM)",
+            notes = "",
+            isManual = false
+        )
+        val untouched = listOf(
+            SessionSliceRecord(18L, 15L, start, end, true, MetadataDatabase.DEFAULT_SLICE_LABEL, "")
+        )
+        val afterGrace = end + 120L
+
+        // Exact reported profile: 20m 5s wall-clock span, 1 single 15s bucket at the end -> discarded
+        assertTrue(
+            MetadataDatabase.isAutoDiscardableBlip(
+                excursion = ghostExc,
+                slices = untouched,
+                nowEpochSec = afterGrace,
+                recordedSampleSpanSec = 15L,
+                recordedSlotCount = 1
+            )
+        )
+
+        // Sparse 2-slot ghost (1 slot at start + 1 slot at end across 20m gap) -> discarded
+        assertTrue(
+            MetadataDatabase.isAutoDiscardableBlip(
+                excursion = ghostExc,
+                slices = untouched,
+                nowEpochSec = afterGrace,
+                recordedSampleSpanSec = 1205L,
+                recordedSlotCount = 2
+            )
+        )
+
+        // Genuine trip with >= 3m recorded sample span and >= 3 slots -> kept
+        assertFalse(
+            MetadataDatabase.isAutoDiscardableBlip(
+                excursion = ghostExc,
+                slices = untouched,
+                nowEpochSec = afterGrace,
+                recordedSampleSpanSec = 600L,
+                recordedSlotCount = 40
+            )
+        )
+
+        // Pinned / manual / renamed ghost trips remain protected
+        assertFalse(
+            MetadataDatabase.isAutoDiscardableBlip(
+                excursion = ghostExc.copy(isPinned = true),
+                slices = untouched,
+                nowEpochSec = afterGrace,
+                recordedSampleSpanSec = 15L,
+                recordedSlotCount = 1
+            )
+        )
+        assertFalse(
+            MetadataDatabase.isAutoDiscardableBlip(
+                excursion = ghostExc.copy(isManual = true),
+                slices = untouched,
+                nowEpochSec = afterGrace,
+                recordedSampleSpanSec = 15L,
+                recordedSlotCount = 1
+            )
+        )
     }
 
     @Test

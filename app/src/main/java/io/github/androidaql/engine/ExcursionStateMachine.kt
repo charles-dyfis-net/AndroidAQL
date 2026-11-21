@@ -31,7 +31,8 @@ class ExcursionStateMachine(
         val startedNewExcursion: Boolean,
         val closedExcursion: Boolean,
         val startedExcursionStartEpochSec: Long? = null,
-        val startedByManualOverride: Boolean = false
+        val startedByManualOverride: Boolean = false,
+        val closedExcursionEndEpochSec: Long? = null
     )
 
     var wifiLossDebounceSec: Long = wifiLossDebounceSec.coerceAtLeast(0L)
@@ -190,7 +191,8 @@ class ExcursionStateMachine(
                             CollectorState.FIELD_EXCURSION_ACTIVE
                         } else {
                             val lostSince = wifiLostSinceEpochSec ?: nowEpochSec.also { wifiLostSinceEpochSec = it }
-                            if ((nowEpochSec - lostSince) >= wifiLossDebounceSec) {
+                            val hasPostDebounceBle = lastBlePacketEpochSec >= (lostSince + wifiLossDebounceSec)
+                            if ((nowEpochSec - lostSince) >= wifiLossDebounceSec && hasPostDebounceBle) {
                                 wifiLostSinceEpochSec = null
                                 startedExcursion = true
                                 startedExcursionStartSec = lostSince
@@ -233,6 +235,16 @@ class ExcursionStateMachine(
             }
         }
 
+        val closedExcursionEndSec: Long? = if (closedExcursion) {
+            if ((prev == CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED || !isBleFresh) && lastBlePacketEpochSec >= 0L) {
+                minOf(nowEpochSec, lastBlePacketEpochSec)
+            } else {
+                nowEpochSec
+            }
+        } else {
+            null
+        }
+
         if (closedExcursion) {
             isManualExcursionOverride = false
             manualStartSuppressedPlaceId = 0
@@ -262,7 +274,8 @@ class ExcursionStateMachine(
             startedNewExcursion = startedExcursion,
             closedExcursion = closedExcursion,
             startedExcursionStartEpochSec = startedExcursionStartSec,
-            startedByManualOverride = startedByManual
+            startedByManualOverride = startedByManual,
+            closedExcursionEndEpochSec = closedExcursionEndSec
         )
     }
 

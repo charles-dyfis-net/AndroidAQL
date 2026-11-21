@@ -1322,9 +1322,10 @@ class AqlCollectorService : Service() {
                 lastPeriodicGattPokeMs = 0L
             }
         } else if (transition.closedExcursion && activeExcursionId != null) {
+            val closeEndSec = transition.closedExcursionEndEpochSec ?: nowEpochSec
             metadataDb.updateOngoingExcursionEnd(
                 activeExcursionId!!,
-                nowEpochSec,
+                closeEndSec,
                 closeExcursion = true,
                 ringStore = ringStore
             )

@@ -565,15 +565,23 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
                 val duration = endSec - exc.startEpochSec
                 val hasNotes = getTimelineNotesInRange(exc.startEpochSec, endSec).isNotEmpty()
                 if (!exc.isPinned) {
+                    val ringSlots = ringStore.queryRange(0, exc.startEpochSec, endSec)
+                    val recordedSampleSpanSec = if (ringSlots.isEmpty()) {
+                        0L
+                    } else {
+                        (ringSlots.last().bucketEpochSec - ringSlots.first().bucketEpochSec) + 15L
+                    }
                     val closedBlip = isAutoDiscardableBlip(
                         excursion = exc,
                         slices = getSlicesForExcursion(exc.id),
                         nowEpochSec = nowSec,
-                        hasTimelineNotes = hasNotes
+                        hasTimelineNotes = hasNotes,
+                        recordedSampleSpanSec = recordedSampleSpanSec,
+                        recordedSlotCount = ringSlots.size
                     )
                     val expiredByClock = (nowSec - endSec) > retentionWindowSec
                     val rotatedOutOfRing = (nowSec - endSec) > MICRO_EXCURSION_COALESCE_GAP_SEC &&
-                        ringStore.queryRange(0, exc.startEpochSec, endSec).isEmpty()
+                        ringSlots.isEmpty()
                     if (closedBlip || expiredByClock || rotatedOutOfRing) {
                         deleteExcursion(exc.id)
                         continue
@@ -601,8 +609,13 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
         ringStore: AqlRingBufferStore? = null
     ) {
         val db = writableDatabase
+        val excStartSec = readableDatabase.rawQuery(
+            "SELECT start_epoch_sec FROM excursion WHERE id = ? LIMIT 1",
+            arrayOf(excursionId.toString())
+        ).use { c -> if (c.moveToFirst()) c.getLong(0) else latestEpochSec }
+        val clampedEndSec = maxOf(excStartSec, latestEpochSec)
         if (closeExcursion) {
-            val cv = ContentValues().apply { put("end_epoch_sec", latestEpochSec) }
+            val cv = ContentValues().apply { put("end_epoch_sec", clampedEndSec) }
             db.update("excursion", cv, "id = ?", arrayOf(excursionId.toString()))
         }
         // Extend the final slice of this excursion so the partition remains contiguous
@@ -613,8 +626,8 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
             if (c.moveToFirst()) {
                 val sliceId = c.getLong(0)
                 val startSec = c.getLong(1)
-                if (latestEpochSec >= startSec) {
-                    val sliceCv = ContentValues().apply { put("end_epoch_sec", latestEpochSec) }
+                if (clampedEndSec >= startSec) {
+                    val sliceCv = ContentValues().apply { put("end_epoch_sec", clampedEndSec) }
                     db.update("session_slice", sliceCv, "id = ?", arrayOf(sliceId.toString()))
                 }
             }
@@ -1157,25 +1170,36 @@ class MetadataDatabase(context: Context, dbName: String = DB_NAME) :
         const val DB_VERSION = 3
         const val MICRO_EXCURSION_COALESCE_GAP_SEC = 90L
         const val AUTO_TRIP_MIN_DURATION_SEC = 180L
+        const val AUTO_TRIP_MIN_RECORDED_SLOTS = 3
         const val AUTO_TRIP_TITLE_PREFIX = "Trip ("
         const val DEFAULT_SLICE_LABEL = "Unlabeled Trip Span"
         const val DEFAULT_QUICK_NOTE_TEXT = "📍 Marker"
 
         /**
          * Returns true when a closed auto-recorded excursion is safe to discard as a momentary
-         * Wi-Fi dropout: unpinned, not manually started/carved, shorter than 3 minutes, past the
-         * 90-second coalesce grace window, and untouched by user edits or timeline notes.
+         * Wi-Fi dropout or signal-paused ghost trip: unpinned, not manually started/carved,
+         * shorter than 3 minutes (by wall-clock duration or actual recorded sample span, or with
+         * fewer than 3 distinct 15s buckets), past the 90-second coalesce grace window, and
+         * untouched by user edits or timeline notes.
          */
         fun isAutoDiscardableBlip(
             excursion: ExcursionRecord,
             slices: List<SessionSliceRecord>,
             nowEpochSec: Long,
-            hasTimelineNotes: Boolean = false
+            hasTimelineNotes: Boolean = false,
+            recordedSampleSpanSec: Long? = null,
+            recordedSlotCount: Int? = null
         ): Boolean {
             if (excursion.isPinned || excursion.isManual || hasTimelineNotes) return false
             val endSec = excursion.endEpochSec ?: return false
-            val durationSec = (endSec - excursion.startEpochSec).coerceAtLeast(0L)
-            if (durationSec >= AUTO_TRIP_MIN_DURATION_SEC) return false
+            val wallDurationSec = (endSec - excursion.startEpochSec).coerceAtLeast(0L)
+            val effectiveDurationSec = if (recordedSampleSpanSec != null) {
+                minOf(wallDurationSec, recordedSampleSpanSec.coerceAtLeast(0L))
+            } else {
+                wallDurationSec
+            }
+            val sparseGhost = recordedSlotCount != null && recordedSlotCount < AUTO_TRIP_MIN_RECORDED_SLOTS
+            if (effectiveDurationSec >= AUTO_TRIP_MIN_DURATION_SEC && !sparseGhost) return false
             if ((nowEpochSec - endSec) <= MICRO_EXCURSION_COALESCE_GAP_SEC) return false
             if (excursion.notes.isNotBlank() || !excursion.title.startsWith(AUTO_TRIP_TITLE_PREFIX)) return false
             if (slices.size > 1 || slices.any { it.label != DEFAULT_SLICE_LABEL || it.notes.isNotBlank() }) {
