@@ -39,21 +39,23 @@ object TemperatureUnitFormatter {
         return when (pref) {
             TempUnitPreference.FAHRENHEIT -> true
             TempUnitPreference.CELSIUS -> false
-            TempUnitPreference.AUTO_DEVICE -> {
-                val locale = context?.resources?.configuration?.locales?.get(0) ?: Locale.getDefault()
-                // 1. Check Android 14+ Regional Preferences Unicode extension (-u-mu-fahrenhe / -u-mu-celsius)
-                val muExt = runCatching { locale.getUnicodeLocaleType("mu")?.lowercase(Locale.US) }.getOrNull()
-                when {
-                    muExt != null && muExt.startsWith("fahren") -> true
-                    muExt != null && muExt.startsWith("celsi") -> false
-                    else -> {
-                        // 2. Check ICU MeasurementSystem or country fallback
-                        val isUsSystem = runCatching {
-                            LocaleData.getMeasurementSystem(ULocale.forLocale(locale)) == LocaleData.MeasurementSystem.US
-                        }.getOrDefault(false)
-                        isUsSystem || locale.country.uppercase(Locale.US) in setOf("US", "LR", "MM")
-                    }
-                }
+            TempUnitPreference.AUTO_DEVICE -> deviceUseFahrenheit(context)
+        }
+    }
+
+    fun deviceUseFahrenheit(context: Context?): Boolean {
+        val locale = context?.resources?.configuration?.locales?.get(0) ?: Locale.getDefault()
+        // 1. Check Android 14+ Regional Preferences Unicode extension (-u-mu-fahrenhe / -u-mu-celsius)
+        val muExt = runCatching { locale.getUnicodeLocaleType("mu")?.lowercase(Locale.US) }.getOrNull()
+        return when {
+            muExt != null && muExt.startsWith("fahren") -> true
+            muExt != null && muExt.startsWith("celsi") -> false
+            else -> {
+                // 2. Check ICU MeasurementSystem or country fallback
+                val isUsSystem = runCatching {
+                    LocaleData.getMeasurementSystem(ULocale.forLocale(locale)) == LocaleData.MeasurementSystem.US
+                }.getOrDefault(false)
+                isUsSystem || locale.country.uppercase(Locale.US) in setOf("US", "LR", "MM")
             }
         }
     }

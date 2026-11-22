@@ -26,7 +26,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
-import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
@@ -89,6 +88,7 @@ class MainActivity : AppCompatActivity() {
     private var activeSegmentModalDialog: AlertDialog? = null
     private var activeDisclosureDialog: AlertDialog? = null
     private var activeHelpDialog: AlertDialog? = null
+    private var activeSettingsDialog: SettingsScreenDialog? = null
 
     private lateinit var topHeaderBar: LinearLayout
     private lateinit var bottomNavBar: LinearLayout
@@ -152,6 +152,7 @@ class MainActivity : AppCompatActivity() {
         collectorService?.startBleScan()
         collectorService?.refreshWifiAndPlaceState()
         collectorService?.refreshStepSensorRegistration()
+        activeSettingsDialog?.refreshPermissionsState()
     }
 
     private fun launchXlsxImportPicker(timeShiftForDemo: Boolean) {
@@ -291,6 +292,7 @@ class MainActivity : AppCompatActivity() {
         collectorService?.refreshStepSensorRegistration()
         refreshLiveRecentGraph()
         refreshTripsTab()
+        activeSettingsDialog?.refreshPermissionsState()
         tryApplyPendingScreenshotPreset()
     }
 
@@ -335,6 +337,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        activeSettingsDialog?.dismiss()
+        activeSettingsDialog = null
         activeSegmentModalDialog?.dismiss()
         activeSegmentModalDialog = null
         activeDisclosureDialog?.dismiss()
@@ -2793,386 +2797,72 @@ class MainActivity : AppCompatActivity() {
     }
 
     // =========================================================================
-    // SETTINGS MENU MODAL (PLACES, TEMPERATURE UNITS, ALERTS, PRESETS)
+    // SETTINGS SCREEN (DISPLAY, PLACES, ALERTS, ADVANCED, HELP & PRIVACY)
     // =========================================================================
     private fun showSettingsModal() {
         val svc = collectorService ?: return
-        val scroll = ScrollView(this)
-        val col = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(14), dp(20), dp(14))
-        }
+        activeSettingsDialog?.dismiss()
+        val settingsDialog = SettingsScreenDialog(
+            context = this,
+            service = svc,
+            callbacks = object : SettingsScreenDialog.Callbacks {
+                override fun isDeveloperModeEnabled(): Boolean = this@MainActivity.isDeveloperModeEnabled()
 
-        // 1. Temperature Unit Preference
-        val tempHeader = TextView(this).apply {
-            text = "Temperature Display Unit"
-            setTypeface(typeface, Typeface.BOLD)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-        }
-        col.addView(tempHeader)
-
-        val currentPref = TemperatureUnitFormatter.getPreference(this)
-        val effectiveSym = TemperatureUnitFormatter.unitSymbol(TemperatureUnitFormatter.useFahrenheit(this))
-        val tempStatus = TextView(this).apply {
-            text = "Current: ${currentPref.displayName} → Displaying $effectiveSym"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setPadding(0, dp(2), 0, dp(6))
-        }
-        col.addView(tempStatus)
-
-        val tempPrefs = TempUnitPreference.entries
-        val tempSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@MainActivity,
-                android.R.layout.simple_spinner_dropdown_item,
-                tempPrefs.map { it.displayName }
-            )
-            setSelection(tempPrefs.indexOf(currentPref).coerceAtLeast(0))
-        }
-        col.addView(tempSpinner)
-
-        // 2. Monitor Keep-Alive Mode (>30m Unplugged)
-        val keepAliveHeader = TextView(this).apply {
-            text = "Monitor Keep-Alive Mode (>30m Unplugged)"
-            setTypeface(typeface, Typeface.BOLD)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            setPadding(0, dp(14), 0, dp(4))
-        }
-        col.addView(keepAliveHeader)
-
-        val currentKeepAliveStrategy = svc.devConfig.strategy
-        val keepAliveChoices = buildList {
-            addAll(AqlCollectorService.KeepAlivePayloadStrategy.userAccessibleStrategies)
-            if (currentKeepAliveStrategy !in this) {
-                add(currentKeepAliveStrategy)
-            }
-        }
-        val keepAliveDescView = TextView(this).apply {
-            text = currentKeepAliveStrategy.settingsDescription
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(0, dp(4), 0, dp(4))
-        }
-        val keepAliveSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@MainActivity,
-                android.R.layout.simple_spinner_dropdown_item,
-                keepAliveChoices.map { it.settingsTitle }
-            )
-            setSelection(keepAliveChoices.indexOf(currentKeepAliveStrategy).coerceAtLeast(0))
-            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                    keepAliveDescView.text = keepAliveChoices[position].settingsDescription
+                override fun setDeveloperModeEnabled(enabled: Boolean) {
+                    this@MainActivity.setDeveloperModeEnabled(enabled)
                 }
-                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
-            }
-        }
-        col.addView(keepAliveSpinner)
-        col.addView(keepAliveDescView)
 
-        // 3. Saved Wi-Fi Places (GPS Off)
-        val placesHeader = TextView(this).apply {
-            text = "Saved Wi-Fi Places (GPS Disabled Automatically)"
-            setTypeface(typeface, Typeface.BOLD)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            setPadding(0, dp(14), 0, dp(4))
-        }
-        col.addView(placesHeader)
+                override fun isDemoDataEnabled(): Boolean = this@MainActivity.isDemoDataEnabled()
 
-        val places = svc.metadataDb.getKnownPlaces()
-        if (places.isEmpty()) {
-            val emptyTv = TextView(this).apply {
-                text = "No Saved Places configured yet."
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-            }
-            col.addView(emptyTv)
-        } else {
-            val fakeSsid = svc.fakeWifiSsidOverride
-            for (p in places) {
-                val ssids = p.networks.joinToString(", ") { fakeSsid ?: it.ssid }
-                val row = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, dp(2), 0, dp(2))
+                override fun setDemoDataEnabled(enabled: Boolean) {
+                    this@MainActivity.setDemoDataEnabled(enabled)
                 }
-                val tv = TextView(this).apply {
-                    text = "🏠 ${p.label} ($ssids)"
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+
+                override fun getDropoutGracePeriodSec(): Long = this@MainActivity.getDropoutGracePeriodSec()
+
+                override fun setDropoutGracePeriodSec(sec: Long) {
+                    this@MainActivity.setDropoutGracePeriodSec(sec)
                 }
-                row.addView(tv)
-                if (isDemoDataEnabled()) {
-                    val simActiveHere = svc.isManualKnownPlaceOverrideActive() &&
-                        svc.buildSnapshot().matchedKnownPlace?.id == p.id
-                    val simBtn = Button(this).apply {
-                        text = if (simActiveHere) "Stop Sim" else "Simulate"
-                        isAllCaps = false
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                        setOnClickListener {
-                            val stopping = svc.isManualKnownPlaceOverrideActive() &&
-                                svc.buildSnapshot().matchedKnownPlace?.id == p.id
-                            if (stopping) {
-                                svc.setManualKnownPlaceOverride(0)
-                                text = "Simulate"
-                                Toast.makeText(this@MainActivity, "Stopped simulated presence", Toast.LENGTH_SHORT).show()
-                            } else {
-                                svc.setManualKnownPlaceOverride(p.id)
-                                text = "Stop Sim"
-                                Toast.makeText(this@MainActivity, "Simulating presence at ${p.label} (GPS Off)", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    }
-                    row.addView(simBtn)
+
+                override fun onAddWifiPlaceRequested(onSaved: () -> Unit) {
+                    promptAddCurrentWifiToSavedPlaces(onSaved)
                 }
-                col.addView(row)
-            }
-        }
-        val addPlaceBtn = Button(this).apply {
-            text = "+ Add or Link Wi-Fi Network to Saved Place"
-            isAllCaps = false
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setOnClickListener { promptAddCurrentWifiToSavedPlaces() }
-        }
-        col.addView(addPlaceBtn)
 
-        // Wi-Fi Disconnect Debounce (Auto-Trip Start)
-        val debounceHeader = TextView(this).apply {
-            text = "Wi-Fi Disconnect Debounce (Auto-Trip Start)"
-            setTypeface(typeface, Typeface.BOLD)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            setPadding(0, dp(14), 0, dp(4))
-        }
-        col.addView(debounceHeader)
+                override fun onAddSegmentPresetRequested(onSaved: () -> Unit) {
+                    promptAddSegmentPreset(onSaved)
+                }
 
-        val debounceLabels = listOf(
-            "0s — Immediate (captures elevators/hallways)",
-            "15s — Ignore brief Wi-Fi glitches",
-            "30s — Default • delay GPS on short dropouts",
-            "60s — Only start after 1m away from Wi-Fi"
-        )
-        val currentDebounceSec = svc.getWifiLossDebounceSec()
-        val debounceSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@MainActivity,
-                android.R.layout.simple_spinner_dropdown_item,
-                debounceLabels
-            )
-            setSelection(
-                WIFI_LOSS_DEBOUNCE_OPTIONS_SEC.indexOf(currentDebounceSec).takeIf { it >= 0 }
-                    ?: WIFI_LOSS_DEBOUNCE_OPTIONS_SEC.indexOf(ExcursionStateMachine.DEFAULT_WIFI_LOSS_DEBOUNCE_SEC).coerceAtLeast(0)
-            )
-        }
-        val debounceHelpView = TextView(this).apply {
-            text = "Wait before starting an auto-trip and waking GPS when Saved Place Wi-Fi drops. Untouched auto-recorded trips under 3m are automatically discarded after closing (manual trips are always kept; all 15s readings remain in the 14d ring)."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(0, dp(4), 0, dp(4))
-        }
-        col.addView(debounceSpinner)
-        col.addView(debounceHelpView)
+                override fun onEditAlertThresholdsRequested(onSaved: () -> Unit) {
+                    promptEditAlertThresholds(onSaved)
+                }
 
-        // 3. In-Place Alert Thresholds
-        val ev = svc.alertEvaluator
-        val alertsHeader = TextView(this).apply {
-            text = "In-Place Threshold Alerts"
-            setTypeface(typeface, Typeface.BOLD)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            setPadding(0, dp(14), 0, dp(4))
-        }
-        val alertsSummary = TextView(this).apply {
-            text = "CO₂: Warn ${ev.co2WarningThresholdPpm} / Crit ${ev.co2CriticalThresholdPpm} ppm\n" +
-                "PM2.5: Warn ${ev.pm25WarningThresholdUgm3} / Crit ${ev.pm25CriticalThresholdUgm3} µg/m³\n" +
-                "Qingping Low Battery: Warn ≤${ev.batteryWarningThresholdPct}% / Crit ≤${ev.batteryCriticalThresholdPct}%"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-        }
-        val editAlertsBtn = Button(this).apply {
-            text = "Configure Alert Thresholds..."
-            isAllCaps = false
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setOnClickListener { promptEditAlertThresholds() }
-        }
-        col.addView(alertsHeader)
-        col.addView(alertsSummary)
-        col.addView(editAlertsBtn)
+                override fun onShowHelpRequested() {
+                    showHelpDialog()
+                }
 
-        // 4. Reusable Segment Presets
-        val presetsHeader = TextView(this).apply {
-            text = "Reusable Segment Presets"
-            setTypeface(typeface, Typeface.BOLD)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            setPadding(0, dp(14), 0, dp(4))
-        }
-        val presets = svc.metadataDb.getSegmentPresets()
-        val presetsSummary = TextView(this).apply {
-            text = presets.joinToString(" • ") { "${it.iconEmoji} ${it.label}" }
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
-        }
-        val addPresetBtn = Button(this).apply {
-            text = "+ Add Reusable Segment Preset..."
-            isAllCaps = false
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setOnClickListener { promptAddSegmentPreset() }
-        }
-        col.addView(presetsHeader)
-        col.addView(presetsSummary)
-        col.addView(addPresetBtn)
+                override fun onShareDiagnosticLogRequested() {
+                    shareHardwareDiagnosticTrace()
+                }
 
-        // 5. Chart Dropout Grace Period
-        val dropoutHeader = TextView(this).apply {
-            text = "Chart Dropout Grace Period"
-            setTypeface(typeface, Typeface.BOLD)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            setPadding(0, dp(14), 0, dp(4))
-        }
-        col.addView(dropoutHeader)
-        val dropoutValuesSec = listOf(30L, 45L, 90L, 180L)
-        val dropoutLabels = listOf(
-            "30s (2 missed 15s slots)",
-            "45s (Default • 3 missed slots)",
-            "90s (Matches Trip Pause threshold)",
-            "3m (180s grace)"
-        )
-        val currentGraceSec = getDropoutGracePeriodSec()
-        val dropoutSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@MainActivity,
-                android.R.layout.simple_spinner_dropdown_item,
-                dropoutLabels
-            )
-            setSelection(dropoutValuesSec.indexOf(currentGraceSec).takeIf { it >= 0 } ?: 1)
-        }
-        col.addView(dropoutSpinner)
+                override fun onShowPrivacyDisclosureRequested() {
+                    showProminentLocationDisclosureDialog()
+                }
 
-        // 6. Diagnostics & Developer Mode
-        val diagHeader = TextView(this).apply {
-            text = "Diagnostics & Support"
-            setTypeface(typeface, Typeface.BOLD)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            setPadding(0, dp(14), 0, dp(4))
-        }
-        col.addView(diagHeader)
-
-        val helpFaqBtn = Button(this).apply {
-            text = "❓ Help, FAQ & User Guides"
-            isAllCaps = false
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setOnClickListener { showHelpDialog() }
-        }
-        col.addView(helpFaqBtn)
-
-        val shareLogBtn = Button(this).apply {
-            text = "📤 Share Diagnostic Log (JSONL)"
-            isAllCaps = false
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setOnClickListener { shareHardwareDiagnosticTrace() }
-        }
-        col.addView(shareLogBtn)
-
-        val privacyBtn = Button(this).apply {
-            text = "🔒 View Location, Activity & Privacy Disclosure"
-            isAllCaps = false
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setOnClickListener { showProminentLocationDisclosureDialog() }
-        }
-        col.addView(privacyBtn)
-
-        val missingLocationOrActivity = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED
-        if (missingLocationOrActivity) {
-            val enableLocationBtn = Button(this).apply {
-                text = "📍 Enable Location & Step Tracking"
-                isAllCaps = false
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                setOnClickListener {
+                override fun onEnablePermissionsRequested() {
                     requestRuntimePermissionsIfNeeded(forcePrompt = true)
                 }
-            }
-            col.addView(enableLocationBtn)
-        }
 
-        val demoDataCheck = CheckBox(this).apply {
-            text = "🎭 Demo Data Mode (Synthetic BLE Stream, Sample Trip & Place Sim)"
-            isChecked = isDemoDataEnabled()
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-        }
-        col.addView(demoDataCheck)
-
-        val devModeCheck = CheckBox(this).apply {
-            text = "🛠️ Developer Mode (Show HW Test Tab & Raw BLE Logs)"
-            isChecked = isDeveloperModeEnabled()
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-        }
-        col.addView(devModeCheck)
-
-        val fakeWifiContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(8), dp(4), 0, dp(4))
-            visibility = if (devModeCheck.isChecked || !svc.fakeWifiSsidOverride.isNullOrBlank()) {
-                View.VISIBLE
-            } else {
-                View.GONE
-            }
-        }
-        val fakeWifiLabel = TextView(this).apply {
-            text = "Anonymized Wi-Fi SSID Override (Video/Screenshots):"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        }
-        val fakeWifiSsidInput = EditText(this).apply {
-            hint = "Leave blank for real SSID (e.g. ChicagoHome-5G)"
-            setText(svc.fakeWifiSsidOverride ?: "")
-            setSingleLine(true)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-        }
-        fakeWifiContainer.addView(fakeWifiLabel)
-        fakeWifiContainer.addView(fakeWifiSsidInput)
-        col.addView(fakeWifiContainer)
-
-        devModeCheck.setOnCheckedChangeListener { _, checked ->
-            fakeWifiContainer.visibility = if (checked || !svc.fakeWifiSsidOverride.isNullOrBlank()) {
-                View.VISIBLE
-            } else {
-                View.GONE
-            }
-        }
-
-        scroll.addView(col)
-
-        AlertDialog.Builder(this)
-            .setTitle("⚙️ Settings & Places")
-            .setView(scroll)
-            .setPositiveButton("Done") { _, _ ->
-                val chosenTempPref = tempPrefs[tempSpinner.selectedItemPosition]
-                TemperatureUnitFormatter.setPreference(this, chosenTempPref)
-                val chosenKeepAlive = keepAliveChoices[keepAliveSpinner.selectedItemPosition]
-                if (chosenKeepAlive != currentKeepAliveStrategy) {
-                    svc.updateDevKeepAliveConfig(
-                        strategy = chosenKeepAlive,
-                        reason = "settings_modal"
-                    )
-                    if (chosenKeepAlive == AqlCollectorService.KeepAlivePayloadStrategy.NONE_PASSIVE) {
-                        svc.setExcursionBleMode(BleCollectionMode.PASSIVE_ONLY)
-                    } else if (svc.buildSnapshot().userExcursionBleMode == BleCollectionMode.PASSIVE_ONLY) {
-                        svc.setExcursionBleMode(BleCollectionMode.PERIODIC_GATT_KEEPALIVE)
-                    }
-                    Toast.makeText(
-                        this,
-                        "Keep-Alive mode: ${chosenKeepAlive.statusBadge}",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                override fun onSettingsDismissed() {
+                    activeSettingsDialog = null
+                    refreshTripsTab()
+                    renderLiveSnapshot(svc.buildSnapshot())
+                    dualPaneSlicerView.invalidate()
+                    liveRecentHistoryView.invalidate()
                 }
-                val chosenDebounceSec = WIFI_LOSS_DEBOUNCE_OPTIONS_SEC[debounceSpinner.selectedItemPosition]
-                if (chosenDebounceSec != currentDebounceSec) {
-                    svc.setWifiLossDebounceSec(chosenDebounceSec)
-                }
-                val chosenGraceSec = dropoutValuesSec[dropoutSpinner.selectedItemPosition]
-                setDropoutGracePeriodSec(chosenGraceSec)
-                setDemoDataEnabled(demoDataCheck.isChecked)
-                setDeveloperModeEnabled(devModeCheck.isChecked)
-                svc.setFakeWifiSsidOverride(fakeWifiSsidInput.text.toString())
-                refreshTripsTab()
-                svc.let { renderLiveSnapshot(it.buildSnapshot()) }
-                dualPaneSlicerView.invalidate()
-                liveRecentHistoryView.invalidate()
             }
-            .show()
+        )
+        activeSettingsDialog = settingsDialog
+        settingsDialog.show()
     }
 
     private fun openExternalUrl(url: String) {
@@ -3220,6 +2910,7 @@ class MainActivity : AppCompatActivity() {
                 val nextEnabled = !isDemoDataEnabled()
                 setDemoDataEnabled(nextEnabled)
                 refreshTripsTab()
+                activeSettingsDialog?.refreshDemoModeState()
                 syncLabel()
                 val msg = if (nextEnabled) {
                     "Demo Data Mode enabled! Try 'Toggle Live Demo Replay Stream' on Now or 'Load Canned Demo Trip' on Trips."
@@ -3996,35 +3687,51 @@ class MainActivity : AppCompatActivity() {
         startActivity(Intent.createChooser(shareIntent, "Share HW Trace JSONL"))
     }
 
-    private fun promptAddCurrentWifiToSavedPlaces() {
+    private fun promptAddCurrentWifiToSavedPlaces(onSaved: (() -> Unit)? = null) {
         val svc = collectorService ?: return
         val snap = svc.buildSnapshot()
         val existingPlaces = svc.metadataDb.getKnownPlaces()
 
+        val scroll = ScrollView(this)
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(12), dp(20), dp(4))
         }
+        val ssidLabel = TextView(this).apply {
+            text = "Wi-Fi Network Name (SSID)"
+            setTypeface(typeface, Typeface.BOLD)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+        }
         val ssidInput = EditText(this).apply {
-            hint = "Wi-Fi SSID (e.g. MyHomeWiFi)"
+            hint = "e.g. MyHomeWiFi"
             setText(snap.connectedWifiSsid ?: "")
         }
+        val placeLabel = TextView(this).apply {
+            text = "Saved Place Name"
+            setTypeface(typeface, Typeface.BOLD)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            setPadding(0, dp(10), 0, 0)
+        }
         val placeNameInput = EditText(this).apply {
-            hint = "Place Name (e.g. Home, Second Home, Office)"
+            hint = "e.g. Home, Second Home, Office"
             setText(if (existingPlaces.isEmpty()) "Home" else "")
         }
+        layout.addView(ssidLabel)
         layout.addView(ssidInput)
+        layout.addView(placeLabel)
         layout.addView(placeNameInput)
+        scroll.addView(layout)
 
         val builder = AlertDialog.Builder(this)
             .setTitle("Save Wi-Fi Place (Keep GPS Off)")
-            .setView(layout)
+            .setView(scroll)
             .setPositiveButton("Create New Place") { _, _ ->
                 val ssid = ssidInput.text.toString().trim()
                 val label = placeNameInput.text.toString().trim().ifEmpty { "Home" }
                 if (ssid.isNotEmpty()) {
                     val created = svc.metadataDb.createKnownPlaceWithWifi(label, ssid, snap.connectedWifiBssid)
                     svc.backfillNewlySavedKnownPlace(created.id)
+                    onSaved?.invoke()
                 }
             }
             .setNegativeButton("Cancel", null)
@@ -4040,6 +3747,7 @@ class MainActivity : AppCompatActivity() {
                             val placeId = existingPlaces[which].id
                             svc.metadataDb.linkWifiToKnownPlace(placeId, ssid, snap.connectedWifiBssid)
                             svc.backfillNewlySavedKnownPlace(placeId)
+                            onSaved?.invoke()
                         }
                         .show()
                 }
@@ -4048,75 +3756,174 @@ class MainActivity : AppCompatActivity() {
         builder.show()
     }
 
-    private fun promptAddSegmentPreset() {
+    private fun promptAddSegmentPreset(onSaved: (() -> Unit)? = null) {
         val svc = collectorService ?: return
+        val scroll = ScrollView(this)
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(12), dp(20), dp(4))
         }
+        val emojiLabel = TextView(this).apply {
+            text = "Emoji Icon"
+            setTypeface(typeface, Typeface.BOLD)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+        }
         val emojiInput = EditText(this).apply {
-            hint = "Emoji Icon (e.g. ☕, 🚇, 🏢)"
+            hint = "e.g. ☕, 🚇, 🏢"
             setText("🏷️")
         }
-        val labelInput = EditText(this).apply {
-            hint = "Segment Preset Label (e.g. Coffee Shop, Metra)"
+        val labelTitle = TextView(this).apply {
+            text = "Preset Label"
+            setTypeface(typeface, Typeface.BOLD)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            setPadding(0, dp(10), 0, 0)
         }
+        val labelInput = EditText(this).apply {
+            hint = "e.g. Coffee Shop, Metra"
+        }
+        layout.addView(emojiLabel)
         layout.addView(emojiInput)
+        layout.addView(labelTitle)
         layout.addView(labelInput)
+        scroll.addView(layout)
 
         AlertDialog.Builder(this)
             .setTitle("Add Reusable Segment Preset")
-            .setView(layout)
+            .setView(scroll)
             .setPositiveButton("Add Preset") { _, _ ->
                 val lbl = labelInput.text.toString().trim()
                 if (lbl.isNotEmpty()) {
                     svc.metadataDb.addSegmentPreset(lbl, emojiInput.text.toString().trim())
+                    onSaved?.invoke()
                 }
             }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    private fun promptEditAlertThresholds() {
+    private fun promptEditAlertThresholds(onSaved: (() -> Unit)? = null) {
         val svc = collectorService ?: return
         val ev = svc.alertEvaluator
+        val scroll = ScrollView(this)
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(12), dp(20), dp(4))
+            setPadding(dp(20), dp(12), dp(20), dp(6))
         }
-        val co2WarnInput = EditText(this).apply {
-            hint = "CO₂ Warning ppm (default 1000)"
-            inputType = InputType.TYPE_CLASS_NUMBER
-            setText(ev.co2WarningThresholdPpm.toString())
+
+        fun addThresholdPairRow(
+            groupTitle: String,
+            warnLabelText: String,
+            warnInitial: Int,
+            critLabelText: String,
+            critInitial: Int,
+            topPaddingDp: Int = 12
+        ): Pair<EditText, EditText> {
+            val groupHeader = TextView(this).apply {
+                text = groupTitle
+                setTypeface(typeface, Typeface.BOLD)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                setPadding(0, dp(topPaddingDp), 0, dp(4))
+            }
+            layout.addView(groupHeader)
+
+            val pairRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
+
+            fun buildColumn(labelText: String, initialValue: Int, addEndMargin: Boolean): Pair<LinearLayout, EditText> {
+                val col = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                        if (addEndMargin) marginEnd = dp(10)
+                    }
+                }
+                val label = TextView(this).apply {
+                    text = labelText
+                    gravity = Gravity.BOTTOM
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        0,
+                        1f
+                    )
+                }
+                val input = EditText(this).apply {
+                    inputType = InputType.TYPE_CLASS_NUMBER
+                    setText(initialValue.toString())
+                }
+                col.addView(label)
+                col.addView(input)
+                return col to input
+            }
+
+            val (warnCol, warnInput) = buildColumn(warnLabelText, warnInitial, addEndMargin = true)
+            val (critCol, critInput) = buildColumn(critLabelText, critInitial, addEndMargin = false)
+            pairRow.addView(warnCol)
+            pairRow.addView(critCol)
+            layout.addView(pairRow)
+            return warnInput to critInput
         }
-        val co2CritInput = EditText(this).apply {
-            hint = "CO₂ Critical ppm (default 2000)"
-            inputType = InputType.TYPE_CLASS_NUMBER
-            setText(ev.co2CriticalThresholdPpm.toString())
-        }
-        val pm25WarnInput = EditText(this).apply {
-            hint = "PM2.5 Warning µg/m³ (default 25)"
-            inputType = InputType.TYPE_CLASS_NUMBER
-            setText(ev.pm25WarningThresholdUgm3.toString())
-        }
-        val batWarnInput = EditText(this).apply {
-            hint = "Qingping Low Battery Warning % (default 20)"
-            inputType = InputType.TYPE_CLASS_NUMBER
-            setText(ev.batteryWarningThresholdPct.toString())
-        }
-        layout.addView(co2WarnInput)
-        layout.addView(co2CritInput)
-        layout.addView(pm25WarnInput)
-        layout.addView(batWarnInput)
+
+        val (co2WarnInput, co2CritInput) = addThresholdPairRow(
+            groupTitle = "CO₂ (ppm)",
+            warnLabelText = "Warning (default 1000)",
+            warnInitial = ev.co2WarningThresholdPpm,
+            critLabelText = "Critical (default 2000)",
+            critInitial = ev.co2CriticalThresholdPpm,
+            topPaddingDp = 0
+        )
+        val (pm25WarnInput, pm25CritInput) = addThresholdPairRow(
+            groupTitle = "PM2.5 (µg/m³)",
+            warnLabelText = "Warning (default 25)",
+            warnInitial = ev.pm25WarningThresholdUgm3,
+            critLabelText = "Critical (default 55)",
+            critInitial = ev.pm25CriticalThresholdUgm3
+        )
+        val (batWarnInput, batCritInput) = addThresholdPairRow(
+            groupTitle = "Monitor Low Battery (%)",
+            warnLabelText = "Warning ≤ (default 20)",
+            warnInitial = ev.batteryWarningThresholdPct,
+            critLabelText = "Critical ≤ (default 10)",
+            critInitial = ev.batteryCriticalThresholdPct
+        )
+
+        scroll.addView(layout)
 
         AlertDialog.Builder(this)
             .setTitle("Configure Alert Thresholds")
-            .setView(layout)
+            .setView(scroll)
             .setPositiveButton("Save") { _, _ ->
-                co2WarnInput.text.toString().toIntOrNull()?.let { ev.co2WarningThresholdPpm = it }
-                co2CritInput.text.toString().toIntOrNull()?.let { ev.co2CriticalThresholdPpm = it }
-                pm25WarnInput.text.toString().toIntOrNull()?.let { ev.pm25WarningThresholdUgm3 = it }
-                batWarnInput.text.toString().toIntOrNull()?.let { ev.batteryWarningThresholdPct = it.coerceIn(5, 80) }
+                val nextCo2Warn = (co2WarnInput.text.toString().toIntOrNull() ?: ev.co2WarningThresholdPpm)
+                    .coerceAtLeast(1)
+                val nextCo2Crit = (co2CritInput.text.toString().toIntOrNull() ?: ev.co2CriticalThresholdPpm)
+                    .coerceAtLeast(nextCo2Warn)
+                val nextPm25Warn = (pm25WarnInput.text.toString().toIntOrNull() ?: ev.pm25WarningThresholdUgm3)
+                    .coerceAtLeast(1)
+                val nextPm25Crit = (pm25CritInput.text.toString().toIntOrNull() ?: ev.pm25CriticalThresholdUgm3)
+                    .coerceAtLeast(nextPm25Warn)
+                val nextBatWarn = (batWarnInput.text.toString().toIntOrNull() ?: ev.batteryWarningThresholdPct)
+                    .coerceIn(5, 80)
+                val rawBatCrit = (batCritInput.text.toString().toIntOrNull() ?: ev.batteryCriticalThresholdPct)
+                    .coerceIn(5, 80)
+                val nextBatCrit = if (nextBatWarn > 5) rawBatCrit.coerceAtMost(nextBatWarn - 1) else 5
+
+                ev.co2WarningThresholdPpm = nextCo2Warn
+                ev.co2CriticalThresholdPpm = nextCo2Crit
+                ev.pm25WarningThresholdUgm3 = nextPm25Warn
+                ev.pm25CriticalThresholdUgm3 = nextPm25Crit
+                ev.batteryWarningThresholdPct = nextBatWarn
+                ev.batteryCriticalThresholdPct = nextBatCrit
+                onSaved?.invoke()
+            }
+            .setNeutralButton("Reset Defaults") { _, _ ->
+                ev.co2WarningThresholdPpm = 1000
+                ev.co2CriticalThresholdPpm = 2000
+                ev.pm25WarningThresholdUgm3 = 25
+                ev.pm25CriticalThresholdUgm3 = 55
+                ev.batteryWarningThresholdPct = 20
+                ev.batteryCriticalThresholdPct = 10
+                onSaved?.invoke()
+                Toast.makeText(this, "Reset alert thresholds to defaults", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancel", null)
             .show()
