@@ -25,7 +25,6 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
-import android.view.WindowInsetsController
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
@@ -40,6 +39,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.view.WindowCompat
 import io.github.androidaql.R
 import io.github.androidaql.engine.ExcursionStateMachine
 import io.github.androidaql.engine.StepMovementEstimator
@@ -271,7 +271,12 @@ class MainActivity : AppCompatActivity() {
             captureScreenshotPresetFromIntent(intent)
         }
 
-        setContentView(buildRootLayout())
+        val rootView = buildRootLayout()
+        setContentView(rootView)
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
         requestRuntimePermissionsIfNeeded()
 
         ContextCompat.startForegroundService(this, buildServiceStartIntent(intent))
@@ -675,10 +680,6 @@ class MainActivity : AppCompatActivity() {
                 windowInsets
             }
         }
-        window.insetsController?.setSystemBarsAppearance(
-            0,
-            WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
-        )
 
         // Top App Header (hidden in Landscape when on Trips tab to maximize 3-pane vertical chart area)
         topHeaderBar = LinearLayout(this).apply {

@@ -17,7 +17,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowInsets
-import android.view.WindowInsetsController
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -128,11 +127,10 @@ class SettingsScreenDialog(
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             setBackgroundDrawable(ColorDrawable(Color.parseColor(COLOR_BAR_BG)))
             WindowCompat.setDecorFitsSystemWindows(this, false)
-            insetsController?.setSystemBarsAppearance(
-                0,
-                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
-                    WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
-            )
+            WindowCompat.getInsetsController(this, decorView).apply {
+                isAppearanceLightStatusBars = false
+                isAppearanceLightNavigationBars = false
+            }
         }
         d.setOnDismissListener {
             commitFakeWifiOverrideIfChanged()
