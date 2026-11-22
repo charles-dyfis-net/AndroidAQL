@@ -127,6 +127,11 @@ android {
     testOptions {
         managedDevices {
             localDevices {
+                create("pixel6Api33") {
+                    device = "Pixel 6"
+                    apiLevel = 33
+                    systemImageSource = "aosp-atd"
+                }
                 create("pixel6Api35") {
                     device = "Pixel 6"
                     apiLevel = 35
