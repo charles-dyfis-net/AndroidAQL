@@ -44,6 +44,9 @@ class SettingsScreenDialog(
         fun setDemoDataEnabled(enabled: Boolean)
         fun getDropoutGracePeriodSec(): Long
         fun setDropoutGracePeriodSec(sec: Long)
+        fun getCompanionAssociationStatus(): Pair<Boolean, String?>
+        fun onLinkCompanionDeviceRequested()
+        fun onUnlinkCompanionDeviceRequested()
         fun onAddWifiPlaceRequested(onSaved: () -> Unit)
         fun onAddSegmentPresetRequested(onSaved: () -> Unit)
         fun onEditAlertThresholdsRequested(onSaved: () -> Unit)
@@ -68,6 +71,10 @@ class SettingsScreenDialog(
     private var devSwitch: SwitchCompat? = null
     private var enablePermissionsDivider: View? = null
     private var enablePermissionsRow: LinearLayout? = null
+    private var backgroundSectionHeader: TextView? = null
+    private var backgroundCard: LinearLayout? = null
+    private var companionStatusSubtitle: TextView? = null
+    private var companionActionBtn: TextView? = null
     private var updatingDemoSwitch = false
     private var updatingDevSwitch = false
     private var isAdvancedExpanded = callbacks.isDeveloperModeEnabled() || callbacks.isDemoDataEnabled()
@@ -113,6 +120,7 @@ class SettingsScreenDialog(
 
         buildDisplaySection(content)
         buildPlacesAndTripsSection(content)
+        buildBackgroundLoggingSection(content)
         buildAlertsSection(content)
         buildAdvancedSection(content)
         buildHelpAndPrivacySection(content)
@@ -439,6 +447,56 @@ class SettingsScreenDialog(
         })
 
         parent.addView(card)
+    }
+
+    private fun buildBackgroundLoggingSection(parent: LinearLayout) {
+        val header = buildSectionHeader("BACKGROUND LOGGING")
+        backgroundSectionHeader = header
+        parent.addView(header)
+
+        val card = buildCard()
+        backgroundCard = card
+        card.addView(buildSettingTitle("Auto-Resume After Reboot & Updates"))
+
+        val subtitle = buildSubtitleText("", topDp = 2, bottomDp = 10)
+        companionStatusSubtitle = subtitle
+        card.addView(subtitle)
+
+        val actionBtn = buildActionButton("Link Monitor for Auto-Resume") {
+            val (_, linkedSummary) = callbacks.getCompanionAssociationStatus()
+            if (linkedSummary != null) {
+                callbacks.onUnlinkCompanionDeviceRequested()
+            } else {
+                callbacks.onLinkCompanionDeviceRequested()
+            }
+        }
+        companionActionBtn = actionBtn
+        card.addView(actionBtn)
+
+        parent.addView(card)
+        refreshCompanionAssociationState()
+    }
+
+    fun refreshCompanionAssociationState() {
+        val header = backgroundSectionHeader ?: return
+        val card = backgroundCard ?: return
+        val subtitle = companionStatusSubtitle ?: return
+        val btn = companionActionBtn ?: return
+        val (isSupported, linkedSummary) = callbacks.getCompanionAssociationStatus()
+        if (!isSupported) {
+            header.visibility = View.GONE
+            card.visibility = View.GONE
+            return
+        }
+        header.visibility = View.VISIBLE
+        card.visibility = View.VISIBLE
+        if (linkedSummary != null) {
+            subtitle.text = "Linked to $linkedSummary. Android will wake AirSlice automatically when your monitor is nearby."
+            btn.text = "Unlink Monitor"
+        } else {
+            subtitle.text = "Link your monitor with Android Companion Device Presence so passive logging resumes automatically after phone reboots or Play Store updates."
+            btn.text = "Link Monitor for Auto-Resume"
+        }
     }
 
     private fun buildAlertsSection(parent: LinearLayout) {

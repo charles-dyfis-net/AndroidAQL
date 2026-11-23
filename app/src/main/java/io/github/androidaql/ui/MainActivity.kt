@@ -2,6 +2,8 @@ package io.github.androidaql.ui
 
 import android.Manifest
 import android.app.AlertDialog
+import android.companion.AssociationInfo
+import android.companion.CompanionDeviceManager
 import android.content.ClipData
 import android.content.ComponentName
 import android.content.Context
@@ -35,6 +37,7 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -45,6 +48,7 @@ import io.github.androidaql.engine.ExcursionStateMachine
 import io.github.androidaql.engine.StepMovementEstimator
 import io.github.androidaql.export.XlsxExporter
 import io.github.androidaql.service.AqlCollectorService
+import io.github.androidaql.service.CompanionDeviceHelper
 import io.github.androidaql.storage.AqlRingBufferStore
 import io.github.androidaql.storage.BleCollectionMode
 import io.github.androidaql.storage.ExcursionRecord
@@ -153,6 +157,18 @@ class MainActivity : AppCompatActivity() {
         collectorService?.refreshWifiAndPlaceState()
         collectorService?.refreshStepSensorRegistration()
         activeSettingsDialog?.refreshPermissionsState()
+    }
+
+    private val companionAssociationLauncher = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            val assoc = result.data?.getParcelableExtra(
+                CompanionDeviceManager.EXTRA_ASSOCIATION,
+                AssociationInfo::class.java
+            )
+            onCompanionAssociated(assoc)
+        }
     }
 
     private fun launchXlsxImportPicker(timeShiftForDemo: Boolean) {
@@ -279,12 +295,15 @@ class MainActivity : AppCompatActivity() {
         }
         requestRuntimePermissionsIfNeeded()
 
+        AqlCollectorService.cancelResumeRequiredNotification(this)
         ContextCompat.startForegroundService(this, buildServiceStartIntent(intent))
         bindService(Intent(this, AqlCollectorService::class.java), serviceConnection, Context.BIND_AUTO_CREATE)
     }
 
     override fun onResume() {
         super.onResume()
+        AqlCollectorService.cancelResumeRequiredNotification(this)
+        CompanionDeviceHelper.ensureObservingAll(this)
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
             PackageManager.PERMISSION_GRANTED ||
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
@@ -298,6 +317,7 @@ class MainActivity : AppCompatActivity() {
         refreshLiveRecentGraph()
         refreshTripsTab()
         activeSettingsDialog?.refreshPermissionsState()
+        activeSettingsDialog?.refreshCompanionAssociationState()
         tryApplyPendingScreenshotPreset()
     }
 
@@ -2825,6 +2845,26 @@ class MainActivity : AppCompatActivity() {
                     this@MainActivity.setDropoutGracePeriodSec(sec)
                 }
 
+                override fun getCompanionAssociationStatus(): Pair<Boolean, String?> {
+                    val supported = CompanionDeviceHelper.isSupported(this@MainActivity)
+                    val summary = if (supported) {
+                        CompanionDeviceHelper.formatAssociationSummary(
+                            CompanionDeviceHelper.getAssociations(this@MainActivity)
+                        )
+                    } else {
+                        null
+                    }
+                    return supported to summary
+                }
+
+                override fun onLinkCompanionDeviceRequested() {
+                    requestCompanionDeviceAssociation()
+                }
+
+                override fun onUnlinkCompanionDeviceRequested() {
+                    unlinkCompanionDevices()
+                }
+
                 override fun onAddWifiPlaceRequested(onSaved: () -> Unit) {
                     promptAddCurrentWifiToSavedPlaces(onSaved)
                 }
@@ -2864,6 +2904,79 @@ class MainActivity : AppCompatActivity() {
         )
         activeSettingsDialog = settingsDialog
         settingsDialog.show()
+    }
+
+    private fun requestCompanionDeviceAssociation() {
+        if (!CompanionDeviceHelper.isSupported(this)) {
+            Toast.makeText(this, "Companion Device Presence is not supported on this device", Toast.LENGTH_LONG).show()
+            return
+        }
+        val cdm = CompanionDeviceHelper.getManager(this) ?: return
+        if (!AqlCollectorService.hasBluetoothScanPermission(this)) {
+            requestRuntimePermissionsIfNeeded(forcePrompt = true)
+            Toast.makeText(this, "Grant Bluetooth permission first, then try linking again", Toast.LENGTH_LONG).show()
+            return
+        }
+        val request = CompanionDeviceHelper.buildAssociationRequest()
+        try {
+            cdm.associate(
+                request,
+                mainExecutor,
+                object : CompanionDeviceManager.Callback() {
+                    override fun onAssociationPending(intentSender: android.content.IntentSender) {
+                        runOnUiThread {
+                            runCatching {
+                                companionAssociationLauncher.launch(
+                                    IntentSenderRequest.Builder(intentSender).build()
+                                )
+                            }.onFailure { err ->
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "Could not open device picker: ${err.message}",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                    }
+
+                    override fun onAssociationCreated(associationInfo: AssociationInfo) {
+                        runOnUiThread {
+                            onCompanionAssociated(associationInfo)
+                        }
+                    }
+
+                    override fun onFailure(error: CharSequence?) {
+                        runOnUiThread {
+                            val msg = error?.toString()?.takeIf { it.isNotBlank() } ?: "Device linking cancelled"
+                            Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            )
+        } catch (e: Exception) {
+            Toast.makeText(this, "Could not start device linking: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun onCompanionAssociated(associationInfo: AssociationInfo?) {
+        val assoc = associationInfo ?: CompanionDeviceHelper.getAssociations(this).lastOrNull()
+        val observing = assoc != null && CompanionDeviceHelper.startObservingPresence(this, assoc)
+        activeSettingsDialog?.refreshCompanionAssociationState()
+        val label = assoc?.let {
+            CompanionDeviceHelper.formatAssociationLabel(it.displayName, it.deviceMacAddress?.toString())
+        } ?: "monitor"
+        val msg = if (observing) {
+            "Linked $label for background auto-resume"
+        } else {
+            "Linked $label (presence observation unavailable)"
+        }
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+    }
+
+    private fun unlinkCompanionDevices() {
+        CompanionDeviceHelper.disassociateAll(this)
+        activeSettingsDialog?.refreshCompanionAssociationState()
+        Toast.makeText(this, "Unlinked monitor from background auto-resume", Toast.LENGTH_SHORT).show()
     }
 
     private fun openExternalUrl(url: String) {

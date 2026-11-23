@@ -2,6 +2,7 @@ package io.github.androidaql.service
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.ForegroundServiceStartNotAllowedException
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -423,7 +424,19 @@ class AqlCollectorService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForegroundWithCurrentType()
+        val startReason = intent?.getStringExtra(EXTRA_START_REASON)
+            ?: if (intent == null) "sticky_restart" else "activity"
+        hwLogger.logEvent(
+            "SERVICE_START_COMMAND",
+            mapOf("reason" to startReason, "start_id" to startId)
+        )
+        val enteredForeground = startForegroundWithCurrentType(startReason)
+        if (!enteredForeground) {
+            postResumeRequiredNotification(this, startReason)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        cancelResumeRequiredNotification(this)
         startBleScan()
         if (intent?.action == ACTION_DEV_COMMAND && isDevCommandAuthorized(this)) {
             handleDevCommandIntent(intent)
@@ -881,9 +894,7 @@ class AqlCollectorService : Service() {
 
     @SuppressLint("MissingPermission")
     fun startBleScan() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
+        if (!hasBluetoothScanPermission(this)) {
             hwLogger.logEvent("BLE_SCAN_PERMISSION_DEFERRED", emptyMap())
             return
         }
@@ -2451,9 +2462,10 @@ class AqlCollectorService : Service() {
         }
         nm.createNotificationChannel(statusChannel)
         nm.createNotificationChannel(alertChannel)
+        ensureLifecycleNotificationChannel(this)
     }
 
-    private fun startForegroundWithCurrentType() {
+    private fun startForegroundWithCurrentType(startReason: String = "activity"): Boolean {
         val notification = buildStatusNotification()
         // Always include FOREGROUND_SERVICE_TYPE_LOCATION when location permission is granted so
         // Android 14+ allows starting LocationManager updates later when walking out of a Saved Wi-Fi
@@ -2462,7 +2474,8 @@ class AqlCollectorService : Service() {
         val fgsType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
         try {
             startForeground(NOTIFICATION_ID_FOREGROUND, notification, fgsType)
-        } catch (_: Exception) {
+            return true
+        } catch (firstErr: Exception) {
             // Fallback if location permission not yet granted
             try {
                 startForeground(
@@ -2470,7 +2483,17 @@ class AqlCollectorService : Service() {
                     notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
                 )
-            } catch (_: Exception) {
+                return true
+            } catch (fallbackErr: Exception) {
+                hwLogger.logEvent(
+                    "FGS_START_FAILED",
+                    mapOf(
+                        "reason" to startReason,
+                        "first_error" to "${firstErr.javaClass.simpleName}: ${firstErr.message}",
+                        "fallback_error" to "${fallbackErr.javaClass.simpleName}: ${fallbackErr.message}"
+                    )
+                )
+                return false
             }
         }
     }
@@ -2820,7 +2843,10 @@ class AqlCollectorService : Service() {
     companion object {
         const val CHANNEL_STATUS = "aql_live_status"
         const val CHANNEL_ALERTS = "aql_threshold_alerts"
+        const val CHANNEL_LIFECYCLE = "aql_lifecycle_status"
         const val NOTIFICATION_ID_FOREGROUND = 1000
+        const val NOTIFICATION_ID_RESUME_REQUIRED = 1004
+        const val EXTRA_START_REASON = "io.github.androidaql.extra.START_REASON"
         const val XIAOMI_MIBEACON_SERVICE_UUID_STRING = "0000fe95-0000-1000-8000-00805f9b34fb"
         const val QINGPING_AIR_MONITOR_LITE_NAME = "Qingping Air Monitor Lite"
         const val ACTION_DEV_COMMAND = "net.dyfis.androidaql.DEV_COMMAND"
@@ -2832,6 +2858,90 @@ class AqlCollectorService : Service() {
         @Volatile
         var instance: AqlCollectorService? = null
             private set
+
+        fun hasBluetoothScanPermission(context: Context): Boolean =
+            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) ==
+                PackageManager.PERMISSION_GRANTED
+
+        fun buildAutoStartIntent(context: Context, reason: String): Intent =
+            Intent(context, AqlCollectorService::class.java).apply {
+                putExtra(EXTRA_START_REASON, reason)
+            }
+
+        fun tryAutoStartService(context: Context, reason: String): Boolean {
+            if (instance != null) return true
+            if (!hasBluetoothScanPermission(context)) return false
+            return try {
+                ContextCompat.startForegroundService(context, buildAutoStartIntent(context, reason))
+                true
+            } catch (_: ForegroundServiceStartNotAllowedException) {
+                postResumeRequiredNotification(context, reason)
+                false
+            } catch (_: SecurityException) {
+                postResumeRequiredNotification(context, reason)
+                false
+            } catch (_: IllegalStateException) {
+                postResumeRequiredNotification(context, reason)
+                false
+            }
+        }
+
+        fun buildResumeNotificationCopy(reason: String): Pair<String, String> = when (reason) {
+            AqlAutoStartReceiver.REASON_BOOT_COMPLETED ->
+                "AirSlice paused after reboot" to "Tap to resume passive air quality logging."
+            AqlAutoStartReceiver.REASON_PACKAGE_REPLACED ->
+                "AirSlice paused after app update" to "Tap to resume passive air quality logging."
+            else ->
+                "AirSlice passive logging paused" to "Tap to resume air quality monitoring."
+        }
+
+        fun ensureLifecycleNotificationChannel(context: Context) {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            val channel = NotificationChannel(
+                CHANNEL_LIFECYCLE,
+                "Background Service Alerts",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Alerts when AirSlice passive logging needs to be resumed after a reboot or update"
+            }
+            nm.createNotificationChannel(channel)
+        }
+
+        fun postResumeRequiredNotification(context: Context, reason: String) {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                return
+            }
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            ensureLifecycleNotificationChannel(context)
+            val (title, body) = buildResumeNotificationCopy(reason)
+            val openIntent = PendingIntent.getActivity(
+                context,
+                NOTIFICATION_ID_RESUME_REQUIRED,
+                Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                },
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            val notification = NotificationCompat.Builder(context, CHANNEL_LIFECYCLE)
+                .setSmallIcon(R.drawable.ic_stat_aql)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setContentIntent(openIntent)
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .build()
+            try {
+                nm.notify(NOTIFICATION_ID_RESUME_REQUIRED, notification)
+            } catch (_: SecurityException) {
+            }
+        }
+
+        fun cancelResumeRequiredNotification(context: Context) {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            nm.cancel(NOTIFICATION_ID_RESUME_REQUIRED)
+        }
 
         fun isDeveloperModeEnabled(context: Context): Boolean =
             context.getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)

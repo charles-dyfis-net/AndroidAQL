@@ -186,6 +186,9 @@ class MainActivitySmokeTest {
         override fun setDemoDataEnabled(enabled: Boolean) {}
         override fun getDropoutGracePeriodSec(): Long = 45L
         override fun setDropoutGracePeriodSec(sec: Long) {}
+        override fun getCompanionAssociationStatus(): Pair<Boolean, String?> = false to null
+        override fun onLinkCompanionDeviceRequested() {}
+        override fun onUnlinkCompanionDeviceRequested() {}
         override fun onAddWifiPlaceRequested(onSaved: () -> Unit) {}
         override fun onAddSegmentPresetRequested(onSaved: () -> Unit) {}
         override fun onEditAlertThresholdsRequested(onSaved: () -> Unit) {}
