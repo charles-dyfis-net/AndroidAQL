@@ -92,4 +92,23 @@ class BackgroundResumeTest {
         )
         assertNull(CompanionDeviceHelper.formatAssociationLabel("  ", "  "))
     }
+
+    @Test
+    fun buildManualTripStopSuggestionCopyFormatsNamedAndFallbackPlaces() {
+        assertEquals(
+            "Back at Home — End manual trip?" to
+                "You reconnected to Home Wi-Fi. Your manual trip is still recording.",
+            AqlCollectorService.buildManualTripStopSuggestionCopy("  Home  ")
+        )
+        assertEquals(
+            "Back on Saved Wi-Fi — End manual trip?" to
+                "You reconnected to a Saved Wi-Fi Place. Your manual trip is still recording.",
+            AqlCollectorService.buildManualTripStopSuggestionCopy(null)
+        )
+        assertEquals(
+            "Back on Saved Wi-Fi — End manual trip?" to
+                "You reconnected to a Saved Wi-Fi Place. Your manual trip is still recording.",
+            AqlCollectorService.buildManualTripStopSuggestionCopy("   ")
+        )
+    }
 }

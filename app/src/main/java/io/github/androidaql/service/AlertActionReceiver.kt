@@ -17,12 +17,16 @@ class AlertActionReceiver : BroadcastReceiver() {
             ACTION_BOOKMARK_CURRENT_TRIP -> {
                 AqlCollectorService.instance?.bookmarkActiveExcursion()
             }
+            ACTION_END_MANUAL_TRIP -> {
+                AqlCollectorService.instance?.endManualExcursion()
+            }
         }
     }
 
     companion object {
         const val ACTION_ALERT_DISMISSED = "io.github.androidaql.ACTION_ALERT_DISMISSED"
         const val ACTION_BOOKMARK_CURRENT_TRIP = "io.github.androidaql.ACTION_BOOKMARK_CURRENT_TRIP"
+        const val ACTION_END_MANUAL_TRIP = "io.github.androidaql.ACTION_END_MANUAL_TRIP"
         const val EXTRA_METRIC_NAME = "extra_metric_name"
     }
 }

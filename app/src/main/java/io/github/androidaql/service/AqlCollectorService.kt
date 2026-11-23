@@ -689,6 +689,7 @@ class AqlCollectorService : Service() {
         stopGpsCollection()
         stopStepCollection()
         unregisterWifiCallback()
+        cancelManualTripStopSuggestionNotification()
         ringStore.close()
         metadataDb.close()
         if (instance === this) instance = null
@@ -1344,6 +1345,12 @@ class AqlCollectorService : Service() {
             pendingBlipCleanupAfterEpochSec =
                 nowEpochSec + MetadataDatabase.MICRO_EXCURSION_COALESCE_GAP_SEC + 1L
             activeExcursionId = null
+        }
+
+        if (transition.clearManualTripEndSuggestion) {
+            cancelManualTripStopSuggestionNotification()
+        } else if (transition.suggestManualTripEndPlaceId != null) {
+            postManualTripStopSuggestionNotification(transition.suggestManualTripEndPlaceId)
         }
 
         if (transition.shouldRunGps) {
@@ -2460,8 +2467,16 @@ class AqlCollectorService : Service() {
         ).apply {
             description = "In-place alerts when CO₂ or PM2.5 exceeds configured thresholds"
         }
+        val tripSuggestionChannel = NotificationChannel(
+            CHANNEL_TRIP_SUGGESTIONS,
+            "Trip Reminders",
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "Suggestions to stop a manually started trip when returning to a Saved Wi-Fi Place"
+        }
         nm.createNotificationChannel(statusChannel)
         nm.createNotificationChannel(alertChannel)
+        nm.createNotificationChannel(tripSuggestionChannel)
         ensureLifecycleNotificationChannel(this)
     }
 
@@ -2617,6 +2632,52 @@ class AqlCollectorService : Service() {
                 }
             }
         }
+    }
+
+    private fun postManualTripStopSuggestionNotification(knownPlaceId: Int) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        val placeLabel = metadataDb.getKnownPlaces().firstOrNull { it.id == knownPlaceId }?.label
+        val (title, body) = buildManualTripStopSuggestionCopy(placeLabel)
+        val openIntent = PendingIntent.getActivity(
+            this,
+            NOTIFICATION_ID_MANUAL_TRIP_STOP_SUGGESTION,
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val endTripIntent = PendingIntent.getBroadcast(
+            this,
+            NOTIFICATION_ID_MANUAL_TRIP_STOP_SUGGESTION + 1,
+            Intent(this, AlertActionReceiver::class.java).apply {
+                action = AlertActionReceiver.ACTION_END_MANUAL_TRIP
+            },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val notification = NotificationCompat.Builder(this, CHANNEL_TRIP_SUGGESTIONS)
+            .setSmallIcon(R.drawable.ic_stat_aql)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setContentIntent(openIntent)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .addAction(android.R.drawable.ic_media_pause, "End Trip", endTripIntent)
+            .build()
+        try {
+            nm.notify(NOTIFICATION_ID_MANUAL_TRIP_STOP_SUGGESTION, notification)
+        } catch (_: SecurityException) {
+        }
+    }
+
+    private fun cancelManualTripStopSuggestionNotification() {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        nm.cancel(NOTIFICATION_ID_MANUAL_TRIP_STOP_SUGGESTION)
     }
 
     /**
@@ -2844,8 +2905,10 @@ class AqlCollectorService : Service() {
         const val CHANNEL_STATUS = "aql_live_status"
         const val CHANNEL_ALERTS = "aql_threshold_alerts"
         const val CHANNEL_LIFECYCLE = "aql_lifecycle_status"
+        const val CHANNEL_TRIP_SUGGESTIONS = "aql_trip_suggestions"
         const val NOTIFICATION_ID_FOREGROUND = 1000
         const val NOTIFICATION_ID_RESUME_REQUIRED = 1004
+        const val NOTIFICATION_ID_MANUAL_TRIP_STOP_SUGGESTION = 1005
         const val EXTRA_START_REASON = "io.github.androidaql.extra.START_REASON"
         const val XIAOMI_MIBEACON_SERVICE_UUID_STRING = "0000fe95-0000-1000-8000-00805f9b34fb"
         const val QINGPING_AIR_MONITOR_LITE_NAME = "Qingping Air Monitor Lite"
@@ -2941,6 +3004,17 @@ class AqlCollectorService : Service() {
         fun cancelResumeRequiredNotification(context: Context) {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
             nm.cancel(NOTIFICATION_ID_RESUME_REQUIRED)
+        }
+
+        fun buildManualTripStopSuggestionCopy(placeLabel: String?): Pair<String, String> {
+            val trimmed = placeLabel?.trim()?.takeIf { it.isNotEmpty() }
+            return if (trimmed != null) {
+                "Back at $trimmed — End manual trip?" to
+                    "You reconnected to $trimmed Wi-Fi. Your manual trip is still recording."
+            } else {
+                "Back on Saved Wi-Fi — End manual trip?" to
+                    "You reconnected to a Saved Wi-Fi Place. Your manual trip is still recording."
+            }
         }
 
         fun isDeveloperModeEnabled(context: Context): Boolean =

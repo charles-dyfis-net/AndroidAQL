@@ -1316,7 +1316,8 @@ class AqlCoreEngineTest {
         assertEquals(ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE, peEnd.currentState)
 
         // Case 4: Starting manually while still connected to Saved Place #1 starts immediately,
-        // stays active after leaving #1, and auto-closes upon returning to #1.
+        // stays active after leaving #1 AND after returning to #1 (emitting a stop-suggestion
+        // signal only on re-entry), clears the suggestion on leaving again, and closes on manual end.
         val smAtHome = ExcursionStateMachine(gpsPauseTimeoutSec = 90L, excursionCloseTimeoutSec = 2700L)
         smAtHome.onBleAdvertisement(1000L, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
         val hStart = smAtHome.onManualTripStart(1005L)
@@ -1324,17 +1325,122 @@ class AqlCoreEngineTest {
         assertTrue(hStart.startedNewExcursion)
         assertTrue(hStart.shouldRunGps)
         assertEquals(0, hStart.activeKnownPlaceId)
+        assertNull(hStart.suggestManualTripEndPlaceId)
+        assertFalse(hStart.clearManualTripEndSuggestion)
 
         val hLeave = smAtHome.onWifiContextChanged(1030L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
         assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, hLeave.currentState)
         assertFalse(hLeave.closedExcursion)
+        assertNull(hLeave.suggestManualTripEndPlaceId)
+        assertTrue(hLeave.clearManualTripEndSuggestion)
 
         smAtHome.onBleAdvertisement(1150L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
         val hReturn = smAtHome.onWifiContextChanged(1200L, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
-        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, hReturn.currentState)
-        assertTrue(hReturn.closedExcursion)
-        assertFalse(hReturn.shouldRunGps)
-        assertEquals(1, hReturn.activeKnownPlaceId)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, hReturn.currentState)
+        assertFalse(hReturn.closedExcursion)
+        assertTrue(hReturn.shouldRunGps)
+        assertEquals(0, hReturn.activeKnownPlaceId)
+        assertEquals(1, hReturn.suggestManualTripEndPlaceId)
+        assertFalse(hReturn.clearManualTripEndSuggestion)
+
+        // Staying at Saved Place #1 must not re-emit the suggestion on subsequent BLE packets or timer ticks.
+        val hStayBle = smAtHome.onBleAdvertisement(1215L, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, hStayBle.currentState)
+        assertFalse(hStayBle.closedExcursion)
+        assertNull(hStayBle.suggestManualTripEndPlaceId)
+        assertFalse(hStayBle.clearManualTripEndSuggestion)
+
+        val hStayTick = smAtHome.onTimerTick(1230L)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, hStayTick.currentState)
+        assertFalse(hStayTick.closedExcursion)
+        assertNull(hStayTick.suggestManualTripEndPlaceId)
+        assertFalse(hStayTick.clearManualTripEndSuggestion)
+
+        // Leaving again clears any stale suggestion, and returning re-emits it.
+        val hLeaveAgain = smAtHome.onWifiContextChanged(1250L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, hLeaveAgain.currentState)
+        assertNull(hLeaveAgain.suggestManualTripEndPlaceId)
+        assertTrue(hLeaveAgain.clearManualTripEndSuggestion)
+
+        val hReturnAgain = smAtHome.onWifiContextChanged(1270L, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, hReturnAgain.currentState)
+        assertEquals(1, hReturnAgain.suggestManualTripEndPlaceId)
+        assertFalse(hReturnAgain.clearManualTripEndSuggestion)
+
+        // Explicit manual end closes the trip into STATIONARY_KNOWN_AP and clears the suggestion.
+        val hManualEnd = smAtHome.onManualTripEnd(1280L)
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, hManualEnd.currentState)
+        assertTrue(hManualEnd.closedExcursion)
+        assertFalse(hManualEnd.shouldRunGps)
+        assertEquals(1, hManualEnd.activeKnownPlaceId)
+        assertNull(hManualEnd.suggestManualTripEndPlaceId)
+        assertTrue(hManualEnd.clearManualTripEndSuggestion)
+    }
+
+    @Test
+    fun testManualTripArrivingAtSavedPlaceSuggestsStopWhileAutoTripCloses() {
+        // Manual trip started away (during Wi-Fi loss debounce, ACTIVE) arriving at Saved Place #2 stays open and suggests stop.
+        val smActive = ExcursionStateMachine(gpsPauseTimeoutSec = 90L, excursionCloseTimeoutSec = 2700L)
+        smActive.onBleAdvertisement(1000L, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
+        val mPreStart = smActive.onWifiContextChanged(1002L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, mPreStart.currentState)
+        val mStart = smActive.onManualTripStart(1005L)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, mStart.currentState)
+        assertTrue(mStart.startedNewExcursion)
+        assertNull(mStart.suggestManualTripEndPlaceId)
+
+        smActive.onBleAdvertisement(1060L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        val mArrive = smActive.onWifiContextChanged(1100L, connectedKnownPlaceId = 2, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, mArrive.currentState)
+        assertFalse(mArrive.closedExcursion)
+        assertTrue(mArrive.shouldRunGps)
+        assertEquals(0, mArrive.activeKnownPlaceId)
+        assertEquals(2, mArrive.suggestManualTripEndPlaceId)
+        assertFalse(mArrive.clearManualTripEndSuggestion)
+
+        // Manual trip started away while SIGNAL_PAUSED arriving at Saved Place #2 stays open,
+        // suggests stop, clears on leaving, and still closes on 45-minute BLE timeout safety net.
+        val smPaused = ExcursionStateMachine(gpsPauseTimeoutSec = 90L, excursionCloseTimeoutSec = 2700L)
+        smPaused.onWifiContextChanged(1000L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        val pStart = smPaused.onManualTripStart(1005L)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED, pStart.currentState)
+
+        val pArrive = smPaused.onWifiContextChanged(1020L, connectedKnownPlaceId = 2, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED, pArrive.currentState)
+        assertFalse(pArrive.closedExcursion)
+        assertFalse(pArrive.shouldRunGps)
+        assertEquals(2, pArrive.suggestManualTripEndPlaceId)
+        assertFalse(pArrive.clearManualTripEndSuggestion)
+
+        val pLeave = smPaused.onWifiContextChanged(1040L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED, pLeave.currentState)
+        assertNull(pLeave.suggestManualTripEndPlaceId)
+        assertTrue(pLeave.clearManualTripEndSuggestion)
+
+        val pTimeout = smPaused.onTimerTick(1005L + 2701L)
+        assertEquals(ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE, pTimeout.currentState)
+        assertTrue(pTimeout.closedExcursion)
+        assertTrue(pTimeout.clearManualTripEndSuggestion)
+
+        // Auto-started trip still closes immediately on returning to Saved Place #1 without suggestion.
+        val smAuto = ExcursionStateMachine(
+            gpsPauseTimeoutSec = 90L,
+            excursionCloseTimeoutSec = 2700L,
+            wifiLossDebounceSec = 0L
+        )
+        smAuto.onBleAdvertisement(1000L, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
+        val aStart = smAuto.onWifiContextChanged(1020L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE, aStart.currentState)
+        assertTrue(aStart.startedNewExcursion)
+        assertFalse(aStart.startedByManualOverride)
+
+        smAuto.onBleAdvertisement(1060L, connectedKnownPlaceId = 0, hasConfiguredKnownPlaces = true)
+        val aReturn = smAuto.onWifiContextChanged(1100L, connectedKnownPlaceId = 1, hasConfiguredKnownPlaces = true)
+        assertEquals(ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP, aReturn.currentState)
+        assertTrue(aReturn.closedExcursion)
+        assertFalse(aReturn.shouldRunGps)
+        assertEquals(1, aReturn.activeKnownPlaceId)
+        assertNull(aReturn.suggestManualTripEndPlaceId)
     }
 
     @Test

@@ -32,7 +32,9 @@ class ExcursionStateMachine(
         val closedExcursion: Boolean,
         val startedExcursionStartEpochSec: Long? = null,
         val startedByManualOverride: Boolean = false,
-        val closedExcursionEndEpochSec: Long? = null
+        val closedExcursionEndEpochSec: Long? = null,
+        val suggestManualTripEndPlaceId: Int? = null,
+        val clearManualTripEndSuggestion: Boolean = false
     )
 
     var wifiLossDebounceSec: Long = wifiLossDebounceSec.coerceAtLeast(0L)
@@ -57,7 +59,6 @@ class ExcursionStateMachine(
     val isPendingWifiLossDebounce: Boolean
         get() = wifiLostSinceEpochSec != null && currentState == CollectorState.STATIONARY_KNOWN_AP
 
-    private var manualStartSuppressedPlaceId: Int = 0
     private var manualEndHoldUntilKnownPlaceOrBleTimeout: Boolean = false
 
     var userExcursionBleMode: BleCollectionMode = BleCollectionMode.PERIODIC_GATT_KEEPALIVE
@@ -69,12 +70,10 @@ class ExcursionStateMachine(
         hasConfiguredKnownPlaces: Boolean = this.hasConfiguredKnownPlaces
     ): TransitionOutput {
         lastBlePacketEpochSec = max(lastBlePacketEpochSec, timestampEpochSec)
-        if (connectedKnownPlaceId != manualStartSuppressedPlaceId) {
-            manualStartSuppressedPlaceId = 0
-        }
+        val prevKnownPlaceId = currentKnownPlaceId
         currentKnownPlaceId = connectedKnownPlaceId
         this.hasConfiguredKnownPlaces = hasConfiguredKnownPlaces
-        return evaluate(timestampEpochSec)
+        return evaluate(timestampEpochSec, previousKnownPlaceId = prevKnownPlaceId)
     }
 
     @Synchronized
@@ -83,19 +82,16 @@ class ExcursionStateMachine(
         connectedKnownPlaceId: Int,
         hasConfiguredKnownPlaces: Boolean = this.hasConfiguredKnownPlaces
     ): TransitionOutput {
-        if (connectedKnownPlaceId != manualStartSuppressedPlaceId) {
-            manualStartSuppressedPlaceId = 0
-        }
+        val prevKnownPlaceId = currentKnownPlaceId
         currentKnownPlaceId = connectedKnownPlaceId
         this.hasConfiguredKnownPlaces = hasConfiguredKnownPlaces
-        return evaluate(timestampEpochSec)
+        return evaluate(timestampEpochSec, previousKnownPlaceId = prevKnownPlaceId)
     }
 
     @Synchronized
     fun onManualTripStart(timestampEpochSec: Long): TransitionOutput {
         isManualExcursionOverride = true
         manualEndHoldUntilKnownPlaceOrBleTimeout = false
-        manualStartSuppressedPlaceId = currentKnownPlaceId
         wifiLostSinceEpochSec = null
         if (lastBlePacketEpochSec < 0L || (timestampEpochSec - lastBlePacketEpochSec) > excursionCloseTimeoutSec) {
             lastBlePacketEpochSec = timestampEpochSec - gpsPauseTimeoutSec - 1L
@@ -106,7 +102,6 @@ class ExcursionStateMachine(
     @Synchronized
     fun onManualTripEnd(timestampEpochSec: Long): TransitionOutput {
         isManualExcursionOverride = false
-        manualStartSuppressedPlaceId = 0
         if (currentKnownPlaceId == 0) {
             manualEndHoldUntilKnownPlaceOrBleTimeout = true
         }
@@ -118,7 +113,11 @@ class ExcursionStateMachine(
         return evaluate(timestampEpochSec)
     }
 
-    private fun evaluate(nowEpochSec: Long, forceClose: Boolean = false): TransitionOutput {
+    private fun evaluate(
+        nowEpochSec: Long,
+        forceClose: Boolean = false,
+        previousKnownPlaceId: Int = currentKnownPlaceId
+    ): TransitionOutput {
         val prev = currentState
         val bleAgeSec = if (lastBlePacketEpochSec < 0L) Long.MAX_VALUE else (nowEpochSec - lastBlePacketEpochSec)
         val isBleFresh = bleAgeSec <= gpsPauseTimeoutSec
@@ -128,7 +127,7 @@ class ExcursionStateMachine(
         if (prev != CollectorState.STATIONARY_KNOWN_AP) {
             wifiLostSinceEpochSec = null
         }
-        val effectiveKnownPlaceId = if (currentKnownPlaceId > 0 && currentKnownPlaceId != manualStartSuppressedPlaceId) {
+        val effectiveKnownPlaceId = if (currentKnownPlaceId > 0 && !isManualExcursionOverride) {
             currentKnownPlaceId
         } else {
             0
@@ -247,8 +246,18 @@ class ExcursionStateMachine(
 
         if (closedExcursion) {
             isManualExcursionOverride = false
-            manualStartSuppressedPlaceId = 0
         }
+
+        val isManualTripOngoing = isManualExcursionOverride &&
+            !closedExcursion &&
+            (next == CollectorState.FIELD_EXCURSION_ACTIVE || next == CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED)
+        val enteredSavedPlaceDuringManualTrip = isManualTripOngoing &&
+            !startedExcursion &&
+            currentKnownPlaceId > 0 &&
+            currentKnownPlaceId != previousKnownPlaceId
+        val leftSavedPlaceDuringManualTrip = isManualTripOngoing &&
+            previousKnownPlaceId > 0 &&
+            currentKnownPlaceId == 0
 
         currentState = next
         val shouldRunGps = (next == CollectorState.FIELD_EXCURSION_ACTIVE)
@@ -275,7 +284,9 @@ class ExcursionStateMachine(
             closedExcursion = closedExcursion,
             startedExcursionStartEpochSec = startedExcursionStartSec,
             startedByManualOverride = startedByManual,
-            closedExcursionEndEpochSec = closedExcursionEndSec
+            closedExcursionEndEpochSec = closedExcursionEndSec,
+            suggestManualTripEndPlaceId = if (enteredSavedPlaceDuringManualTrip) currentKnownPlaceId else null,
+            clearManualTripEndSuggestion = closedExcursion || leftSavedPlaceDuringManualTrip
         )
     }
 
