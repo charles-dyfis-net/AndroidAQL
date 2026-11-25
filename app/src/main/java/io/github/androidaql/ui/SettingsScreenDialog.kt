@@ -54,6 +54,7 @@ class SettingsScreenDialog(
         fun onShareDiagnosticLogRequested()
         fun onShowPrivacyDisclosureRequested()
         fun onEnablePermissionsRequested()
+        fun onStopServiceAndExitRequested()
         fun onSettingsDismissed()
     }
 
@@ -73,6 +74,7 @@ class SettingsScreenDialog(
     private var enablePermissionsRow: LinearLayout? = null
     private var backgroundSectionHeader: TextView? = null
     private var backgroundCard: LinearLayout? = null
+    private var companionSectionContainer: LinearLayout? = null
     private var companionStatusSubtitle: TextView? = null
     private var companionActionBtn: TextView? = null
     private var updatingDemoSwitch = false
@@ -469,11 +471,19 @@ class SettingsScreenDialog(
 
         val card = buildCard()
         backgroundCard = card
-        card.addView(buildSettingTitle(context.getString(R.string.settings_auto_resume_title)))
+
+        val companionContainer = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        companionContainer.addView(buildSettingTitle(context.getString(R.string.settings_auto_resume_title)))
 
         val subtitle = buildSubtitleText("", topDp = 2, bottomDp = 10)
         companionStatusSubtitle = subtitle
-        card.addView(subtitle)
+        companionContainer.addView(subtitle)
 
         val actionBtn = buildActionButton(context.getString(R.string.settings_companion_link_btn)) {
             val (_, linkedSummary) = callbacks.getCompanionAssociationStatus()
@@ -484,7 +494,30 @@ class SettingsScreenDialog(
             }
         }
         companionActionBtn = actionBtn
-        card.addView(actionBtn)
+        companionContainer.addView(actionBtn)
+        companionContainer.addView(buildCardDivider())
+        companionSectionContainer = companionContainer
+        card.addView(companionContainer)
+
+        card.addView(buildSettingTitle(context.getString(R.string.settings_stop_service_title)))
+        card.addView(buildSubtitleText(context.getString(R.string.settings_stop_service_subtitle), topDp = 2, bottomDp = 10))
+        val stopBtn = buildActionButton(context.getString(R.string.settings_stop_service_btn)) {
+            if (service.buildSnapshot().activeExcursionId != null) {
+                AlertDialog.Builder(context)
+                    .setTitle(R.string.dialog_stop_service_active_trip_title)
+                    .setMessage(R.string.dialog_stop_service_active_trip_msg)
+                    .setPositiveButton(R.string.dialog_stop_service_confirm_btn) { _, _ ->
+                        callbacks.onStopServiceAndExitRequested()
+                    }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            } else {
+                callbacks.onStopServiceAndExitRequested()
+            }
+        }.apply {
+            setTextColor(Color.parseColor(COLOR_DANGER_TEXT))
+        }
+        card.addView(stopBtn)
 
         parent.addView(card)
         refreshCompanionAssociationState()
@@ -493,16 +526,17 @@ class SettingsScreenDialog(
     fun refreshCompanionAssociationState() {
         val header = backgroundSectionHeader ?: return
         val card = backgroundCard ?: return
+        val companionContainer = companionSectionContainer ?: return
         val subtitle = companionStatusSubtitle ?: return
         val btn = companionActionBtn ?: return
-        val (isSupported, linkedSummary) = callbacks.getCompanionAssociationStatus()
-        if (!isSupported) {
-            header.visibility = View.GONE
-            card.visibility = View.GONE
-            return
-        }
         header.visibility = View.VISIBLE
         card.visibility = View.VISIBLE
+        val (isSupported, linkedSummary) = callbacks.getCompanionAssociationStatus()
+        if (!isSupported) {
+            companionContainer.visibility = View.GONE
+            return
+        }
+        companionContainer.visibility = View.VISIBLE
         if (linkedSummary != null) {
             subtitle.text = context.getString(R.string.settings_companion_linked_subtitle, linkedSummary)
             btn.text = context.getString(R.string.settings_companion_unlink_btn)
@@ -1149,6 +1183,7 @@ class SettingsScreenDialog(
         private const val COLOR_IDLE_PILL_BG = "#334155"
         private const val COLOR_ACCENT = "#0284C7"
         private const val COLOR_ACCENT_TEXT = "#38BDF8"
+        private const val COLOR_DANGER_TEXT = "#F87171"
         private const val COLOR_TEXT_PRIMARY = "#F8FAFC"
         private const val COLOR_TEXT_BODY = "#CBD5E1"
         private const val COLOR_TEXT_SECONDARY = "#94A3B8"

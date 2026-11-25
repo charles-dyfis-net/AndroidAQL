@@ -24,6 +24,12 @@ class AlertActionReceiver : BroadcastReceiver() {
                 CompanionDeviceHelper.markLinkSuggestionDismissed(context)
                 AqlCollectorService.cancelCompanionLinkSuggestionNotification(context)
             }
+            ACTION_STOP_SERVICE -> {
+                AqlCollectorService.instance?.requestUserStop(
+                    reason = "notification_action",
+                    allowDuringActiveExcursion = false
+                )
+            }
         }
     }
 
@@ -32,6 +38,7 @@ class AlertActionReceiver : BroadcastReceiver() {
         const val ACTION_BOOKMARK_CURRENT_TRIP = "io.github.androidaql.ACTION_BOOKMARK_CURRENT_TRIP"
         const val ACTION_END_MANUAL_TRIP = "io.github.androidaql.ACTION_END_MANUAL_TRIP"
         const val ACTION_DISMISS_COMPANION_LINK_SUGGESTION = "io.github.androidaql.ACTION_DISMISS_COMPANION_LINK_SUGGESTION"
+        const val ACTION_STOP_SERVICE = "io.github.androidaql.ACTION_STOP_SERVICE"
         const val EXTRA_METRIC_NAME = "extra_metric_name"
     }
 }

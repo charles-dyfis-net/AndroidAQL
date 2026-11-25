@@ -259,6 +259,7 @@ class AqlCollectorService : Service() {
     private var companionDisappearedAtMs: Long? = null
     private var hasLinkedCompanionDevice: Boolean = false
     @Volatile private var isSleepingForAbsentCompanion: Boolean = false
+    @Volatile private var isUserStopping: Boolean = false
     private var isWatchdogScheduled: Boolean = false
     private var lastPostedStatusNotificationKey: StatusNotificationKey? = null
     @Volatile private var lastLiveTelemetryBleAddress: String? = null
@@ -343,6 +344,7 @@ class AqlCollectorService : Service() {
     private val rawFrameHistory = ArrayDeque<String>(40)
     private val lastNonFdcdLogMsByMac = HashMap<String, Long>()
     private val listeners = mutableSetOf<(LiveTelemetrySnapshot) -> Unit>()
+    private val userStopListeners = mutableSetOf<() -> Unit>()
     var isDemoStreamRunning: Boolean = false
         private set
     private var demoTickCounter: Int = 0
@@ -521,6 +523,10 @@ class AqlCollectorService : Service() {
         val startReason = intent?.getStringExtra(EXTRA_START_REASON)
             ?: if (intent == null) "sticky_restart" else "activity"
         val nowMs = System.currentTimeMillis()
+        isUserStopping = false
+        if (startReason == "activity" || intent?.action == ACTION_DEV_COMMAND) {
+            setUserStoppedService(this, false)
+        }
         val wasSleeping = isSleepingForAbsentCompanion
         isSleepingForAbsentCompanion = false
         if (wasSleeping) {
@@ -799,6 +805,7 @@ class AqlCollectorService : Service() {
 
     private fun onClientBound() {
         boundClientCount++
+        isUserStopping = false
         val wasSleeping = isSleepingForAbsentCompanion
         isSleepingForAbsentCompanion = false
         if (wasSleeping) {
@@ -984,6 +991,66 @@ class AqlCollectorService : Service() {
 
     fun removeListener(listener: (LiveTelemetrySnapshot) -> Unit) {
         listeners.remove(listener)
+    }
+
+    fun addUserStopListener(listener: () -> Unit) {
+        userStopListeners.add(listener)
+    }
+
+    fun removeUserStopListener(listener: () -> Unit) {
+        userStopListeners.remove(listener)
+    }
+
+    fun requestUserStop(reason: String, allowDuringActiveExcursion: Boolean): Boolean {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { requestUserStop(reason, allowDuringActiveExcursion) }
+            return true
+        }
+        if (isUserStopping) return true
+        val excId = activeExcursionId
+        if (!allowDuringActiveExcursion && excId != null) {
+            hwLogger.logEvent(
+                "USER_STOP_IGNORED_ACTIVE_EXCURSION",
+                mapOf("reason" to reason, "excursion_id" to excId)
+            )
+            return false
+        }
+
+        isUserStopping = true
+        isWatchdogScheduled = false
+        setUserStoppedService(this, true)
+        hwLogger.logEvent(
+            "USER_STOP_SERVICE",
+            mapOf("reason" to reason, "had_active_excursion" to (excId != null))
+        )
+
+        if (excId != null) {
+            val nowSec = System.currentTimeMillis() / 1000L
+            metadataDb.updateOngoingExcursionEnd(
+                excId,
+                nowSec,
+                closeExcursion = true,
+                ringStore = ringStore
+            )
+            activeExcursionId = null
+        }
+
+        if (isDemoStreamRunning) {
+            stopDemoStream()
+        }
+        mainHandler.removeCallbacks(watchdogRunnable)
+        mainHandler.removeCallbacks(demoStreamRunnable)
+        stopBleScan()
+        disconnectGatt()
+        stopGpsCollection()
+        stopStepCollection()
+        cancelManualTripStopSuggestionNotification()
+        cancelResumeRequiredNotification(this)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        lastPostedStatusNotificationKey = null
+        userStopListeners.toList().forEach { it() }
+        stopSelf()
+        return true
     }
 
     fun setExcursionBleMode(mode: BleCollectionMode) {
@@ -2888,7 +2955,7 @@ class AqlCollectorService : Service() {
     }
 
     private fun updateOngoingForegroundNotification(force: Boolean = false) {
-        if (isSleepingForAbsentCompanion) return
+        if (isSleepingForAbsentCompanion || isUserStopping) return
         val key = buildStatusNotificationKey()
         if (!force && key == lastPostedStatusNotificationKey) return
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -2973,6 +3040,20 @@ class AqlCollectorService : Service() {
                 android.R.drawable.star_on,
                 getString(R.string.notif_action_bookmark_trip),
                 bookmarkIntent
+            )
+        } else if (shouldShowStopNotificationAction(key.hasActiveExcursion)) {
+            val stopIntent = PendingIntent.getBroadcast(
+                this,
+                2,
+                Intent(this, AlertActionReceiver::class.java).apply {
+                    action = AlertActionReceiver.ACTION_STOP_SERVICE
+                },
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            builder.addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                getString(R.string.notif_action_stop_service),
+                stopIntent
             )
         }
 
@@ -3412,6 +3493,7 @@ class AqlCollectorService : Service() {
         const val PERIODIC_GATT_KEEPALIVE_INTERVAL_MS = 210_000L
         const val GATT_RETRY_COOLDOWN_MS = 15_000L
         const val PREF_WIFI_LOSS_DEBOUNCE_SEC = "wifi_loss_debounce_sec"
+        const val PREF_USER_STOPPED_SERVICE = "user_stopped_service"
         const val MAX_WIFI_LOSS_DEBOUNCE_SEC = 300L
         const val ACTIVE_MONITOR_LINK_MAX_AGE_MS = 90_000L
         const val COMPANION_IDLE_SLEEP_GRACE_MS = 180_000L
@@ -3453,7 +3535,25 @@ class AqlCollectorService : Service() {
             }
         }
 
+        fun isUserStoppedService(context: Context): Boolean =
+            context.getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
+                .getBoolean(PREF_USER_STOPPED_SERVICE, false)
+
+        fun setUserStoppedService(context: Context, stopped: Boolean) {
+            context.getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(PREF_USER_STOPPED_SERVICE, stopped)
+                .apply()
+        }
+
+        fun shouldShowStopNotificationAction(hasActiveExcursion: Boolean): Boolean =
+            !hasActiveExcursion
+
+        fun shouldAllowCompanionAutoWake(isUserStopped: Boolean): Boolean =
+            !isUserStopped
+
         fun onCompanionDeviceAppeared(context: Context, reason: String) {
+            if (!shouldAllowCompanionAutoWake(isUserStoppedService(context))) return
             val active = instance
             if (active != null && !active.isSleepingForAbsentCompanion) {
                 active.mainHandler.post {

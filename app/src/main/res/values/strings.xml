@@ -30,6 +30,7 @@
     <string name="notif_status_body_metrics">CO₂: %1$s • PM2.5: %2$d µg/m³ • %3$s / %4$.0f%%</string>
     <string name="notif_status_body_scanning">Looking for nearby air quality monitor...</string>
     <string name="notif_action_bookmark_trip">Bookmark Trip</string>
+    <string name="notif_action_stop_service">Stop</string>
 
     <string name="notif_alert_severity_warning">WARNING</string>
     <string name="notif_alert_severity_critical">CRITICAL</string>
@@ -377,6 +378,12 @@
     <string name="settings_companion_link_active_btn">Link Active Monitor (%1$s)</string>
     <string name="settings_companion_unlinked_subtitle">Link your monitor with Android so background scanning pauses when it\'s away and resumes automatically after reboots or Play Store updates.</string>
     <string name="settings_companion_link_btn">Link Monitor for Auto-Resume</string>
+    <string name="settings_stop_service_title">Stop Background Service</string>
+    <string name="settings_stop_service_subtitle">Stops background scanning and closes AirSlice until you open it again.</string>
+    <string name="settings_stop_service_btn">Stop &amp; Exit AirSlice</string>
+    <string name="dialog_stop_service_active_trip_title">Stop During Active Trip?</string>
+    <string name="dialog_stop_service_active_trip_msg">A trip is currently recording. Stopping AirSlice now will end the trip and stop background monitoring until you reopen the app.</string>
+    <string name="dialog_stop_service_confirm_btn">End Trip &amp; Exit</string>
 
     <string name="settings_threshold_alerts_title">Threshold Alerts</string>
     <string name="settings_alerts_summary">CO₂:  Warn %1$d / Crit %2$d ppm\nPM2.5:  Warn %3$d / Crit %4$d µg/m³\nBattery:  Warn ≤%5$d%% / Crit ≤%6$d%%</string>

@@ -61,6 +61,48 @@ class BackgroundResumeTest {
     }
 
     @Test
+    fun shouldAttemptAutoStartRespectsUserStoppedFlag() {
+        assertNull(
+            AqlAutoStartReceiver.shouldAttemptAutoStart(
+                action = Intent.ACTION_BOOT_COMPLETED,
+                hasBluetoothScanPermission = true,
+                isUserStopped = true
+            )
+        )
+        assertNull(
+            AqlAutoStartReceiver.shouldAttemptAutoStart(
+                action = Intent.ACTION_MY_PACKAGE_REPLACED,
+                hasBluetoothScanPermission = true,
+                isUserStopped = true
+            )
+        )
+        assertEquals(
+            AqlAutoStartReceiver.REASON_BOOT_COMPLETED,
+            AqlAutoStartReceiver.shouldAttemptAutoStart(
+                action = Intent.ACTION_BOOT_COMPLETED,
+                hasBluetoothScanPermission = true,
+                isUserStopped = false
+            )
+        )
+        assertEquals(
+            AqlAutoStartReceiver.REASON_PACKAGE_REPLACED,
+            AqlAutoStartReceiver.shouldAttemptAutoStart(
+                action = Intent.ACTION_MY_PACKAGE_REPLACED,
+                hasBluetoothScanPermission = true,
+                isUserStopped = false
+            )
+        )
+    }
+
+    @Test
+    fun stopNotificationActionAndCompanionWakeGatesMatchExpectedConditions() {
+        assertTrue(AqlCollectorService.shouldShowStopNotificationAction(hasActiveExcursion = false))
+        assertFalse(AqlCollectorService.shouldShowStopNotificationAction(hasActiveExcursion = true))
+        assertFalse(AqlCollectorService.shouldAllowCompanionAutoWake(isUserStopped = true))
+        assertTrue(AqlCollectorService.shouldAllowCompanionAutoWake(isUserStopped = false))
+    }
+
+    @Test
     fun buildResumeNotificationCopyMatchesExpectedReasons() {
         assertEquals(
             "AirSlice paused after reboot" to "Tap to resume passive air quality logging.",

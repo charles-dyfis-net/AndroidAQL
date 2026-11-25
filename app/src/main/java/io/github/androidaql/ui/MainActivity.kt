@@ -72,6 +72,7 @@ class MainActivity : AppCompatActivity() {
 
     private var collectorService: AqlCollectorService? = null
     private var isBound = false
+    private var isExitingApp = false
     private var activeTabIndex = 0
     private var selectedExcursionId: Long? = null
     private var lastSeenLatestExcursionId: Long? = null
@@ -235,6 +236,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val serviceUserStopListener: () -> Unit = {
+        runOnUiThread { completeAppExit() }
+    }
+
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val b = binder as? AqlCollectorService.LocalBinder ?: return
@@ -244,6 +249,7 @@ class MainActivity : AppCompatActivity() {
             svc.refreshCompanionAssociationCache()
             lastObservedActiveExcursionId = svc.buildSnapshot().activeExcursionId
             svc.addListener(serviceListener)
+            svc.addUserStopListener(serviceUserStopListener)
             refreshLiveRecentGraph()
             refreshTripsTab()
             if (activeSettingsDialog?.let { !it.isBoundTo(svc) } == true) {
@@ -260,6 +266,7 @@ class MainActivity : AppCompatActivity() {
 
         override fun onServiceDisconnected(name: ComponentName?) {
             collectorService?.removeListener(serviceListener)
+            collectorService?.removeUserStopListener(serviceUserStopListener)
             collectorService = null
             isBound = false
         }
@@ -319,6 +326,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        if (isExitingApp) return
+        AqlCollectorService.setUserStoppedService(this, false)
         val startIntent = pendingServiceStartIntent ?: Intent(this, AqlCollectorService::class.java)
         pendingServiceStartIntent = null
         ContextCompat.startForegroundService(this, startIntent)
@@ -374,6 +383,7 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         if (isBound) {
             collectorService?.removeListener(serviceListener)
+            collectorService?.removeUserStopListener(serviceUserStopListener)
             unbindService(serviceConnection)
             isBound = false
             collectorService = null
@@ -416,11 +426,32 @@ class MainActivity : AppCompatActivity() {
         activeHelpDialog = null
         if (isBound) {
             collectorService?.removeListener(serviceListener)
+            collectorService?.removeUserStopListener(serviceUserStopListener)
             unbindService(serviceConnection)
             isBound = false
             collectorService = null
         }
         super.onDestroy()
+    }
+
+    private fun completeAppExit() {
+        isExitingApp = true
+        activeSettingsDialog?.dismiss()
+        activeSettingsDialog = null
+        activeSegmentModalDialog?.dismiss()
+        activeSegmentModalDialog = null
+        activeDisclosureDialog?.dismiss()
+        activeDisclosureDialog = null
+        activeHelpDialog?.dismiss()
+        activeHelpDialog = null
+        if (isBound) {
+            collectorService?.removeListener(serviceListener)
+            collectorService?.removeUserStopListener(serviceUserStopListener)
+            unbindService(serviceConnection)
+            isBound = false
+            collectorService = null
+        }
+        finishAndRemoveTask()
     }
 
     private fun captureCompanionLinkRequestFromIntent(sourceIntent: Intent?) {
@@ -3039,6 +3070,19 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onEnablePermissionsRequested() {
                     requestRuntimePermissionsIfNeeded(forcePrompt = true)
+                }
+
+                override fun onStopServiceAndExitRequested() {
+                    val currentSvc = collectorService ?: svc
+                    isExitingApp = true
+                    activeSettingsDialog?.dismiss()
+                    activeSettingsDialog = null
+                    currentSvc.removeUserStopListener(serviceUserStopListener)
+                    currentSvc.requestUserStop(
+                        reason = "settings_exit",
+                        allowDuringActiveExcursion = true
+                    )
+                    completeAppExit()
                 }
 
                 override fun onSettingsDismissed() {

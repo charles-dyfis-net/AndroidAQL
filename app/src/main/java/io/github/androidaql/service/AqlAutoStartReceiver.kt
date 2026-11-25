@@ -17,7 +17,8 @@ class AqlAutoStartReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         val reason = shouldAttemptAutoStart(
             action = intent?.action,
-            hasBluetoothScanPermission = AqlCollectorService.hasBluetoothScanPermission(context)
+            hasBluetoothScanPermission = AqlCollectorService.hasBluetoothScanPermission(context),
+            isUserStopped = AqlCollectorService.isUserStoppedService(context)
         ) ?: return
 
         val observingCount = CompanionDeviceHelper.ensureObservingAll(context)
@@ -35,9 +36,10 @@ class AqlAutoStartReceiver : BroadcastReceiver() {
 
         fun shouldAttemptAutoStart(
             action: String?,
-            hasBluetoothScanPermission: Boolean
+            hasBluetoothScanPermission: Boolean,
+            isUserStopped: Boolean = false
         ): String? {
-            if (!hasBluetoothScanPermission) return null
+            if (!hasBluetoothScanPermission || isUserStopped) return null
             return when (action) {
                 Intent.ACTION_BOOT_COMPLETED -> REASON_BOOT_COMPLETED
                 Intent.ACTION_MY_PACKAGE_REPLACED -> REASON_PACKAGE_REPLACED
