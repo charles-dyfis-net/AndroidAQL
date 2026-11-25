@@ -23,12 +23,12 @@
     <string name="notif_status_title_trip_gps">🚶 On a Trip (GPS Movement Active)</string>
     <string name="notif_status_title_trip_steps">🚶 On a Trip (Step Sensor Active • GPS Off)</string>
     <string name="notif_status_title_trip_gps_off">🚶 On a Trip (GPS Off)</string>
-    <string name="notif_status_title_trip_paused">⏸️ Trip Paused (Waiting for Monitor BLE)</string>
+    <string name="notif_status_title_trip_paused">⏸️ Trip Paused (Waiting for Monitor)</string>
     <string name="notif_status_title_waiting_monitor">📡 Waiting for Qingping Monitor...</string>
     <string name="notif_status_co2_ppm">%1$d ppm</string>
     <string name="notif_status_co2_placeholder">— ppm</string>
     <string name="notif_status_body_metrics">CO₂: %1$s • PM2.5: %2$d µg/m³ • %3$s / %4$.0f%%</string>
-    <string name="notif_status_body_scanning">Scanning for 0xFDCD advertisements...</string>
+    <string name="notif_status_body_scanning">Looking for nearby air quality monitor...</string>
     <string name="notif_action_bookmark_trip">Bookmark Trip</string>
 
     <string name="notif_alert_severity_warning">WARNING</string>
@@ -60,8 +60,8 @@
 
     <!-- Keep-Alive Strategy Copy -->
     <string name="dev_keep_alive_short_auto_offline_setup">Auto: One-Shot Offline 0x88 Setup + Passive (Default)</string>
-    <string name="settings_keep_alive_desc_auto_offline_setup">Default: When the monitor is in 0x0A/0x8A Wi-Fi setup mode, performs a single ~5-second offline BLE setup (127.0.0.1 placeholder) to restore the normal anti-burn-in CO₂ OLED screen and transition into continuous 0x88 broadcasts, then listens 100% passively. For multi-hour trips, connect a USB-C power bank.</string>
-    <string name="keep_alive_badge_auto_offline_setup">Auto (Offline 0x88 Setup)</string>
+    <string name="settings_keep_alive_desc_auto_offline_setup">Default: When the monitor is in Wi-Fi setup mode, runs a quick ~5-second offline Bluetooth setup so it restores its normal CO₂ display and broadcasts continuously, then listens passively. For multi-hour trips, connect a USB-C power bank.</string>
+    <string name="keep_alive_badge_auto_offline_setup">Auto Setup</string>
 
     <string name="dev_keep_alive_short_0509_24m_1101">Always 05 09 + 24m 11 01 Window Reset (Dev)</string>
     <string name="dev_settings_keep_alive_desc_0509_24m_1101">Developer diagnostic strategy: forces 24-minute 11 01 window resets everywhere to reset both the 10-minute and 30-minute BLE broadcast timers (switches the monitor OLED to the static Wi-Fi icon on each renewal).</string>
@@ -72,7 +72,7 @@
     <string name="dev_keep_alive_badge_0509_only">Dev 05 09 (&lt;30m)</string>
 
     <string name="dev_keep_alive_short_none_passive">Passive Only (No GATT Keep-Alive)</string>
-    <string name="settings_keep_alive_desc_none_passive">Never initiates GATT connections. Recommended for custom BTHome v2 firmware, external hubs, or USB-powered operation without offline 0x88 setup.</string>
+    <string name="settings_keep_alive_desc_none_passive">Never connects directly to the monitor. Recommended for custom BTHome v2 firmware, external hubs, or USB-powered operation without automatic offline setup.</string>
     <string name="keep_alive_badge_none_passive">Passive</string>
 
     <!-- Now Tab -->
@@ -90,17 +90,19 @@
     <string name="now_manual_trip_end_btn">⏹️ End Current Trip</string>
     <string name="now_add_note_btn">📝 Add Note</string>
     <string name="now_demo_stream_btn">🎭 Toggle Live Demo Replay Stream (No Hardware Needed)</string>
-    <string name="now_ble_bthome_passive">BTHome v2 (Passive)</string>
-    <string name="now_ble_provisioned_passive">Provisioned 0x88 (Passive)</string>
-    <string name="now_ble_passive">Passive</string>
-    <string name="now_context_at_place">🏠 At %1$s • GPS Off • BLE: %2$s</string>
-    <string name="now_context_monitoring">📡 Monitoring • GPS Off • BLE: %1$s</string>
+    <string name="now_source_qingping">Qingping</string>
+    <string name="now_source_bthome">BTHome</string>
+    <string name="now_context_at_place">🏠 At %1$s • GPS Off</string>
+    <string name="now_context_at_place_with_source">🏠 At %1$s • GPS Off • %2$s</string>
+    <string name="now_context_monitoring">📡 Monitoring • GPS Off</string>
+    <string name="now_context_monitoring_with_source">📡 Monitoring • GPS Off • %1$s</string>
     <string name="now_movement_gps_steps">GPS + Steps Active</string>
     <string name="now_movement_gps">GPS Active</string>
     <string name="now_movement_steps">Steps Active • GPS Off</string>
     <string name="now_movement_gps_off">GPS Off</string>
-    <string name="now_context_on_trip">🚶 On a Trip • %1$s • BLE: %2$s</string>
-    <string name="now_context_trip_paused">⏸️ Trip Paused (&gt;90s BLE dropout; GPS paused)</string>
+    <string name="now_context_on_trip">🚶 On a Trip • %1$s</string>
+    <string name="now_context_on_trip_with_source">🚶 On a Trip • %1$s • %2$s</string>
+    <string name="now_context_trip_paused">⏸️ Trip Paused (monitor signal lost; GPS paused)</string>
     <string name="now_context_out_of_range">📡 Monitor Out of Range • GPS Off</string>
     <string name="now_co2_header_out_of_date">⚠️ OUT OF DATE • COLLECTED %1$s AGO</string>
     <string name="now_co2_stale_badge">Last reading at %1$s (%2$s ago). Hold down the monitor\'s top touchbar until the Wi-Fi icon flashes if asleep.</string>
@@ -218,9 +220,9 @@
     <string name="dialog_got_it">Got it</string>
 
     <string name="disclosure_title">📍 Location, Activity &amp; Privacy Disclosure</string>
-    <string name="disclosure_message">AirSlice accesses location, Wi-Fi, and physical activity step data on-device for Trip Mode and Saved Places (including in the background or with the screen off), and immediately discards almost all of it—keeping only movement speed (m/s) and GPS accuracy (m):\n\n• Saved Wi-Fi Places: Checks whether your connected Wi-Fi matches a Saved Place (Location permission required) so GPS and step sensing stay off at saved locations like your home or office, where movement tracking isn\'t needed.\n\n• Trip Movement (GPS + Steps): Outside Saved Places while your monitor is nearby, converts GPS fixes and hardware step cadence into scalar speed (m/s) and accuracy (m) in memory, immediately discarding raw coordinates and step counts.\n\n• 100% Local &amp; Private: Raw GPS coordinates, unconfigured Wi-Fi names, and step counts are never saved to disk or sent to any server; recorded summaries leave your phone only when you explicitly share an XLSX workbook or diagnostic log.</string>
+    <string name="disclosure_message">AirSlice accesses location, Wi-Fi, and physical activity step data on-device for Trip Mode and Saved Places (including in the background or with the screen off), and immediately discards almost all of it—keeping only movement speed (m/s) and GPS accuracy (m):\n\n• Saved Wi-Fi Places: Checks whether your connected Wi-Fi matches a Saved Place (Location permission required) so GPS and step sensing stay off at saved locations like your home or office, where movement tracking isn\'t needed.\n\n• Trip Movement (GPS + Steps): Outside Saved Places while your monitor is nearby, converts GPS and step sensor data into movement speed (m/s) and accuracy (m) in memory, immediately discarding raw coordinates and step counts.\n\n• 100% Local &amp; Private: Raw GPS coordinates, unconfigured Wi-Fi names, and step counts are never saved to disk or sent to any server; recorded summaries leave your phone only when you explicitly share an XLSX workbook or diagnostic log.</string>
     <string name="disclosure_continue_btn">Continue</string>
-    <string name="disclosure_decline_btn">Not Now (BLE Only)</string>
+    <string name="disclosure_decline_btn">Not Now (Bluetooth Only)</string>
 
     <string name="help_dialog_title">❓ AirSlice Help &amp; FAQ</string>
     <string name="help_intro">AirSlice is a 100% local, cloud-free Bluetooth companion and Trip Slicer for the Qingping Air Monitor Lite (CGDN1) and compatible BTHome v2 sensors.\n\n• With a CGDN1 Monitor: Turn on the monitor (or hold its top touchbar ~7s until the Wi-Fi icon appears if unconfigured). AirSlice completes offline Bluetooth setup in ~5s and records continuously—no cloud or account needed.\n\n• No Monitor Handy? (Testing &amp; Evaluation): Enable Demo Data Mode below to unlock a simulated live sensor stream on the Now tab and a sample multi-leg excursion on the Trips tab. You can also import shared .xlsx trip files.</string>
@@ -243,8 +245,8 @@
     <string name="dialog_segment_default_label">Segment</string>
     <string name="dialog_segment_merge_btn">Merge #%1$d + #%2$d ↓</string>
 
-    <string name="dialog_14d_window_title">Select Window from 14-Day Ring Buffer</string>
-    <string name="dialog_14d_window_info">Focus on a specific subset of the 14-day high-resolution ring buffer without compressing 14 days onto one screen:</string>
+    <string name="dialog_14d_window_title">Select Window from 14-Day History</string>
+    <string name="dialog_14d_window_info">Focus on a specific time window from your 14-day history without compressing 14 days onto one screen:</string>
     <string name="dialog_14d_day_today">Today (%1$s)</string>
     <string name="dialog_14d_day_yesterday">Yesterday (%1$s)</string>
     <string name="dialog_14d_day_days_ago">%1$d days ago (%2$s)</string>
@@ -264,23 +266,23 @@
     <string name="dialog_manage_trip_title_label">Trip Title:</string>
     <string name="dialog_manage_trip_title_hint">e.g., Morning Walk &amp; Coffee, Loop Errand</string>
     <string name="dialog_manage_trip_pin_check">📌 Retain / Pin Entire Trip Forever</string>
-    <string name="dialog_manage_trip_pin_forever">✅ Retained Forever: Full 15-second telemetry is saved in permanent storage.</string>
+    <string name="dialog_manage_trip_pin_forever">✅ Retained Forever: Full 15-second readings are saved permanently.</string>
     <string name="dialog_manage_trip_pin_outside">⚠️ Outside 14-Day Window: Unpinning this trip will permanently delete it and its saved readings.</string>
-    <string name="dialog_manage_trip_pin_temporary">⚠️ Temporary (14-Day Ring): Auto-recorded trips are not retained beyond 14 days unless pinned.</string>
+    <string name="dialog_manage_trip_pin_temporary">⚠️ Temporary (14-Day History): Auto-recorded trips are not kept beyond 14 days unless pinned.</string>
     <string name="dialog_manage_trip_export_btn">📤 Export Trip (.xlsx)</string>
     <string name="dialog_manage_trip_default_title">Trip</string>
     <string name="dialog_manage_trip_delete_btn">🗑️ Delete Trip</string>
 
     <string name="dialog_delete_trip_title_unpin">Unpin &amp; Delete Trip (%1$s)?</string>
     <string name="dialog_delete_trip_title">Delete Trip (%1$s)?</string>
-    <string name="dialog_delete_trip_msg_outside_unpin">⚠️ This trip is outside the 14-day ring buffer window. Unpinning it will permanently delete the trip, its segment labels, and its saved air-quality readings (they are no longer in the 14-day ring buffer).</string>
-    <string name="dialog_delete_trip_msg_outside_delete">⚠️ This trip is outside the 14-day ring buffer window. Deleting it will permanently delete the trip, its segment labels, and its saved air-quality readings (they are no longer in the 14-day ring buffer).</string>
-    <string name="dialog_delete_trip_msg_inside">This removes the trip and its segment labels. (Underlying 14-day ring-buffer readings remain intact and can still be carved via 🗓️ 14d Window.)</string>
+    <string name="dialog_delete_trip_msg_outside_unpin">⚠️ This trip is older than 14 days. Unpinning it will permanently delete the trip, its segment labels, and its saved air-quality readings (they are no longer in your 14-day history).</string>
+    <string name="dialog_delete_trip_msg_outside_delete">⚠️ This trip is older than 14 days. Deleting it will permanently delete the trip, its segment labels, and its saved air-quality readings (they are no longer in your 14-day history).</string>
+    <string name="dialog_delete_trip_msg_inside">This removes the trip and its segment labels. (The underlying 14-day history readings remain intact and can still be carved via 🗓️ 14d Window.)</string>
     <string name="dialog_delete_trip_btn_unpin">Unpin &amp; Delete</string>
     <string name="dialog_delete_trip_btn_permanent">Delete Permanently</string>
     <string name="dialog_delete_trip_btn">Delete Trip</string>
 
-    <string name="dialog_note_warn_debounce">⏳ Waiting for Wi-Fi disconnect debounce — this note will be included if the trip starts (otherwise retained for 14 days).</string>
+    <string name="dialog_note_warn_debounce">⏳ Waiting for Auto-Trip Delay — this note will be included if the trip starts (otherwise kept for 14 days).</string>
     <string name="dialog_note_warn_no_live_trip">⏳ No trip is currently running — this note will be discarded after 14 days unless included in a pinned trip.</string>
     <string name="dialog_note_warn_outside_trip">⏳ No trip covers this timestamp — this note will be discarded after 14 days unless included in a pinned trip.</string>
     <string name="dialog_note_target_selected">📍 Selected (%1$s)</string>
@@ -349,14 +351,14 @@
     <string name="settings_saved_places_subtitle">Pauses GPS automatically while connected.</string>
     <string name="settings_saved_places_empty">No saved places configured yet.</string>
     <string name="settings_saved_place_row_title">🏠 %1$s</string>
-    <string name="settings_saved_place_no_ssid">No Wi-Fi SSID linked</string>
+    <string name="settings_saved_place_no_ssid">No Wi-Fi network linked</string>
     <string name="settings_sim_stop">Stop Sim</string>
     <string name="settings_sim_start">Simulate</string>
     <string name="settings_add_wifi_place_btn">+ Add or Link Wi-Fi Place</string>
 
     <string name="settings_auto_trip_delay_title">Auto-Trip Delay</string>
     <string name="settings_auto_trip_delay_info_cd">Auto-Trip Delay details</string>
-    <string name="settings_auto_trip_delay_info_msg">Waits for the selected delay before starting an auto-trip and waking GPS when Saved Place Wi-Fi drops.\n\nUntouched auto-recorded trips under 3 minutes are automatically discarded after closing. Manual trips are always kept, and all 15-second readings remain in the 14-day ring buffer.</string>
+    <string name="settings_auto_trip_delay_info_msg">Waits for the selected delay before starting an auto-trip and waking GPS when Saved Place Wi-Fi drops.\n\nUntouched auto-recorded trips under 3 minutes are automatically discarded after closing. Manual trips are always kept, and all 15-second readings remain in your 14-day history.</string>
     <string name="settings_option_seconds">%1$ds</string>
     <string name="settings_debounce_0s">Start immediately on Wi-Fi drop (captures elevators &amp; hallways).</string>
     <string name="settings_debounce_15s">Ignore brief 15s Wi-Fi glitches before starting a trip.</string>
@@ -373,7 +375,7 @@
     <string name="settings_companion_unlink_btn">Unlink Monitor</string>
     <string name="settings_companion_active_subtitle">Receiving live data from %1$s. Link it once so background scanning pauses when it\'s away and resumes automatically after reboots or updates.</string>
     <string name="settings_companion_link_active_btn">Link Active Monitor (%1$s)</string>
-    <string name="settings_companion_unlinked_subtitle">Link your monitor with Android Companion Device Presence so background scanning pauses when it\'s away and resumes automatically after reboots or Play Store updates.</string>
+    <string name="settings_companion_unlinked_subtitle">Link your monitor with Android so background scanning pauses when it\'s away and resumes automatically after reboots or Play Store updates.</string>
     <string name="settings_companion_link_btn">Link Monitor for Auto-Resume</string>
 
     <string name="settings_threshold_alerts_title">Threshold Alerts</string>
@@ -388,13 +390,13 @@
     <string name="dev_settings_keep_alive_24m_reset_option">24m Reset</string>
     <string name="dev_settings_keep_alive_0509_only_option">05 09 Only</string>
     <string name="settings_keep_alive_sub_auto">Runs a ~5s offline setup when needed, then listens passively.</string>
-    <string name="settings_keep_alive_sub_passive">Passive listener only — never initiates GATT connections.</string>
+    <string name="settings_keep_alive_sub_passive">Passive listener only — never connects directly to the monitor.</string>
     <string name="dev_settings_keep_alive_sub_24m_reset">Dev: resets 10m &amp; 30m BLE windows every 24m (11 01).</string>
     <string name="dev_settings_keep_alive_sub_0509">Dev: sends 05 09 time sync every 3.5m (&lt;30m ceiling).</string>
     <string name="settings_chart_gap_grace_title">Chart Gap Grace</string>
     <string name="settings_option_3m">3m</string>
-    <string name="settings_grace_30s">Bridges brief dropouts up to 30s (2 missed 15s slots).</string>
-    <string name="settings_grace_45s">Default — bridges dropouts up to 45s (3 missed slots).</string>
+    <string name="settings_grace_30s">Bridges brief dropouts up to 30s (2 missed readings).</string>
+    <string name="settings_grace_45s">Default — bridges dropouts up to 45s (3 missed readings).</string>
     <string name="settings_grace_90s">Bridges dropouts up to 90s (matches Trip Pause threshold).</string>
     <string name="settings_grace_180s">Bridges dropouts up to 3 minutes (180s).</string>
     <string name="settings_grace_custom">Bridges dropouts up to %1$ds.</string>
@@ -413,7 +415,7 @@
     <string name="dev_settings_summary_badge">Dev</string>
 
     <string name="settings_help_faq_row">Help, FAQ &amp; User Guides</string>
-    <string name="settings_share_diag_log_row">Share Diagnostic Log (JSONL)</string>
+    <string name="settings_share_diag_log_row">Share Diagnostic Log</string>
     <string name="settings_privacy_disclosure_row">Location, Activity &amp; Privacy Disclosure</string>
     <string name="settings_enable_permissions_row">Enable Location &amp; Step Tracking</string>
 
@@ -423,10 +425,10 @@
     <string name="toast_demo_replay_started">Started Live Demo Replay (every 3s)</string>
     <string name="toast_demo_replay_stopped">Stopped Live Demo Replay</string>
     <string name="toast_trip_pinned">📌 Trip pinned forever</string>
-    <string name="toast_trip_unpinned_retention">Trip set to 14-day ring retention</string>
+    <string name="toast_trip_unpinned_retention">Trip set to 14-day history retention</string>
     <string name="toast_carved_pinned">📌 Carved &amp; Pinned Trip: %1$s</string>
     <string name="toast_monitor_already_linked">Monitor is already linked</string>
-    <string name="toast_companion_not_supported">Companion Device Presence is not supported on this device</string>
+    <string name="toast_companion_not_supported">Automatic monitor detection is not supported on this device</string>
     <string name="toast_grant_bt_first">Grant Bluetooth permission first, then try linking again</string>
     <string name="toast_companion_picker_failed">Could not open device picker: %1$s</string>
     <string name="toast_companion_unreachable">Could not reach monitor (%1$s). Make sure it\'s nearby and try linking from Settings.</string>
@@ -434,7 +436,7 @@
     <string name="toast_companion_start_failed">Could not start device linking: %1$s</string>
     <string name="companion_default_monitor_label">monitor</string>
     <string name="toast_companion_linked_observing">Linked %1$s for auto-resume &amp; battery savings</string>
-    <string name="toast_companion_linked_no_presence">Linked %1$s (presence observation unavailable)</string>
+    <string name="toast_companion_linked_no_presence">Linked %1$s (auto-resume unavailable on this device)</string>
     <string name="toast_companion_unlinked">Unlinked monitor from background auto-resume</string>
     <string name="toast_no_browser">No browser available to open %1$s</string>
     <string name="toast_demo_enabled">Demo Data Mode enabled! Try \'Toggle Live Demo Replay Stream\' on Now or \'Load Canned Demo Trip\' on Trips.</string>
@@ -456,9 +458,9 @@
     <string name="share_segment_xlsx_subject">Air Quality Segment XLSX: #%1$d %2$s</string>
     <string name="share_segment_xlsx_chooser">Share Segment XLSX</string>
     <string name="share_chooser_with_file">%1$s (%2$s)</string>
-    <string name="toast_no_hw_trace">No hardware trace logged yet.</string>
-    <string name="share_hw_trace_subject">AirSlice Hardware Bring-Up Trace (JSONL)</string>
-    <string name="share_hw_trace_chooser">Share HW Trace JSONL</string>
+    <string name="toast_no_hw_trace">No diagnostic log recorded yet.</string>
+    <string name="share_hw_trace_subject">AirSlice Diagnostic Log</string>
+    <string name="share_hw_trace_chooser">Share Diagnostic Log</string>
     <string name="toast_thresholds_reset">Reset alert thresholds to defaults</string>
     <string name="toast_sim_stopped">Stopped simulated presence</string>
     <string name="toast_sim_started">Simulating presence at %1$s (GPS Off)</string>

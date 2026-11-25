@@ -130,11 +130,6 @@ class AqlCollectorService : Service() {
         fun getStatusBadge(context: Context): String =
             context.getString(statusBadgeRes)
 
-        fun effectiveStatusBadge(
-            context: Context,
-            collectorState: ExcursionStateMachine.CollectorState
-        ): String = getStatusBadge(context)
-
         companion object {
             val userAccessibleStrategies: List<KeepAlivePayloadStrategy> = listOf(
                 AUTO_OFFLINE_SETUP,

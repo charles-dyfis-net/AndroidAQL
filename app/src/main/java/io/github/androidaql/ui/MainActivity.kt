@@ -1970,21 +1970,25 @@ class MainActivity : AppCompatActivity() {
     private fun renderLiveSnapshot(snap: AqlCollectorService.LiveTelemetrySnapshot) {
         val useF = TemperatureUnitFormatter.useFahrenheit(this)
 
-        val bleShortLabel = when {
-            snap.lastFrame?.isBtHomeV2 == true -> getString(R.string.now_ble_bthome_passive)
-            snap.lastFrame?.isProvisionedNormalMode == true -> getString(R.string.now_ble_provisioned_passive)
-            else -> when (snap.effectiveBleMode) {
-                BleCollectionMode.PERIODIC_GATT_KEEPALIVE ->
-                    snap.devConfig.strategy.effectiveStatusBadge(this, snap.collectorState)
-                BleCollectionMode.PASSIVE_ONLY -> getString(R.string.now_ble_passive)
-            }
+        val sourceLabel: String? = when {
+            snap.lastFrame == null -> null
+            snap.lastFrame.isBtHomeV2 -> getString(R.string.now_source_bthome)
+            else -> getString(R.string.now_source_qingping)
         }
         contextPillView.text = when (snap.collectorState) {
             ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP ->
                 if (snap.matchedKnownPlace != null) {
-                    getString(R.string.now_context_at_place, snap.matchedKnownPlace.label, bleShortLabel)
+                    if (sourceLabel != null) {
+                        getString(R.string.now_context_at_place_with_source, snap.matchedKnownPlace.label, sourceLabel)
+                    } else {
+                        getString(R.string.now_context_at_place, snap.matchedKnownPlace.label)
+                    }
                 } else {
-                    getString(R.string.now_context_monitoring, bleShortLabel)
+                    if (sourceLabel != null) {
+                        getString(R.string.now_context_monitoring_with_source, sourceLabel)
+                    } else {
+                        getString(R.string.now_context_monitoring)
+                    }
                 }
             ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE -> {
                 val movementBadge = when {
@@ -1993,7 +1997,11 @@ class MainActivity : AppCompatActivity() {
                     snap.isStepSensorActive -> getString(R.string.now_movement_steps)
                     else -> getString(R.string.now_movement_gps_off)
                 }
-                getString(R.string.now_context_on_trip, movementBadge, bleShortLabel)
+                if (sourceLabel != null) {
+                    getString(R.string.now_context_on_trip_with_source, movementBadge, sourceLabel)
+                } else {
+                    getString(R.string.now_context_on_trip, movementBadge)
+                }
             }
             ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED ->
                 getString(R.string.now_context_trip_paused)
