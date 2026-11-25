@@ -78,6 +78,9 @@ tasks.configureEach {
     if (name == "preBuild") {
         dependsOn(logBuildVersion)
     }
+    if (name == "assembleDebug") {
+        dependsOn("lintDebug")
+    }
 }
 
 android {
@@ -123,6 +126,18 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+    }
+    lint {
+        val strictResourceChecks = listOf(
+            "UnusedResources",
+            "StringFormatInvalid",
+            "StringFormatCount",
+            "StringFormatMatches"
+        )
+        error += strictResourceChecks
+        fatal += strictResourceChecks
+        checkReleaseBuilds = true
+        abortOnError = true
     }
     testOptions {
         managedDevices {
