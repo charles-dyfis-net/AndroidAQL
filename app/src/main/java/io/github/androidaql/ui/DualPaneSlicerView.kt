@@ -11,6 +11,7 @@ import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import io.github.androidaql.R
 import io.github.androidaql.storage.AqlRingBufferStore
 import io.github.androidaql.storage.SessionSliceRecord
 import io.github.androidaql.storage.TimelineNoteRecord
@@ -138,7 +139,7 @@ class DualPaneSlicerView(context: Context) : View(context) {
             requestLayout()
         }
 
-    var emptyStateMessage: String = "No samples in selected window."
+    var emptyStateMessage: String = context.getString(R.string.chart_empty_default)
         set(value) {
             field = value
             invalidate()
@@ -828,7 +829,12 @@ class DualPaneSlicerView(context: Context) : View(context) {
         canvas.drawText("$maxCo2", padLeft - 4f * density, topPaneTop + 10f * density, textPaint)
         canvas.drawText("$minCo2", padLeft - 4f * density, topPaneBot, textPaint)
         textPaint.textAlign = Paint.Align.LEFT
-        canvas.drawText("CO₂ (ppm, blue) & PM2.5 (purple) • Dashed = Dropout (> ${dropoutGracePeriodSec}s)", padLeft + 4f * density, topPaneTop + 11f * density, textPaint)
+        canvas.drawText(
+            context.getString(R.string.chart_legend_pane1, dropoutGracePeriodSec),
+            padLeft + 4f * density,
+            topPaneTop + 11f * density,
+            textPaint
+        )
 
         // 4. Pane 2 (Middle): Temperature (°F or °C per device/user setting, orange) & Relative Humidity (%, cyan)
         val useFahrenheit = TemperatureUnitFormatter.useFahrenheit(context)
@@ -889,7 +895,12 @@ class DualPaneSlicerView(context: Context) : View(context) {
         canvas.drawText(TemperatureUnitFormatter.format(maxTemp, useFahrenheit, decimals = 0), padLeft - 4f * density, midPaneTop + 10f * density, textPaint)
         canvas.drawText(TemperatureUnitFormatter.format(minTemp, useFahrenheit, decimals = 0), padLeft - 4f * density, midPaneBot, textPaint)
         textPaint.textAlign = Paint.Align.LEFT
-        canvas.drawText("Temp ($unitSym, orange) & RH (%, cyan)", padLeft + 4f * density, midPaneTop + 11f * density, textPaint)
+        canvas.drawText(
+            context.getString(R.string.chart_legend_pane2, unitSym),
+            padLeft + 4f * density,
+            midPaneTop + 11f * density,
+            textPaint
+        )
 
         // 5. Pane 3 (Bottom): Speed (m/s, shifted log scale) + Weak GPS (>50m accuracy) + Location Not Collected (Saved Place / GPS Off)
         val maxSpeed = max(
@@ -934,7 +945,11 @@ class DualPaneSlicerView(context: Context) : View(context) {
                 canvas.drawLine(x1, midBotY, x2, midBotY, gpsNotCollectedLinePaint)
                 val spanW = x2 - x1
                 if (spanW >= 56f * density) {
-                    val label = if (spanHasSavedPlace) "🏠 GPS Off (Saved Place)" else "GPS Off"
+                    val label = if (spanHasSavedPlace) {
+                        context.getString(R.string.chart_gps_off_saved_place)
+                    } else {
+                        context.getString(R.string.chart_gps_off)
+                    }
                     canvas.drawText(label, (x1 + x2) / 2f, midBotY - 4f * density, gpsNotCollectedTextPaint)
                 }
             }
@@ -1019,7 +1034,12 @@ class DualPaneSlicerView(context: Context) : View(context) {
         }
         canvas.drawText("0", padLeft - 4f * density, botPaneBot, textPaint)
         textPaint.textAlign = Paint.Align.LEFT
-        canvas.drawText("Speed (log) • Green=GPS • Amber=Steps • Red=Weak", padLeft + 4f * density, botPaneTop + 11f * density, textPaint)
+        canvas.drawText(
+            context.getString(R.string.chart_legend_pane3),
+            padLeft + 4f * density,
+            botPaneTop + 11f * density,
+            textPaint
+        )
 
         // 5c. Segment Strip beneath Pane 3 (shows numbered intervals #1, #2, ... clamped to viewport)
         val segTop = layout.segTop
@@ -1138,8 +1158,10 @@ class DualPaneSlicerView(context: Context) : View(context) {
                     if (inDropoutGapSec > 0L) cursorEpochSec else nearest.bucketEpochSec
                 ))
                 val timeLabel = when {
-                    inDropoutGapSec > 0L -> "$baseTimeLabel • DROPOUT (${inDropoutGapSec}s gap)"
-                    followLatestEdge && isFollowingLiveEdge -> "Live • $baseTimeLabel"
+                    inDropoutGapSec > 0L ->
+                        context.getString(R.string.chart_cursor_dropout, baseTimeLabel, inDropoutGapSec)
+                    followLatestEdge && isFollowingLiveEdge ->
+                        context.getString(R.string.chart_cursor_live, baseTimeLabel)
                     else -> baseTimeLabel
                 }
                 timeBubbleBgPaint.color = if (inDropoutGapSec > 0L) Color.parseColor("#FDE68A") else Color.parseColor("#F8FAFC")
@@ -1199,7 +1221,7 @@ class DualPaneSlicerView(context: Context) : View(context) {
                 if (isLocationCollected(nearest)) {
                     val acc = nearest.gpsAccuracyM
                     val (spdBadge, badgeColor) = when {
-                        acc == null -> String.format(Locale.US, "%.1fm/s (Steps)", spd) to Color.parseColor("#FBBF24")
+                        acc == null -> context.getString(R.string.chart_speed_steps_badge, spd) to Color.parseColor("#FBBF24")
                         acc > WEAK_GPS_ACCURACY_THRESHOLD_M -> String.format(Locale.US, "%.1fm/s (±%.0fm)", spd, acc) to Color.parseColor("#34D399")
                         else -> String.format(Locale.US, "%.1fm/s", spd) to Color.parseColor("#34D399")
                     }
@@ -1208,7 +1230,11 @@ class DualPaneSlicerView(context: Context) : View(context) {
                         spdBadge, badgeColor, placeLeft
                     )
                 } else {
-                    val gpsOffBadge = if (nearest.knownPlaceId > 0) "🏠 GPS Off (Saved Place)" else "GPS Off"
+                    val gpsOffBadge = if (nearest.knownPlaceId > 0) {
+                        context.getString(R.string.chart_gps_off_saved_place)
+                    } else {
+                        context.getString(R.string.chart_gps_off)
+                    }
                     drawIntersectionCallout(
                         canvas, cx, midBotY, midBotY.coerceIn(botPaneTop + badgeMarginPx, botPaneBot - badgeMarginPx),
                         gpsOffBadge, Color.parseColor("#94A3B8"), placeLeft
@@ -1225,7 +1251,11 @@ class DualPaneSlicerView(context: Context) : View(context) {
         textPaint.textAlign = Paint.Align.RIGHT
         canvas.drawText(rightTimeLabel, plotRight, layout.timeAxisBaselineY, textPaint)
         if (isZoomed) {
-            val zoomLabel = "🔍 ${formatSpanShort(viewMaxTs - viewMinTs)} of ${formatSpanShort(tripMaxTs - tripMinTs)}"
+            val zoomLabel = context.getString(
+                R.string.chart_zoom_label,
+                formatSpanShort(viewMaxTs - viewMinTs),
+                formatSpanShort(tripMaxTs - tripMinTs)
+            )
             val leftW = textPaint.measureText(leftTimeLabel)
             val rightW = textPaint.measureText(rightTimeLabel)
             val centerW = zoomStatusCanvasTextPaint.measureText(zoomLabel)

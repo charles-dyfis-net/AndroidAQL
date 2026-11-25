@@ -48,6 +48,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelUuid
 import android.os.SystemClock
+import androidx.annotation.StringRes
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import io.github.androidaql.R
@@ -91,42 +92,48 @@ class AqlCollectorService : Service() {
 
     enum class KeepAlivePayloadStrategy(
         val id: String,
-        val shortLabel: String,
-        val settingsTitle: String,
-        val settingsDescription: String,
-        val statusBadge: String
+        @param:StringRes val shortLabelRes: Int,
+        @param:StringRes val settingsDescriptionRes: Int,
+        @param:StringRes val statusBadgeRes: Int
     ) {
         AUTO_OFFLINE_SETUP(
             id = "AUTO_OFFLINE_SETUP",
-            shortLabel = "Auto: One-Shot Offline 0x88 Setup + Passive (Default)",
-            settingsTitle = "Auto (Default): Offline 0x88 Setup • Passive Anti-Burn-In",
-            settingsDescription = "Default: When the monitor is in 0x0A/0x8A Wi-Fi setup mode, performs a single ~5-second offline BLE setup (127.0.0.1 placeholder) to restore the normal anti-burn-in CO₂ OLED screen and transition into continuous 0x88 broadcasts, then listens 100% passively. For multi-hour trips, connect a USB-C power bank.",
-            statusBadge = "Auto (Offline 0x88 Setup)"
+            shortLabelRes = R.string.dev_keep_alive_short_auto_offline_setup,
+            settingsDescriptionRes = R.string.settings_keep_alive_desc_auto_offline_setup,
+            statusBadgeRes = R.string.keep_alive_badge_auto_offline_setup
         ),
         TIME_SYNC_0509_PLUS_24M_1101(
             id = "0509_24M_1101",
-            shortLabel = "Always 05 09 + 24m 11 01 Window Reset (Dev)",
-            settingsTitle = "Dev Only: 05 09 + 24m 11 01 Reset (0509_24M_1101)",
-            settingsDescription = "Developer diagnostic strategy: forces 24-minute 11 01 window resets everywhere to reset both the 10-minute and 30-minute BLE broadcast timers (switches the monitor OLED to the static Wi-Fi icon on each renewal).",
-            statusBadge = "Dev 24m Reset (1101)"
+            shortLabelRes = R.string.dev_keep_alive_short_0509_24m_1101,
+            settingsDescriptionRes = R.string.dev_settings_keep_alive_desc_0509_24m_1101,
+            statusBadgeRes = R.string.dev_keep_alive_badge_0509_24m_1101
         ),
         TIME_SYNC_0509(
             id = "0509_ONLY",
-            shortLabel = "Always 05 09 Time Sync Only (<30m Dev)",
-            settingsTitle = "Dev Only: 05 09 Time Sync Only (<30m Max • 0509_ONLY)",
-            settingsDescription = "Developer diagnostic strategy: sends 05 09 RTC time sync every 3.5 minutes without changing the monitor OLED screen, reaching the 30-minute (29m 57s) BLE broadcast window ceiling.",
-            statusBadge = "Dev 05 09 (<30m)"
+            shortLabelRes = R.string.dev_keep_alive_short_0509_only,
+            settingsDescriptionRes = R.string.dev_settings_keep_alive_desc_0509_only,
+            statusBadgeRes = R.string.dev_keep_alive_badge_0509_only
         ),
         NONE_PASSIVE(
             id = "NONE_PASSIVE",
-            shortLabel = "Passive Only (No GATT Keep-Alive)",
-            settingsTitle = "Passive Listener Only • BTHome v2 / USB Power (NONE_PASSIVE)",
-            settingsDescription = "Never initiates GATT connections. Recommended for custom BTHome v2 firmware, external hubs, or USB-powered operation without offline 0x88 setup.",
-            statusBadge = "Passive"
+            shortLabelRes = R.string.dev_keep_alive_short_none_passive,
+            settingsDescriptionRes = R.string.settings_keep_alive_desc_none_passive,
+            statusBadgeRes = R.string.keep_alive_badge_none_passive
         );
 
-        fun effectiveStatusBadge(collectorState: ExcursionStateMachine.CollectorState): String =
-            statusBadge
+        fun getShortLabel(context: Context): String =
+            context.getString(shortLabelRes)
+
+        fun getSettingsDescription(context: Context): String =
+            context.getString(settingsDescriptionRes)
+
+        fun getStatusBadge(context: Context): String =
+            context.getString(statusBadgeRes)
+
+        fun effectiveStatusBadge(
+            context: Context,
+            collectorState: ExcursionStateMachine.CollectorState
+        ): String = getStatusBadge(context)
 
         companion object {
             val userAccessibleStrategies: List<KeepAlivePayloadStrategy> = listOf(
@@ -1669,7 +1676,7 @@ class AqlCollectorService : Service() {
         if (transition.startedNewExcursion && activeExcursionId == null) {
             val startSec = transition.startedExcursionStartEpochSec ?: nowEpochSec
             val fmt = DateTimeFormatter.ofPattern("MMM d, h:mm a", Locale.US).withZone(ZoneId.systemDefault())
-            val title = "Trip (${fmt.format(Instant.ofEpochSecond(startSec))})"
+            val title = getString(R.string.trip_default_title, fmt.format(Instant.ofEpochSecond(startSec)))
             val exc = metadataDb.startExcursion(
                 deviceId = 1L,
                 startEpochSec = startSec,
@@ -2823,25 +2830,25 @@ class AqlCollectorService : Service() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val statusChannel = NotificationChannel(
             CHANNEL_STATUS,
-            "Live Air Quality Status",
+            getString(R.string.notif_channel_status_name),
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "Persistent lock-screen air quality & context status"
+            description = getString(R.string.notif_channel_status_desc)
             setShowBadge(false)
         }
         val alertChannel = NotificationChannel(
             CHANNEL_ALERTS,
-            "Air Quality Threshold Alerts",
+            getString(R.string.notif_channel_alerts_name),
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
-            description = "In-place alerts when CO₂ or PM2.5 exceeds configured thresholds"
+            description = getString(R.string.notif_channel_alerts_desc)
         }
         val tripSuggestionChannel = NotificationChannel(
             CHANNEL_TRIP_SUGGESTIONS,
-            "Trip Reminders",
+            getString(R.string.notif_channel_trip_suggestions_name),
             NotificationManager.IMPORTANCE_DEFAULT
         ).apply {
-            description = "Suggestions to stop a manually started trip when returning to a Saved Wi-Fi Place"
+            description = getString(R.string.notif_channel_trip_suggestions_desc)
         }
         nm.createNotificationChannel(statusChannel)
         nm.createNotificationChannel(alertChannel)
@@ -2899,35 +2906,38 @@ class AqlCollectorService : Service() {
         val contextTitle = when (stateMachine.currentState) {
             ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP ->
                 if (matchedPlace != null) {
-                    "🏠 At ${matchedPlace.label} (GPS Off)"
+                    getString(R.string.notif_status_title_at_place, matchedPlace.label)
                 } else {
-                    "📡 Monitoring (GPS Off • No Saved Place)"
+                    getString(R.string.notif_status_title_monitoring_no_place)
                 }
             ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE -> when {
-                isLocationActive -> "🚶 On a Trip (GPS Movement Active)"
-                isStepSensorActive -> "🚶 On a Trip (Step Sensor Active • GPS Off)"
-                else -> "🚶 On a Trip (GPS Off)"
+                isLocationActive -> getString(R.string.notif_status_title_trip_gps)
+                isStepSensorActive -> getString(R.string.notif_status_title_trip_steps)
+                else -> getString(R.string.notif_status_title_trip_gps_off)
             }
             ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED ->
-                "⏸️ Trip Paused (Waiting for Monitor BLE)"
+                getString(R.string.notif_status_title_trip_paused)
             ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE ->
-                "📡 Waiting for Qingping Monitor..."
+                getString(R.string.notif_status_title_waiting_monitor)
         }
 
         val metricsBody = if (lastSampledFrame != null) {
             val useF = TemperatureUnitFormatter.useFahrenheit(this)
             val tempStr = TemperatureUnitFormatter.format(latestTempC, useF, decimals = 1)
-            val co2Str = if (latestCo2Ppm > 0) "$latestCo2Ppm ppm" else "— ppm"
-            String.format(
-                Locale.US,
-                "CO₂: %s • PM2.5: %d µg/m³ • %s / %.0f%%",
+            val co2Str = if (latestCo2Ppm > 0) {
+                getString(R.string.notif_status_co2_ppm, latestCo2Ppm)
+            } else {
+                getString(R.string.notif_status_co2_placeholder)
+            }
+            getString(
+                R.string.notif_status_body_metrics,
                 co2Str,
                 latestPm25Ugm3,
                 tempStr,
                 latestHumidityPct
             )
         } else {
-            "Scanning for 0xFDCD advertisements..."
+            getString(R.string.notif_status_body_scanning)
         }
 
         return StatusNotificationKey(
@@ -2964,7 +2974,11 @@ class AqlCollectorService : Service() {
                 },
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
-            builder.addAction(android.R.drawable.star_on, "Bookmark Trip", bookmarkIntent)
+            builder.addAction(
+                android.R.drawable.star_on,
+                getString(R.string.notif_action_bookmark_trip),
+                bookmarkIntent
+            )
         }
 
         return builder.build()
@@ -2998,11 +3012,34 @@ class AqlCollectorService : Service() {
                     )
                     val durMin = act.durationAboveThresholdSec / 60
                     val durSec = act.durationAboveThresholdSec % 60
-                    val title = "${act.severity.name}: ${act.metric.label} ${act.currentValue} ${act.metric.unit} ${act.trend.symbol}"
+                    val severityLabel = when (act.severity) {
+                        AlertEvaluator.SeverityTier.WARNING -> getString(R.string.notif_alert_severity_warning)
+                        AlertEvaluator.SeverityTier.CRITICAL -> getString(R.string.notif_alert_severity_critical)
+                        AlertEvaluator.SeverityTier.NONE -> act.severity.name
+                    }
+                    val metricLabel = when (act.metric) {
+                        AlertEvaluator.MetricType.CO2 -> getString(R.string.notif_alert_metric_co2)
+                        AlertEvaluator.MetricType.PM25 -> getString(R.string.notif_alert_metric_pm25)
+                        AlertEvaluator.MetricType.BATTERY_LOW -> getString(R.string.notif_alert_metric_battery_low)
+                    }
+                    val title = getString(
+                        R.string.notif_alert_title,
+                        severityLabel,
+                        metricLabel,
+                        act.currentValue,
+                        act.metric.unit,
+                        act.trend.symbol
+                    )
                     val body = if (act.metric == AlertEvaluator.MetricType.BATTERY_LOW) {
-                        "Min: ${act.peakValueInSpike}% • Charge Qingping monitor via USB-C"
+                        getString(R.string.notif_alert_body_battery, act.peakValueInSpike)
                     } else {
-                        "Peak: ${act.peakValueInSpike} ${act.metric.unit} • Above threshold for ${durMin}m ${durSec}s"
+                        getString(
+                            R.string.notif_alert_body_threshold,
+                            act.peakValueInSpike,
+                            act.metric.unit,
+                            durMin,
+                            durSec
+                        )
                     }
 
                     val notif = NotificationCompat.Builder(this, CHANNEL_ALERTS)
@@ -3028,7 +3065,7 @@ class AqlCollectorService : Service() {
         }
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
         val placeLabel = metadataDb.getKnownPlaces().firstOrNull { it.id == knownPlaceId }?.label
-        val (title, body) = buildManualTripStopSuggestionCopy(placeLabel)
+        val (title, body) = buildManualTripStopSuggestionCopy(this, placeLabel)
         val openIntent = PendingIntent.getActivity(
             this,
             NOTIFICATION_ID_MANUAL_TRIP_STOP_SUGGESTION,
@@ -3053,7 +3090,7 @@ class AqlCollectorService : Service() {
             .setContentIntent(openIntent)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .addAction(android.R.drawable.ic_media_pause, "End Trip", endTripIntent)
+            .addAction(android.R.drawable.ic_media_pause, getString(R.string.notif_action_end_trip), endTripIntent)
             .build()
         try {
             nm.notify(NOTIFICATION_ID_MANUAL_TRIP_STOP_SUGGESTION, notification)
@@ -3093,7 +3130,7 @@ class AqlCollectorService : Service() {
 
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
         ensureLifecycleNotificationChannel(this)
-        val (title, body) = buildCompanionLinkSuggestionCopy(monitorName, bleAddress)
+        val (title, body) = buildCompanionLinkSuggestionCopy(this, monitorName, bleAddress)
         val linkIntent = Intent(this, MainActivity::class.java).apply {
             action = ACTION_LINK_COMPANION_MONITOR
             putExtra(EXTRA_LINK_COMPANION_BLE_ADDRESS, bleAddress)
@@ -3126,8 +3163,8 @@ class AqlCollectorService : Service() {
             .setAutoCancel(true)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .addAction(android.R.drawable.ic_menu_add, "Link Monitor", linkPendingIntent)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Don't ask again", dismissPendingIntent)
+            .addAction(android.R.drawable.ic_menu_add, getString(R.string.notif_action_link_monitor), linkPendingIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.notif_action_dont_ask_again), dismissPendingIntent)
             .build()
         try {
             nm.notify(NOTIFICATION_ID_COMPANION_LINK_SUGGESTION, notification)
@@ -3526,14 +3563,26 @@ class AqlCollectorService : Service() {
                 "AirSlice passive logging paused" to "Tap to resume air quality monitoring."
         }
 
+        fun buildResumeNotificationCopy(context: Context, reason: String): Pair<String, String> = when (reason) {
+            AqlAutoStartReceiver.REASON_BOOT_COMPLETED ->
+                context.getString(R.string.notif_resume_boot_title) to
+                    context.getString(R.string.notif_resume_boot_body)
+            AqlAutoStartReceiver.REASON_PACKAGE_REPLACED ->
+                context.getString(R.string.notif_resume_update_title) to
+                    context.getString(R.string.notif_resume_update_body)
+            else ->
+                context.getString(R.string.notif_resume_default_title) to
+                    context.getString(R.string.notif_resume_default_body)
+        }
+
         fun ensureLifecycleNotificationChannel(context: Context) {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
             val channel = NotificationChannel(
                 CHANNEL_LIFECYCLE,
-                "Background Service Alerts",
+                context.getString(R.string.notif_channel_lifecycle_name),
                 NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
-                description = "Background service resume and monitor linking reminders"
+                description = context.getString(R.string.notif_channel_lifecycle_desc)
             }
             nm.createNotificationChannel(channel)
         }
@@ -3546,7 +3595,7 @@ class AqlCollectorService : Service() {
             }
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
             ensureLifecycleNotificationChannel(context)
-            val (title, body) = buildResumeNotificationCopy(reason)
+            val (title, body) = buildResumeNotificationCopy(context, reason)
             val openIntent = PendingIntent.getActivity(
                 context,
                 NOTIFICATION_ID_RESUME_REQUIRED,
@@ -3584,6 +3633,20 @@ class AqlCollectorService : Service() {
             return title to body
         }
 
+        fun buildCompanionLinkSuggestionCopy(
+            context: Context,
+            monitorName: String?,
+            bleAddress: String
+        ): Pair<String, String> {
+            val trimmedName = monitorName?.trim()?.takeIf { it.isNotEmpty() }
+            val hasDistinctName = trimmedName != null && !trimmedName.equals(bleAddress, ignoreCase = true)
+            val displayLabel = if (hasDistinctName) "$trimmedName ($bleAddress)" else bleAddress
+            val titleTarget = if (hasDistinctName) trimmedName else bleAddress
+            val title = context.getString(R.string.notif_companion_link_title, titleTarget)
+            val body = context.getString(R.string.notif_companion_link_body, displayLabel)
+            return title to body
+        }
+
         fun cancelCompanionLinkSuggestionNotification(context: Context) {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
             nm.cancel(NOTIFICATION_ID_COMPANION_LINK_SUGGESTION)
@@ -3597,6 +3660,20 @@ class AqlCollectorService : Service() {
             } else {
                 "Back on Saved Wi-Fi — End manual trip?" to
                     "You reconnected to a Saved Wi-Fi Place. Your manual trip is still recording."
+            }
+        }
+
+        fun buildManualTripStopSuggestionCopy(
+            context: Context,
+            placeLabel: String?
+        ): Pair<String, String> {
+            val trimmed = placeLabel?.trim()?.takeIf { it.isNotEmpty() }
+            return if (trimmed != null) {
+                context.getString(R.string.notif_manual_trip_stop_title_named, trimmed) to
+                    context.getString(R.string.notif_manual_trip_stop_body_named, trimmed)
+            } else {
+                context.getString(R.string.notif_manual_trip_stop_title_fallback) to
+                    context.getString(R.string.notif_manual_trip_stop_body_fallback)
             }
         }
 

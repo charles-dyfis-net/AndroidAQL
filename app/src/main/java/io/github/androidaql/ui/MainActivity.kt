@@ -197,16 +197,16 @@ class MainActivity : AppCompatActivity() {
                 switchTab(1)
                 refreshTripsTab()
                 val base = if (timeShiftForDemo) {
-                    "Replayed XLSX (${result.importedSegmentCount} segs, ${result.importedNoteCount} notes)"
+                    getString(R.string.toast_xlsx_replayed, result.importedSegmentCount, result.importedNoteCount)
                 } else {
-                    "Imported pinned trip (${result.importedSegmentCount} segs, ${result.importedNoteCount} notes)"
+                    getString(R.string.toast_xlsx_imported, result.importedSegmentCount, result.importedNoteCount)
                 }
                 Toast.makeText(this, base, Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(this, "No valid AirSlice samples found in XLSX workbook", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, getString(R.string.toast_xlsx_no_samples), Toast.LENGTH_LONG).show()
             }
         } catch (e: Exception) {
-            Toast.makeText(this, "XLSX import failed: ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, getString(R.string.toast_xlsx_import_failed, e.message ?: ""), Toast.LENGTH_LONG).show()
         }
     }
 
@@ -432,7 +432,7 @@ class MainActivity : AppCompatActivity() {
         AqlCollectorService.cancelCompanionLinkSuggestionNotification(this)
         CompanionDeviceHelper.markLinkSuggestionDismissed(this)
         if (CompanionDeviceHelper.hasAssociations(this)) {
-            Toast.makeText(this, "Monitor is already linked", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.toast_monitor_already_linked), Toast.LENGTH_SHORT).show()
             return
         }
         pendingCompanionLinkRequested = true
@@ -633,9 +633,6 @@ class MainActivity : AppCompatActivity() {
             demoStreamBtn.visibility = if (demo) View.VISIBLE else View.GONE
         }
         if (::tabButtons.isInitialized && tabButtons.size >= 3) {
-            tabButtons[0].text = if (dev) "1. Now" else "Now"
-            tabButtons[1].text = if (dev) "2. Trips" else "Trips"
-            tabButtons[2].text = "3. HW Test"
             tabButtons[2].visibility = if (dev) View.VISIBLE else View.GONE
             if (!dev && activeTabIndex == 2) {
                 switchTab(0)
@@ -721,23 +718,16 @@ class MainActivity : AppCompatActivity() {
         onAccept: (() -> Unit)? = null,
         onDeclineLocation: (() -> Unit)? = null
     ) {
-        val message = buildString {
-            append("AirSlice accesses location, Wi-Fi, and physical activity step data on-device for Trip Mode and Saved Places (including in the background or with the screen off), and immediately discards almost all of it—keeping only movement speed (m/s) and GPS accuracy (m):\n\n")
-            append("• Saved Wi-Fi Places: Checks whether your connected Wi-Fi matches a Saved Place (Location permission required) so GPS and step sensing stay off at saved locations like your home or office, where movement tracking isn't needed.\n\n")
-            append("• Trip Movement (GPS + Steps): Outside Saved Places while your monitor is nearby, converts GPS fixes and hardware step cadence into scalar speed (m/s) and accuracy (m) in memory, immediately discarding raw coordinates and step counts.\n\n")
-            append("• 100% Local & Private: Raw GPS coordinates, unconfigured Wi-Fi names, and step counts are never saved to disk or sent to any server; recorded summaries leave your phone only when you explicitly share an XLSX workbook or diagnostic log.")
-        }
-
         val builder = AlertDialog.Builder(this)
-            .setTitle("📍 Location, Activity & Privacy Disclosure")
-            .setMessage(message)
+            .setTitle(R.string.disclosure_title)
+            .setMessage(R.string.disclosure_message)
             .setCancelable(onAccept == null)
 
         if (onAccept != null) {
-            builder.setPositiveButton("Continue") { _, _ -> onAccept() }
-            builder.setNegativeButton("Not Now (BLE Only)") { _, _ -> onDeclineLocation?.invoke() }
+            builder.setPositiveButton(R.string.disclosure_continue_btn) { _, _ -> onAccept() }
+            builder.setNegativeButton(R.string.disclosure_decline_btn) { _, _ -> onDeclineLocation?.invoke() }
         } else {
-            builder.setPositiveButton("Close", null)
+            builder.setPositiveButton(R.string.dialog_close, null)
         }
         activeDisclosureDialog?.dismiss()
         activeDisclosureDialog = builder.show()
@@ -777,7 +767,7 @@ class MainActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         val helpBtn = Button(this).apply {
-            text = "❓ Help"
+            text = getString(R.string.header_help_btn)
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             layoutParams = LinearLayout.LayoutParams(
@@ -787,7 +777,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { showHelpDialog() }
         }
         val settingsBtn = Button(this).apply {
-            text = "⚙️ Settings"
+            text = getString(R.string.header_settings_btn)
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setOnClickListener { showSettingsModal() }
@@ -823,7 +813,11 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(Color.parseColor("#0F172A"))
             setPadding(dp(6), dp(4), dp(6), dp(6))
         }
-        val tabTitles = listOf("1. Now", "2. Trips", "3. HW Test")
+        val tabTitles = listOf(
+            getString(R.string.nav_tab_now),
+            getString(R.string.nav_tab_trips),
+            getString(R.string.dev_nav_tab_hw_test)
+        )
         val btns = mutableListOf<Button>()
         for ((idx, label) in tabTitles.withIndex()) {
             val b = Button(this).apply {
@@ -885,7 +879,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         contextPillView = TextView(this).apply {
-            text = "📡 Waiting for Qingping Monitor (GPS Off)"
+            text = getString(R.string.now_context_waiting_initial)
             setTextColor(Color.parseColor("#E2E8F0"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
             setTypeface(typeface, Typeface.BOLD)
@@ -906,24 +900,24 @@ class MainActivity : AppCompatActivity() {
         }
 
         co2HeaderLabelView = TextView(this).apply {
-            text = "CARBON DIOXIDE (CO₂)"
+            text = getString(R.string.now_co2_header_initial)
             setTextColor(Color.parseColor("#94A3B8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setTypeface(typeface, Typeface.BOLD)
         }
         co2HeroValueView = TextView(this).apply {
-            text = "— ppm"
+            text = getString(R.string.now_co2_value_placeholder)
             setTextColor(Color.parseColor("#38BDF8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 38f)
             setTypeface(typeface, Typeface.BOLD)
         }
         co2VentilationBadgeView = TextView(this).apply {
-            text = "Hold down the top touchbar on your Qingping Air Monitor Lite until the Wi-Fi icon displays to begin.\n\nNo monitor handy? Tap ❓ Help above to enable Demo Data Mode or read the FAQ."
+            text = getString(R.string.now_empty_onboarding_badge)
             setTextColor(Color.parseColor("#CBD5E1"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
         }
         secondaryMetricsView = TextView(this).apply {
-            text = "PM2.5: — µg/m³  •  PM10: — µg/m³\nTemp: —  •  Humidity: — %  •  Battery: — %"
+            text = getString(R.string.now_secondary_metrics_placeholder)
             setTextColor(Color.parseColor("#E2E8F0"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             setPadding(0, dp(8), 0, 0)
@@ -937,14 +931,14 @@ class MainActivity : AppCompatActivity() {
 
         // Recent-History 3-Pane Graph Stack (Last 15 Minutes)
         recentGraphHeaderView = TextView(this).apply {
-            text = "Recent History (Last 15 Minutes • Touch to Inspect)"
+            text = getString(R.string.now_recent_history_header)
             setTextColor(Color.parseColor("#94A3B8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             setTypeface(typeface, Typeface.BOLD)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         liveFollowResetBtn = TextView(this).apply {
-            text = "↩ Live"
+            text = getString(R.string.now_live_reset_btn)
             maxLines = 1
             gravity = Gravity.CENTER
             isClickable = true
@@ -970,7 +964,7 @@ class MainActivity : AppCompatActivity() {
             followLatestEdge = true
             desiredHeightDp = 265
             dropoutGracePeriodSec = getDropoutGracePeriodSec()
-            emptyStateMessage = "No recent samples in the last 15 minutes."
+            emptyStateMessage = getString(R.string.now_recent_empty)
             onCursorChanged = { updateLiveGraphHeaderUi() }
             onLiveFollowStateChanged = { updateLiveGraphHeaderUi() }
             onTimelineNoteTapped = { note ->
@@ -990,12 +984,12 @@ class MainActivity : AppCompatActivity() {
             ).apply { topMargin = dp(12) }
         }
         wifiStatusView = TextView(this).apply {
-            text = "Connected Wi-Fi: Checking..."
+            text = getString(R.string.now_wifi_checking)
             setTextColor(Color.parseColor("#CBD5E1"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         }
         saveCurrentWifiBtn = Button(this).apply {
-            text = "+ Save Current Wi-Fi Place (Keep GPS Off Here)"
+            text = getString(R.string.now_save_wifi_btn)
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             setOnClickListener { promptAddCurrentWifiToSavedPlaces() }
@@ -1005,7 +999,7 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         manualTripToggleBtn = Button(this).apply {
-            text = "🚶 Start Trip Manually"
+            text = getString(R.string.now_manual_trip_start_btn)
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.45f)
@@ -1017,17 +1011,17 @@ class MainActivity : AppCompatActivity() {
                     snap.collectorState == ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED
                 if (isTripOpen) {
                     svc.endManualExcursion()
-                    Toast.makeText(this@MainActivity, "⏹️ Trip ended", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, getString(R.string.toast_trip_ended), Toast.LENGTH_SHORT).show()
                 } else {
                     svc.startManualExcursion()
-                    Toast.makeText(this@MainActivity, "🚶 Trip started", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, getString(R.string.toast_trip_started), Toast.LENGTH_SHORT).show()
                 }
                 refreshLiveRecentGraph()
                 refreshTripsTab()
             }
         }
         addNowNoteBtn = Button(this).apply {
-            text = "📝 Add Note"
+            text = getString(R.string.now_add_note_btn)
             isAllCaps = false
             maxLines = 1
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
@@ -1057,13 +1051,17 @@ class MainActivity : AppCompatActivity() {
         tripActionRow.addView(manualTripToggleBtn)
         tripActionRow.addView(addNowNoteBtn)
         demoStreamBtn = Button(this).apply {
-            text = "🎭 Toggle Live Demo Replay Stream (No Hardware Needed)"
+            text = getString(R.string.now_demo_stream_btn)
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             visibility = if (isDemoDataEnabled()) View.VISIBLE else View.GONE
             setOnClickListener {
                 val running = collectorService?.toggleDemoStream() ?: false
-                val msg = if (running) "Started Live Demo Replay (every 3s)" else "Stopped Live Demo Replay"
+                val msg = if (running) {
+                    getString(R.string.toast_demo_replay_started)
+                } else {
+                    getString(R.string.toast_demo_replay_stopped)
+                }
                 Toast.makeText(this@MainActivity, msg, Toast.LENGTH_SHORT).show()
             }
         }
@@ -1083,7 +1081,7 @@ class MainActivity : AppCompatActivity() {
     private fun buildTripsSlicerTab(landscape: Boolean): View {
         // Common controls
         tripSelectorLabel = TextView(this).apply {
-            text = "Trip"
+            text = getString(R.string.trips_title_default)
             setTextColor(Color.parseColor("#F8FAFC"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, if (landscape) 13.5f else 15f)
             setTypeface(typeface, Typeface.BOLD)
@@ -1170,17 +1168,17 @@ class MainActivity : AppCompatActivity() {
                 setOnClickListener { onClick() }
             }
 
-        cursorModeBtn = makeEditBarButton("🎯 Cursor", 1.2f) { switchToSplitCursorMode() }.apply {
+        cursorModeBtn = makeEditBarButton(getString(R.string.trips_cursor_btn), 1.2f) { switchToSplitCursorMode() }.apply {
             backgroundTintList = ColorStateList.valueOf(Color.parseColor("#0284C7"))
             setTextColor(Color.WHITE)
             visibility = View.GONE
         }
-        dividerNudgeBar.addView(makeEditBarButton("✂️ Split", 1.2f) { splitAtCurrentCursor() })
+        dividerNudgeBar.addView(makeEditBarButton(getString(R.string.trips_split_btn), 1.2f) { splitAtCurrentCursor() })
         dividerNudgeBar.addView(cursorModeBtn)
-        dividerNudgeBar.addView(makeEditBarButton("-1m", 0.95f) { nudgeSelectedDivider(-60L) })
-        dividerNudgeBar.addView(makeEditBarButton("-15s", 1f) { nudgeSelectedDivider(-15L) })
-        dividerNudgeBar.addView(makeEditBarButton("+15s", 1f) { nudgeSelectedDivider(+15L) })
-        dividerNudgeBar.addView(makeEditBarButton("+1m", 0.95f) { nudgeSelectedDivider(+60L) })
+        dividerNudgeBar.addView(makeEditBarButton(getString(R.string.trips_nudge_minus_1m), 0.95f) { nudgeSelectedDivider(-60L) })
+        dividerNudgeBar.addView(makeEditBarButton(getString(R.string.trips_nudge_minus_15s), 1f) { nudgeSelectedDivider(-15L) })
+        dividerNudgeBar.addView(makeEditBarButton(getString(R.string.trips_nudge_plus_15s), 1f) { nudgeSelectedDivider(+15L) })
+        dividerNudgeBar.addView(makeEditBarButton(getString(R.string.trips_nudge_plus_1m), 0.95f) { nudgeSelectedDivider(+60L) })
 
         if (landscape) {
             // LANDSCAPE MODE: Fit all 3 panes on screen at once with ZERO scrolling!
@@ -1209,13 +1207,13 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER_VERTICAL
             }
             val switchTripBtn = Button(this).apply {
-                text = "Switch Trip"
+                text = getString(R.string.trips_switch_trip_btn)
                 isAllCaps = false
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
                 setOnClickListener { showTripPickerDialog() }
             }
             val landZoomBtn = Button(this).apply {
-                text = "🔍 10m"
+                text = getString(R.string.trips_land_zoom_10m)
                 isAllCaps = false
                 maxLines = 1
                 minWidth = 0
@@ -1240,7 +1238,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             val landSegBtn = Button(this).apply {
-                text = "🎯 Seg"
+                text = getString(R.string.trips_focus_seg_btn)
                 isAllCaps = false
                 maxLines = 1
                 minWidth = 0
@@ -1250,7 +1248,7 @@ class MainActivity : AppCompatActivity() {
                 setOnClickListener { focusCurrentSegmentOrDivider() }
             }
             val landNoteBtn = Button(this).apply {
-                text = "📝 Note"
+                text = getString(R.string.trips_land_add_note_btn)
                 isAllCaps = false
                 maxLines = 1
                 minWidth = 0
@@ -1316,13 +1314,13 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER_VERTICAL
             }
             val chooseTripBtn = Button(this).apply {
-                text = "Trips"
+                text = getString(R.string.trips_choose_trip_btn)
                 isAllCaps = false
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 setOnClickListener { showTripPickerDialog() }
             }
             val carveWindowBtn = Button(this).apply {
-                text = "🗓️ 14d Window"
+                text = getString(R.string.trips_14d_window_btn)
                 isAllCaps = false
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 setOnClickListener { show14dRingWindowSelectorDialog() }
@@ -1338,7 +1336,7 @@ class MainActivity : AppCompatActivity() {
                 setPadding(dp(2), dp(2), dp(2), dp(2))
             }
             val pinBtn = TextView(this).apply {
-                text = "⏳ 14d • 📌 Pin"
+                text = getString(R.string.trips_pin_initial)
                 maxLines = 1
                 gravity = Gravity.CENTER
                 isClickable = true
@@ -1375,7 +1373,7 @@ class MainActivity : AppCompatActivity() {
             col.addView(dualPaneSlicerView)
 
             val zStatus = TextView(this).apply {
-                text = "🔍 View: Full"
+                text = getString(R.string.trips_zoom_view_full)
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
                 setTextColor(Color.parseColor("#94A3B8"))
@@ -1386,7 +1384,7 @@ class MainActivity : AppCompatActivity() {
             zoomStatusView = zStatus
 
             val addTripsNoteBtn = TextView(this).apply {
-                text = "📝 + Note"
+                text = getString(R.string.trips_portrait_add_note_btn)
                 maxLines = 1
                 gravity = Gravity.CENTER
                 isClickable = true
@@ -1432,17 +1430,17 @@ class MainActivity : AppCompatActivity() {
                     setOnClickListener { onClick() }
                 }
 
-            val fullBtn = makeZoomBtn("Full", 1f) { dualPaneSlicerView.resetZoom() }
-            val z30Btn = makeZoomBtn("30m", 1f) {
+            val fullBtn = makeZoomBtn(getString(R.string.trips_zoom_preset_full), 1f) { dualPaneSlicerView.resetZoom() }
+            val z30Btn = makeZoomBtn(getString(R.string.trips_zoom_preset_30m), 1f) {
                 dualPaneSlicerView.zoomToWindowAroundCursor(DualPaneSlicerView.ZOOM_PRESET_30M_SEC)
             }
-            val z10Btn = makeZoomBtn("10m", 1f) {
+            val z10Btn = makeZoomBtn(getString(R.string.trips_zoom_preset_10m), 1f) {
                 dualPaneSlicerView.zoomToWindowAroundCursor(DualPaneSlicerView.ZOOM_PRESET_10M_SEC)
             }
-            val z3Btn = makeZoomBtn("3m", 1f) {
+            val z3Btn = makeZoomBtn(getString(R.string.trips_zoom_preset_3m), 1f) {
                 dualPaneSlicerView.zoomToWindowAroundCursor(DualPaneSlicerView.ZOOM_PRESET_3M_SEC)
             }
-            val segBtn = makeZoomBtn("🎯 Seg", 1.15f) { focusCurrentSegmentOrDivider() }
+            val segBtn = makeZoomBtn(getString(R.string.trips_focus_seg_btn), 1.15f) { focusCurrentSegmentOrDivider() }
             zoomFullBtn = fullBtn
             zoom30mBtn = z30Btn
             zoom10mBtn = z10Btn
@@ -1511,7 +1509,11 @@ class MainActivity : AppCompatActivity() {
             editHelperView.visibility = if (isTripEditMode) View.VISIBLE else View.GONE
             updateEditHelperText()
         }
-        modeToggleBtn.text = if (isTripEditMode) "👁️ Done Editing" else "✏️ Edit Trip"
+        modeToggleBtn.text = if (isTripEditMode) {
+            getString(R.string.trips_edit_done_btn)
+        } else {
+            getString(R.string.trips_edit_trip_btn)
+        }
         modeToggleBtn.backgroundTintList = ColorStateList.valueOf(
             Color.parseColor(if (isTripEditMode) "#D97706" else "#334155")
         )
@@ -1572,10 +1574,17 @@ class MainActivity : AppCompatActivity() {
         zoomStatusView?.apply {
             if (isZoomed) {
                 setTextColor(Color.parseColor(COLOR_ZOOM_STATUS_ACTIVE_HEX))
-                text = "🔍 Zoom: ${formatElapsedAge(viewSpanSec)} of ${formatElapsedAge(tripSpanSec)}"
+                text = getString(
+                    R.string.trips_zoom_active,
+                    formatElapsedAge(this@MainActivity, viewSpanSec),
+                    formatElapsedAge(this@MainActivity, tripSpanSec)
+                )
             } else {
                 setTextColor(Color.parseColor(COLOR_ZOOM_STATUS_IDLE_HEX))
-                text = "🔍 View: Full (${formatElapsedAge(tripSpanSec)})"
+                text = getString(
+                    R.string.trips_zoom_view_full_span,
+                    formatElapsedAge(this@MainActivity, tripSpanSec)
+                )
             }
         }
 
@@ -1611,9 +1620,10 @@ class MainActivity : AppCompatActivity() {
         landZoomToggleBtn?.apply {
             visibility = if (hasSlots) View.VISIBLE else View.GONE
             text = when {
-                isZoomed -> "🔍 Full"
-                tripSpanSec in (DualPaneSlicerView.ZOOM_PRESET_3M_SEC + 1L)..DualPaneSlicerView.ZOOM_PRESET_10M_SEC -> "🔍 3m"
-                else -> "🔍 10m"
+                isZoomed -> getString(R.string.trips_land_zoom_full)
+                tripSpanSec in (DualPaneSlicerView.ZOOM_PRESET_3M_SEC + 1L)..DualPaneSlicerView.ZOOM_PRESET_10M_SEC ->
+                    getString(R.string.trips_land_zoom_3m)
+                else -> getString(R.string.trips_land_zoom_10m)
             }
             alpha = if (hasSlots && (isZoomed || tripSpanSec > DualPaneSlicerView.MIN_VIEWPORT_SPAN_SEC)) {
                 ENABLED_BUTTON_ALPHA
@@ -1646,7 +1656,11 @@ class MainActivity : AppCompatActivity() {
         refreshTripsTab()
         Toast.makeText(
             this,
-            if (newPinned) "📌 Trip pinned forever" else "Trip set to 14-day ring retention",
+            if (newPinned) {
+                getString(R.string.toast_trip_pinned)
+            } else {
+                getString(R.string.toast_trip_unpinned_retention)
+            },
             Toast.LENGTH_SHORT
         ).show()
     }
@@ -1658,8 +1672,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val retentionSec = collectorService?.ringStore?.getArchiveWindowSec(0) ?: DEFAULT_RETENTION_WINDOW_SEC
-        val remLabel = formatRemainingRetentionCompact(exc, System.currentTimeMillis() / 1000L, retentionSec)
-        banner.text = "⏳ Unpinned trip (expires in $remLabel). Tap here or '⏳ $remLabel • 📌 Pin' above to retain this trip forever."
+        val remLabel = formatRemainingRetentionCompact(this, exc, System.currentTimeMillis() / 1000L, retentionSec)
+        banner.text = getString(R.string.trips_retention_banner, remLabel)
         banner.visibility = View.VISIBLE
     }
 
@@ -1668,18 +1682,26 @@ class MainActivity : AppCompatActivity() {
         val slices = dualPaneSlicerView.slices
         val divIdx = dualPaneSlicerView.selectedDividerIndex
         val cursorTs = dualPaneSlicerView.cursorEpochSec
-        val cursorTime = if (cursorTs > 0L) shortTimeFmt.format(Instant.ofEpochSecond(cursorTs)) else "tap chart"
+        val cursorTime = if (cursorTs > 0L) {
+            shortTimeFmt.format(Instant.ofEpochSecond(cursorTs))
+        } else {
+            getString(R.string.trips_edit_helper_tap_chart)
+        }
         if (divIdx in 0 until slices.size - 1) {
             val boundaryTime = shortTimeFmt.format(Instant.ofEpochSecond(slices[divIdx].endEpochSec))
             editHelperView.setTextColor(Color.parseColor("#F97316"))
-            editHelperView.text =
-                "🟠 Divider ⇔ ${divIdx + 1}|${divIdx + 2} ($boundaryTime): Drag ⇔ or tap ±15s/±1m to move boundary. Tap 🎯 Cursor (or tap chart/banner) to place a new split."
+            editHelperView.text = getString(
+                R.string.trips_edit_helper_divider,
+                divIdx + 1,
+                divIdx + 2,
+                boundaryTime
+            )
         } else {
             editHelperView.setTextColor(Color.parseColor("#38BDF8"))
             editHelperView.text = if (slices.size <= 1) {
-                "🎯 Split Cursor ($cursorTime): Tap/drag chart or ±15s/±1m to aim, then tap ✂️ Split."
+                getString(R.string.trips_edit_helper_cursor_single, cursorTime)
             } else {
-                "🎯 Split Cursor ($cursorTime): Aim cursor & tap ✂️ Split to add a boundary, or tap a ⇔ pill to move an existing boundary."
+                getString(R.string.trips_edit_helper_cursor_multi, cursorTime)
             }
         }
     }
@@ -1729,7 +1751,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val header = TextView(this).apply {
-            text = "CGDN1 Hardware Bring-Up & Diagnostic Logger"
+            text = getString(R.string.dev_hw_header)
             setTextColor(Color.parseColor("#F8FAFC"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
             setTypeface(typeface, Typeface.BOLD)
@@ -1746,14 +1768,13 @@ class MainActivity : AppCompatActivity() {
             ).apply { topMargin = dp(8) }
         }
         val tracePathTv = TextView(this).apply {
-            text = "Persistent JSONL Trace (analyze via ./scripts/analyze-hw-trace --pull):\n" +
-                "adb exec-out run-as net.dyfis.androidaql cat files/hw_bringup_trace.jsonl"
+            text = getString(R.string.dev_hw_trace_path_info)
             setTextColor(Color.parseColor("#A7F3D0"))
             typeface = Typeface.MONOSPACE
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
         }
         val shareTraceBtn = Button(this).apply {
-            text = "📤 Share / Export HW Bring-Up JSONL Trace"
+            text = getString(R.string.dev_hw_share_trace_btn)
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setOnClickListener { shareHardwareDiagnosticTrace() }
@@ -1773,7 +1794,7 @@ class MainActivity : AppCompatActivity() {
             ).apply { topMargin = dp(8) }
         }
         val expTitle = TextView(this).apply {
-            text = "🧪 Keep-Alive Hypothesis & Trace Experiment Controls"
+            text = getString(R.string.dev_hw_exp_title)
             setTextColor(Color.parseColor("#F8FAFC"))
             setTypeface(typeface, Typeface.BOLD)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
@@ -1785,7 +1806,9 @@ class MainActivity : AppCompatActivity() {
             adapter = ArrayAdapter(
                 this@MainActivity,
                 android.R.layout.simple_spinner_dropdown_item,
-                strategies.map { "${it.id}: ${it.shortLabel}" }
+                strategies.map {
+                    getString(R.string.dev_hw_strategy_spinner_item, it.id, it.getShortLabel(this@MainActivity))
+                }
             )
             val currentStrat = collectorService?.devConfig?.strategy ?: AqlCollectorService.KeepAlivePayloadStrategy.AUTO_OFFLINE_SETUP
             setSelection(strategies.indexOf(currentStrat).coerceAtLeast(0))
@@ -1797,7 +1820,7 @@ class MainActivity : AppCompatActivity() {
             adapter = ArrayAdapter(
                 this@MainActivity,
                 android.R.layout.simple_spinner_dropdown_item,
-                intervalOptionsSec.map { "Keep-Alive Interval: ${it}s (${String.format(Locale.US, "%.1fm", it / 60.0)})" }
+                intervalOptionsSec.map { getString(R.string.dev_hw_interval_spinner_item, it, it / 60.0) }
             )
             val currentInt = collectorService?.devConfig?.intervalSec ?: 210
             setSelection(intervalOptionsSec.indexOf(currentInt).let { if (it >= 0) it else 1 })
@@ -1805,7 +1828,7 @@ class MainActivity : AppCompatActivity() {
         expCard.addView(intervalSpinner)
 
         val dedupCheck = CheckBox(this).apply {
-            text = "Compact Trace: Deduplicate identical 350ms 0xFDCD frames (15s heartbeat)"
+            text = getString(R.string.dev_hw_dedup_check)
             isChecked = collectorService?.devConfig?.deduplicateFdcdTrace ?: true
             setTextColor(Color.parseColor("#E2E8F0"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
@@ -1813,7 +1836,7 @@ class MainActivity : AppCompatActivity() {
         expCard.addView(dedupCheck)
 
         val applyExpBtn = Button(this).apply {
-            text = "✅ Apply Keep-Alive Config (Logs DEV_CONFIG_CHANGED)"
+            text = getString(R.string.dev_hw_apply_config_btn)
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setOnClickListener {
@@ -1827,7 +1850,7 @@ class MainActivity : AppCompatActivity() {
                 )
                 Toast.makeText(
                     this@MainActivity,
-                    "Applied ${chosenStrat.id} (${chosenInt}s)",
+                    getString(R.string.dev_toast_hw_applied_config, chosenStrat.id, chosenInt),
                     Toast.LENGTH_SHORT
                 ).show()
             }
@@ -1835,7 +1858,7 @@ class MainActivity : AppCompatActivity() {
         expCard.addView(applyExpBtn)
 
         val pokeNowBtn = Button(this).apply {
-            text = "⚡ Poke Now"
+            text = getString(R.string.dev_hw_poke_now_btn)
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setOnClickListener {
@@ -1846,7 +1869,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(expCard)
 
         hwPacketMetaView = TextView(this).apply {
-            text = "Waiting for BLE advertisement frame..."
+            text = getString(R.string.dev_hw_packet_meta_waiting)
             setTextColor(Color.parseColor("#38BDF8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             typeface = Typeface.MONOSPACE
@@ -1860,7 +1883,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(hwPacketMetaView)
 
         hwStrictFilterCheck = CheckBox(this).apply {
-            text = "Strict 0xFDCD Filter (Uncheck to log all nearby BLE advertisements)"
+            text = getString(R.string.dev_hw_strict_filter_check)
             isChecked = true
             setTextColor(Color.parseColor("#E2E8F0"))
             setOnCheckedChangeListener { _, checked ->
@@ -1870,7 +1893,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(hwStrictFilterCheck)
 
         hwBleModeStatusView = TextView(this).apply {
-            text = "Excursion BLE Mode: PASSIVE_ONLY"
+            text = getString(R.string.dev_hw_ble_mode_initial)
             setTextColor(Color.parseColor("#CBD5E1"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setPadding(0, dp(8), 0, dp(4))
@@ -1879,25 +1902,29 @@ class MainActivity : AppCompatActivity() {
 
         for (mode in BleCollectionMode.entries) {
             val btn = Button(this).apply {
-                text = "Mode: ${mode.displayName}"
+                text = getString(R.string.dev_hw_mode_btn, mode.displayName)
                 isAllCaps = false
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 setOnClickListener {
                     collectorService?.setExcursionBleMode(mode)
-                    Toast.makeText(this@MainActivity, "Excursion BLE mode: ${mode.name}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(
+                        this@MainActivity,
+                        getString(R.string.dev_toast_hw_ble_mode, mode.name),
+                        Toast.LENGTH_SHORT
+                    ).show()
                 }
             }
             col.addView(btn)
         }
 
         val gattInspectBtn = Button(this).apply {
-            text = "🔍 Connect GATT & Enumerate 22210000-... Services"
+            text = getString(R.string.dev_hw_gatt_inspect_btn)
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setOnClickListener { collectorService?.triggerManualGattInspection() }
         }
         val gattDisconnectBtn = Button(this).apply {
-            text = "Disconnect Active GATT Session"
+            text = getString(R.string.dev_hw_gatt_disconnect_btn)
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setOnClickListener { collectorService?.disconnectGatt() }
@@ -1906,7 +1933,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(gattDisconnectBtn)
 
         hwGattStatusView = TextView(this).apply {
-            text = "GATT Status: Disconnected"
+            text = getString(R.string.dev_hw_gatt_status_initial)
             setTextColor(Color.parseColor("#FBBF24"))
             typeface = Typeface.MONOSPACE
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
@@ -1916,7 +1943,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(hwGattStatusView)
 
         val rawLogTitle = TextView(this).apply {
-            text = "Live 0xFDCD TLV & GATT Frame Log (Newest First):"
+            text = getString(R.string.dev_hw_raw_log_title)
             setTextColor(Color.parseColor("#94A3B8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setPadding(0, dp(10), 0, dp(4))
@@ -1924,7 +1951,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(rawLogTitle)
 
         hwRawHexLogView = TextView(this).apply {
-            text = "(No packets received yet)"
+            text = getString(R.string.dev_hw_raw_log_empty)
             setTextColor(Color.parseColor("#A7F3D0"))
             typeface = Typeface.MONOSPACE
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
@@ -1944,33 +1971,34 @@ class MainActivity : AppCompatActivity() {
         val useF = TemperatureUnitFormatter.useFahrenheit(this)
 
         val bleShortLabel = when {
-            snap.lastFrame?.isBtHomeV2 == true -> "BTHome v2 (Passive)"
-            snap.lastFrame?.isProvisionedNormalMode == true -> "Provisioned 0x88 (Passive)"
+            snap.lastFrame?.isBtHomeV2 == true -> getString(R.string.now_ble_bthome_passive)
+            snap.lastFrame?.isProvisionedNormalMode == true -> getString(R.string.now_ble_provisioned_passive)
             else -> when (snap.effectiveBleMode) {
-                BleCollectionMode.PERIODIC_GATT_KEEPALIVE -> snap.devConfig.strategy.effectiveStatusBadge(snap.collectorState)
-                BleCollectionMode.PASSIVE_ONLY -> "Passive"
+                BleCollectionMode.PERIODIC_GATT_KEEPALIVE ->
+                    snap.devConfig.strategy.effectiveStatusBadge(this, snap.collectorState)
+                BleCollectionMode.PASSIVE_ONLY -> getString(R.string.now_ble_passive)
             }
         }
         contextPillView.text = when (snap.collectorState) {
             ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP ->
                 if (snap.matchedKnownPlace != null) {
-                    "🏠 At ${snap.matchedKnownPlace.label} • GPS Off • BLE: $bleShortLabel"
+                    getString(R.string.now_context_at_place, snap.matchedKnownPlace.label, bleShortLabel)
                 } else {
-                    "📡 Monitoring • GPS Off • BLE: $bleShortLabel"
+                    getString(R.string.now_context_monitoring, bleShortLabel)
                 }
             ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE -> {
                 val movementBadge = when {
-                    snap.isGpsActive && snap.isStepSensorActive -> "GPS + Steps Active"
-                    snap.isGpsActive -> "GPS Active"
-                    snap.isStepSensorActive -> "Steps Active • GPS Off"
-                    else -> "GPS Off"
+                    snap.isGpsActive && snap.isStepSensorActive -> getString(R.string.now_movement_gps_steps)
+                    snap.isGpsActive -> getString(R.string.now_movement_gps)
+                    snap.isStepSensorActive -> getString(R.string.now_movement_steps)
+                    else -> getString(R.string.now_movement_gps_off)
                 }
-                "🚶 On a Trip • $movementBadge • BLE: $bleShortLabel"
+                getString(R.string.now_context_on_trip, movementBadge, bleShortLabel)
             }
             ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED ->
-                "⏸️ Trip Paused (>90s BLE dropout; GPS paused)"
+                getString(R.string.now_context_trip_paused)
             ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE ->
-                "📡 Monitor Out of Range • GPS Off"
+                getString(R.string.now_context_out_of_range)
         }
 
         if (snap.lastFrame != null) {
@@ -1980,24 +2008,40 @@ class MainActivity : AppCompatActivity() {
                 snap.collectorState == ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED
 
             val hasValidCo2 = snap.mergedCo2Ppm > 0
-            val co2ValueStr = if (hasValidCo2) "${snap.mergedCo2Ppm} ppm" else "— ppm"
+            val co2ValueStr = if (hasValidCo2) {
+                getString(R.string.notif_status_co2_ppm, snap.mergedCo2Ppm)
+            } else {
+                getString(R.string.now_co2_value_placeholder)
+            }
 
             if (isStale) {
                 heroCardView.alpha = 0.74f
                 heroCardView.background = roundedRect("#172033", dp(14))
-                co2HeaderLabelView.text = "⚠️ OUT OF DATE • COLLECTED ${formatElapsedAge(frameAgeSec).uppercase(Locale.US)} AGO"
+                val formattedAge = formatElapsedAge(this, frameAgeSec)
+                co2HeaderLabelView.text = getString(
+                    R.string.now_co2_header_out_of_date,
+                    formattedAge.uppercase(Locale.US)
+                )
                 co2HeaderLabelView.setTextColor(Color.parseColor("#FBBF24"))
                 co2HeroValueView.text = co2ValueStr
                 co2HeroValueView.setTextColor(Color.parseColor("#94A3B8"))
                 val collectedAt = shortTimeFmt.format(Instant.ofEpochMilli(snap.lastFrame.timestampMs))
-                co2VentilationBadgeView.text = "Last reading at $collectedAt (${formatElapsedAge(frameAgeSec)} ago). Hold down the monitor's top touchbar until the Wi-Fi icon flashes if asleep."
+                co2VentilationBadgeView.text = getString(
+                    R.string.now_co2_stale_badge,
+                    collectedAt,
+                    formattedAge
+                )
                 co2VentilationBadgeView.setTextColor(Color.parseColor("#FDE68A"))
                 secondaryMetricsView.setTextColor(Color.parseColor("#94A3B8"))
             } else {
                 heroCardView.alpha = 1.0f
                 heroCardView.background = roundedRect("#1E293B", dp(14))
-                val liveAgeStr = if (frameAgeSec <= 3L) "just now" else "${frameAgeSec}s ago"
-                co2HeaderLabelView.text = "CARBON DIOXIDE (CO₂) • LIVE ($liveAgeStr)"
+                val liveAgeStr = if (frameAgeSec <= 3L) {
+                    getString(R.string.now_live_age_just_now)
+                } else {
+                    getString(R.string.now_live_age_seconds, frameAgeSec)
+                }
+                co2HeaderLabelView.text = getString(R.string.now_co2_header_live, liveAgeStr)
                 co2HeaderLabelView.setTextColor(Color.parseColor("#94A3B8"))
                 co2HeroValueView.text = co2ValueStr
                 co2VentilationBadgeView.setTextColor(Color.parseColor("#CBD5E1"))
@@ -2005,41 +2049,45 @@ class MainActivity : AppCompatActivity() {
                 when {
                     !hasValidCo2 -> {
                         co2HeroValueView.setTextColor(Color.parseColor("#94A3B8"))
-                        co2VentilationBadgeView.text = "CO₂ sensor warming up…"
+                        co2VentilationBadgeView.text = getString(R.string.now_co2_warming_up)
                     }
                     snap.mergedCo2Ppm < 800 -> {
                         co2HeroValueView.setTextColor(Color.parseColor("#34D399"))
-                        co2VentilationBadgeView.text = "Good Ventilation (< 800 ppm)"
+                        co2VentilationBadgeView.text = getString(R.string.now_co2_good)
                     }
                     snap.mergedCo2Ppm < 1200 -> {
                         co2HeroValueView.setTextColor(Color.parseColor("#FBBF24"))
-                        co2VentilationBadgeView.text = "Moderate / Stuffy Air (800–1200 ppm)"
+                        co2VentilationBadgeView.text = getString(R.string.now_co2_moderate)
                     }
                     else -> {
                         co2HeroValueView.setTextColor(Color.parseColor("#F87171"))
-                        co2VentilationBadgeView.text = "Poor Ventilation (≥ 1200 ppm)"
+                        co2VentilationBadgeView.text = getString(R.string.now_co2_poor)
                     }
                 }
             }
-            val batStr = if (snap.mergedBatteryPct in 0..100) "${snap.mergedBatteryPct}%" else "External Power / —"
+            val batStr = if (snap.mergedBatteryPct in 0..100) {
+                getString(R.string.now_battery_pct, snap.mergedBatteryPct)
+            } else {
+                getString(R.string.now_battery_external)
+            }
             val spdStr = when {
                 snap.currentSpeedMps != null && snap.currentSpeedSource == StepMovementEstimator.SpeedSource.STEP_CADENCE -> {
                     val accSuffix = when {
-                        snap.currentGpsAccuracyM != null -> String.format(Locale.US, "Steps • GPS ±%.0fm", snap.currentGpsAccuracyM)
-                        !snap.isGpsActive -> "Steps • GPS Off"
-                        else -> "Steps"
+                        snap.currentGpsAccuracyM != null ->
+                            getString(R.string.now_speed_steps_gps, snap.currentGpsAccuracyM)
+                        !snap.isGpsActive -> getString(R.string.now_speed_steps_gps_off)
+                        else -> getString(R.string.now_speed_steps)
                     }
-                    String.format(Locale.US, "%.1f m/s (%s)", snap.currentSpeedMps, accSuffix)
+                    getString(R.string.now_speed_source_format, snap.currentSpeedMps, accSuffix)
                 }
                 snap.currentSpeedMps != null ->
-                    String.format(Locale.US, "%.1f m/s (±%.0fm)", snap.currentSpeedMps, snap.currentGpsAccuracyM ?: 0f)
-                snap.isStepSensorActive && !snap.isGpsActive -> "Steps Standby (GPS Off)"
-                else -> "Off"
+                    getString(R.string.now_speed_gps_format, snap.currentSpeedMps, snap.currentGpsAccuracyM ?: 0f)
+                snap.isStepSensorActive && !snap.isGpsActive -> getString(R.string.now_speed_steps_standby)
+                else -> getString(R.string.now_speed_off)
             }
             val tempStr = TemperatureUnitFormatter.format(snap.mergedTempC, useF, decimals = 1)
-            secondaryMetricsView.text = String.format(
-                Locale.US,
-                "PM2.5: %d µg/m³  •  PM10: %d µg/m³\nTemp: %s  •  Humidity: %.1f%%  •  Battery: %s\nMovement: %s",
+            secondaryMetricsView.text = getString(
+                R.string.now_secondary_metrics_format,
                 snap.mergedPm25Ugm3,
                 snap.mergedPm10Ugm3,
                 tempStr,
@@ -2049,14 +2097,15 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        val ssidStr = snap.connectedWifiSsid ?: "(Not connected / Location permission needed)"
-        val placeMatchStr = snap.matchedKnownPlace?.let { "Saved Place: ${it.label} (GPS Off)" }
-            ?: when {
-                !snap.hasConfiguredKnownPlaces -> "No Saved Places (Save Wi-Fi for Auto-Trips)"
-                snap.connectedWifiSsid != null -> "Unrecognized Wi-Fi (Trip Mode if monitor active)"
-                else -> "No Wi-Fi Place Matched"
-            }
-        wifiStatusView.text = "Wi-Fi: $ssidStr  •  $placeMatchStr"
+        val ssidStr = snap.connectedWifiSsid ?: getString(R.string.now_wifi_not_connected)
+        val placeMatchStr = snap.matchedKnownPlace?.let {
+            getString(R.string.now_wifi_place_saved, it.label)
+        } ?: when {
+            !snap.hasConfiguredKnownPlaces -> getString(R.string.now_wifi_place_none_configured)
+            snap.connectedWifiSsid != null -> getString(R.string.now_wifi_place_unrecognized)
+            else -> getString(R.string.now_wifi_place_none_matched)
+        }
+        wifiStatusView.text = getString(R.string.now_wifi_status_format, ssidStr, placeMatchStr)
         saveCurrentWifiBtn.visibility = if (!snap.connectedWifiSsid.isNullOrBlank() && snap.matchedKnownPlace == null) {
             View.VISIBLE
         } else {
@@ -2066,25 +2115,38 @@ class MainActivity : AppCompatActivity() {
             snap.collectorState == ExcursionStateMachine.CollectorState.FIELD_EXCURSION_ACTIVE ||
             snap.collectorState == ExcursionStateMachine.CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED
         manualTripToggleBtn.text = if (isTripOpen) {
-            "⏹️ End Current Trip"
+            getString(R.string.now_manual_trip_end_btn)
         } else {
-            "🚶 Start Trip Manually"
+            getString(R.string.now_manual_trip_start_btn)
         }
 
         refreshLiveRecentGraph()
 
         val f = snap.lastFrame
         if (f != null) {
-            val dtStr = snap.interPacketDeltaMs?.let { String.format(Locale.US, "%.2fs", it / 1000.0) } ?: "first"
-            hwPacketMetaView.text =
-                "Device: ${f.productName} [0x${Integer.toHexString(f.productId)}]\n" +
-                    "MAC: ${f.macAddress}  |  RSSI: ${f.rssiDbm} dBm  |  Δt: $dtStr\n" +
-                    "FrameCtrl: 0x${Integer.toHexString(f.frameControl)} (binding=${f.isEventOrBindingFrame})"
+            val dtStr = snap.interPacketDeltaMs?.let { String.format(Locale.US, "%.2fs", it / 1000.0) }
+                ?: getString(R.string.dev_hw_dt_first)
+            hwPacketMetaView.text = getString(
+                R.string.dev_hw_packet_meta_format,
+                f.productName,
+                Integer.toHexString(f.productId),
+                f.macAddress,
+                f.rssiDbm,
+                dtStr,
+                Integer.toHexString(f.frameControl),
+                f.isEventOrBindingFrame.toString()
+            )
         }
         val dc = snap.devConfig
-        hwBleModeStatusView.text =
-            "Configured Excursion Mode: ${snap.userExcursionBleMode.displayName} (Effective: ${snap.effectiveBleMode.name})\n" +
-                "Active Keep-Alive [epoch=${dc.configEpoch}]: ${dc.strategy.id} • every ${dc.intervalSec}s • dedup=${dc.deduplicateFdcdTrace}"
+        hwBleModeStatusView.text = getString(
+            R.string.dev_hw_ble_mode_status_format,
+            snap.userExcursionBleMode.displayName,
+            snap.effectiveBleMode.name,
+            dc.configEpoch,
+            dc.strategy.id,
+            dc.intervalSec,
+            dc.deduplicateFdcdTrace.toString()
+        )
         val gattLines = buildString {
             append(snap.gattConnectionStatus)
             if (snap.gattDiscoveredServicesLog.isNotEmpty()) {
@@ -2094,7 +2156,7 @@ class MainActivity : AppCompatActivity() {
         }
         hwGattStatusView.text = gattLines
         hwRawHexLogView.text = if (snap.recentRawFramesLog.isEmpty()) {
-            "(Waiting for 0xFDCD packets...)"
+            getString(R.string.dev_hw_raw_log_waiting)
         } else {
             snap.recentRawFramesLog.joinToString("\n")
         }
@@ -2111,11 +2173,13 @@ class MainActivity : AppCompatActivity() {
             !liveRecentHistoryView.isFollowingLiveEdge &&
             liveRecentHistoryView.cursorEpochSec > 0L
         if (detached) {
-            recentGraphHeaderView.text =
-                "Recent History • Selected ${exactTimeFmt.format(Instant.ofEpochSecond(liveRecentHistoryView.cursorEpochSec))}"
+            recentGraphHeaderView.text = getString(
+                R.string.now_recent_history_selected,
+                exactTimeFmt.format(Instant.ofEpochSecond(liveRecentHistoryView.cursorEpochSec))
+            )
             liveFollowResetBtn.visibility = View.VISIBLE
         } else {
-            recentGraphHeaderView.text = "Recent History (Last 15 Minutes • Touch to Inspect)"
+            recentGraphHeaderView.text = getString(R.string.now_recent_history_header)
             liveFollowResetBtn.visibility = View.GONE
         }
     }
@@ -2151,7 +2215,7 @@ class MainActivity : AppCompatActivity() {
             val slots = svc.ringStore.queryRange(0, cwStart, cwEnd)
             val windowNotes = svc.metadataDb.getTimelineNotesInRange(cwStart, cwEnd)
             val spanLabel = "${dateShortTimeFmt.format(Instant.ofEpochSecond(cwStart))} – ${shortTimeFmt.format(Instant.ofEpochSecond(cwEnd))}"
-            tripSelectorLabel.text = "14d Window: $spanLabel"
+            tripSelectorLabel.text = getString(R.string.trips_window_title, spanLabel)
             pinTripBtn?.visibility = View.GONE
             manageTripBtn?.visibility = View.GONE
             tripRetentionBanner?.visibility = View.GONE
@@ -2163,7 +2227,7 @@ class MainActivity : AppCompatActivity() {
             slicesContainer?.removeAllViews()
             slicesContainer?.let { container ->
                 val carveBtn = Button(this).apply {
-                    text = "✂️ Carve This Window as a New Slicable Trip"
+                    text = getString(R.string.trips_carve_window_btn)
                     isAllCaps = false
                     setOnClickListener {
                         carveCustomWindowAsTrip(cwStart, cwEnd)
@@ -2172,7 +2236,7 @@ class MainActivity : AppCompatActivity() {
                 container.addView(carveBtn)
                 if (windowNotes.isNotEmpty()) {
                     val notesHdr = TextView(this).apply {
-                        text = "Notes in Selected Window (${windowNotes.size})"
+                        text = getString(R.string.trips_window_notes_header, windowNotes.size)
                         setTextColor(Color.parseColor("#5EEAD4"))
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                         setTypeface(typeface, Typeface.BOLD)
@@ -2193,7 +2257,7 @@ class MainActivity : AppCompatActivity() {
             lastSeenLatestExcursionId = null
             lastViewportExcursionId = null
             lastViewportCustomWindow = null
-            tripSelectorLabel.text = "No Trips Recorded Yet"
+            tripSelectorLabel.text = getString(R.string.trips_none_recorded)
             pinTripBtn?.visibility = View.GONE
             manageTripBtn?.visibility = View.GONE
             tripRetentionBanner?.visibility = View.GONE
@@ -2204,7 +2268,7 @@ class MainActivity : AppCompatActivity() {
             updateZoomControlsUi()
             slicesContainer?.removeAllViews()
             slicesContainer?.addView(Button(this).apply {
-                text = "📥 Import Trip (.xlsx)..."
+                text = getString(R.string.trips_import_xlsx_btn)
                 isAllCaps = false
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                 setOnClickListener {
@@ -2213,7 +2277,7 @@ class MainActivity : AppCompatActivity() {
             })
             if (isDemoDataEnabled()) {
                 slicesContainer?.addView(Button(this).apply {
-                    text = "🎭 Load Canned Demo Trip"
+                    text = getString(R.string.trips_load_demo_btn)
                     isAllCaps = false
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                     setOnClickListener {
@@ -2224,7 +2288,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 })
                 slicesContainer?.addView(Button(this).apply {
-                    text = "📂 Demo Replay XLSX (Time-Shifted)..."
+                    text = getString(R.string.trips_demo_replay_xlsx_btn)
                     isAllCaps = false
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                     setOnClickListener {
@@ -2255,6 +2319,7 @@ class MainActivity : AppCompatActivity() {
         val tripNotes = svc.metadataDb.getTimelineNotesInRange(currentExc.startEpochSec, excEndSec)
 
         val remLabel = formatRemainingRetentionCompact(
+            this,
             currentExc,
             System.currentTimeMillis() / 1000L,
             svc.ringStore.getArchiveWindowSec(0)
@@ -2264,7 +2329,11 @@ class MainActivity : AppCompatActivity() {
         manageTripBtn?.visibility = View.VISIBLE
         pinTripBtn?.apply {
             visibility = View.VISIBLE
-            text = if (currentExc.isPinned) "📌 Pinned" else "⏳ $remLabel • 📌 Pin"
+            text = if (currentExc.isPinned) {
+                getString(R.string.trips_pin_pinned)
+            } else {
+                getString(R.string.trips_pin_unpinned, remLabel)
+            }
             if (currentExc.isPinned) {
                 background = roundedRect("#1E293B", dp(6), strokeHex = "#334155", strokeWidthPx = dp(1))
                 setTextColor(Color.parseColor("#94A3B8"))
@@ -2341,7 +2410,7 @@ class MainActivity : AppCompatActivity() {
             ) != null
         if (canPromote && slice != null) {
             val splitBtn = Button(this).apply {
-                text = "✂️ Split"
+                text = getString(R.string.trips_split_btn)
                 isAllCaps = false
                 maxLines = 1
                 minWidth = 0
@@ -2425,7 +2494,7 @@ class MainActivity : AppCompatActivity() {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
             }
-            val spanDuration = formatElapsedAge((slice.endEpochSec - slice.startEpochSec).coerceAtLeast(0L))
+            val spanDuration = formatElapsedAge(this, (slice.endEpochSec - slice.startEpochSec).coerceAtLeast(0L))
             val timeSpan = "${shortTimeFmt.format(Instant.ofEpochSecond(slice.startEpochSec))}–${shortTimeFmt.format(Instant.ofEpochSecond(slice.endEpochSec))} ($spanDuration)"
             val titleTv = TextView(this).apply {
                 text = "#${idx + 1} ${slice.label}\n$timeSpan"
@@ -2438,7 +2507,7 @@ class MainActivity : AppCompatActivity() {
             if (slices.size >= 2 && (idx == 0 || idx == slices.size - 1)) {
                 val isStart = (idx == 0)
                 val dropBtn = Button(this).apply {
-                    text = if (isStart) "🗑️ Drop #1" else "🗑️ Drop #${idx + 1}"
+                    text = getString(R.string.trips_drop_slice_btn, if (isStart) 1 else idx + 1)
                     isAllCaps = false
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
                     setOnClickListener { confirmAndTrimSlice(slice, isStart = isStart, idx = idx) }
@@ -2466,7 +2535,7 @@ class MainActivity : AppCompatActivity() {
                 headerRow.addView(focusBtn)
             }
             val editSegmentBtn = Button(this).apply {
-                text = "✏️ Edit"
+                text = getString(R.string.trips_edit_slice_btn)
                 isAllCaps = false
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
                 setOnClickListener {
@@ -2478,9 +2547,8 @@ class MainActivity : AppCompatActivity() {
             card.addView(headerRow)
 
             val metaRow = TextView(this).apply {
-                text = String.format(
-                    Locale.US,
-                    "Est. distance: %.0fm • CO₂ ≥1000 ppm: %.1fm • %d samples",
+                text = getString(
+                    R.string.trips_slice_meta,
                     stats.totalDistanceMetersEstimate,
                     stats.minutesCo2Above1000,
                     stats.totalSamples
@@ -2514,7 +2582,7 @@ class MainActivity : AppCompatActivity() {
                 setPadding(0, dp(4), 0, 0)
             }
             val exportSliceBtn = Button(this).apply {
-                text = "📤 Export XLSX"
+                text = getString(R.string.trips_export_slice_btn)
                 isAllCaps = false
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
                 setOnClickListener {
@@ -2543,7 +2611,7 @@ class MainActivity : AppCompatActivity() {
     private fun buildSliceStatsTable(stats: AqlRingBufferStore.SliceStatistics): View {
         if (stats.slotCount <= 0) {
             return TextView(this).apply {
-                text = "No air-quality samples recorded in this segment."
+                text = getString(R.string.trips_slice_empty_samples)
                 setTextColor(Color.parseColor("#64748B"))
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
                 setPadding(0, dp(2), 0, dp(4))
@@ -2560,7 +2628,7 @@ class MainActivity : AppCompatActivity() {
 
         val rows = listOf(
             SliceStatRowSpec(
-                label = "CO₂ (ppm)",
+                label = getString(R.string.trips_stats_row_co2),
                 colorHex = "#38BDF8",
                 p50 = stats.co2Median.toString(),
                 p95 = stats.co2P95.toString(),
@@ -2568,7 +2636,7 @@ class MainActivity : AppCompatActivity() {
                 avg = String.format(Locale.US, "%.0f", stats.co2Mean)
             ),
             SliceStatRowSpec(
-                label = "PM2.5 (µg/m³)",
+                label = getString(R.string.trips_stats_row_pm25),
                 colorHex = "#A78BFA",
                 p50 = String.format(Locale.US, "%.1f", stats.pm25P50),
                 p95 = String.format(Locale.US, "%.1f", stats.pm25P95),
@@ -2576,7 +2644,7 @@ class MainActivity : AppCompatActivity() {
                 avg = String.format(Locale.US, "%.1f", stats.pm25Mean)
             ),
             SliceStatRowSpec(
-                label = "PM10 (µg/m³)",
+                label = getString(R.string.trips_stats_row_pm10),
                 colorHex = "#C084FC",
                 p50 = String.format(Locale.US, "%.1f", stats.pm10P50),
                 p95 = String.format(Locale.US, "%.1f", stats.pm10P95),
@@ -2584,7 +2652,7 @@ class MainActivity : AppCompatActivity() {
                 avg = String.format(Locale.US, "%.1f", stats.pm10Mean)
             ),
             SliceStatRowSpec(
-                label = "Temp ($tempUnit)",
+                label = getString(R.string.trips_stats_row_temp, tempUnit),
                 colorHex = "#FB923C",
                 p50 = fmtTemp(stats.tempCP50),
                 p95 = fmtTemp(stats.tempCP95),
@@ -2593,7 +2661,7 @@ class MainActivity : AppCompatActivity() {
                 highlightMedian = true
             ),
             SliceStatRowSpec(
-                label = "RH (%)",
+                label = getString(R.string.trips_stats_row_rh),
                 colorHex = "#2DD4BF",
                 p50 = String.format(Locale.US, "%.1f", stats.humidityP50),
                 p95 = String.format(Locale.US, "%.1f", stats.humidityP95),
@@ -2630,11 +2698,11 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 0, 0, dp(3))
         }
-        header.addView(makeCell("Metric", 1.55f, alignEnd = false, colorHex = "#94A3B8", bold = true))
-        header.addView(makeCell("P50", 1.0f, alignEnd = true, colorHex = "#94A3B8", bold = true))
-        header.addView(makeCell("P95", 1.0f, alignEnd = true, colorHex = "#94A3B8", bold = true))
-        header.addView(makeCell("Max", 1.0f, alignEnd = true, colorHex = "#94A3B8", bold = true))
-        header.addView(makeCell("Avg", 1.0f, alignEnd = true, colorHex = "#94A3B8", bold = true))
+        header.addView(makeCell(getString(R.string.trips_stats_col_metric), 1.55f, alignEnd = false, colorHex = "#94A3B8", bold = true))
+        header.addView(makeCell(getString(R.string.trips_stats_col_p50), 1.0f, alignEnd = true, colorHex = "#94A3B8", bold = true))
+        header.addView(makeCell(getString(R.string.trips_stats_col_p95), 1.0f, alignEnd = true, colorHex = "#94A3B8", bold = true))
+        header.addView(makeCell(getString(R.string.trips_stats_col_max), 1.0f, alignEnd = true, colorHex = "#94A3B8", bold = true))
+        header.addView(makeCell(getString(R.string.trips_stats_col_avg), 1.0f, alignEnd = true, colorHex = "#94A3B8", bold = true))
         table.addView(header)
 
         for (spec in rows) {
@@ -2681,11 +2749,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         val labelTitle = TextView(this).apply {
-            text = "Segment Label (Freeform text or tap a preset below):"
+            text = getString(R.string.dialog_segment_label_prompt)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
         }
         val labelInput = EditText(this).apply {
-            hint = "e.g., CTA Bus #22, Coffee Shop, Bookshop"
+            hint = getString(R.string.dialog_segment_label_hint)
             setText(slice.label)
         }
         layout.addView(labelTitle)
@@ -2693,7 +2761,7 @@ class MainActivity : AppCompatActivity() {
 
         // Optional quick-fill presets inside the modal (populates the freeform fields without forcing preset creation)
         val presetsHint = TextView(this).apply {
-            text = "Quick-Fill from Saved Presets (optional):"
+            text = getString(R.string.dialog_segment_presets_hint)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setPadding(0, dp(8), 0, dp(4))
         }
@@ -2716,12 +2784,12 @@ class MainActivity : AppCompatActivity() {
         layout.addView(chipScroll)
 
         val notesTitle = TextView(this).apply {
-            text = "Notes (optional):"
+            text = getString(R.string.dialog_segment_notes_prompt)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             setPadding(0, dp(8), 0, dp(2))
         }
         val notesInput = EditText(this).apply {
-            hint = "e.g., Busy espresso bar, windows open"
+            hint = getString(R.string.dialog_segment_notes_hint)
             setText(slice.notes)
         }
         layout.addView(notesTitle)
@@ -2732,7 +2800,11 @@ class MainActivity : AppCompatActivity() {
         if (allSlices.size >= 2 && (sliceIdx == 0 || sliceIdx == allSlices.size - 1)) {
             val isStart = (sliceIdx == 0)
             dropBoundaryBtn = Button(this).apply {
-                text = "🗑️ Drop #${sliceIdx + 1} (Trim Trip ${if (isStart) "Start" else "End"})"
+                text = if (isStart) {
+                    getString(R.string.dialog_segment_drop_start, sliceIdx + 1)
+                } else {
+                    getString(R.string.dialog_segment_drop_end, sliceIdx + 1)
+                }
                 isAllCaps = false
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             }
@@ -2741,10 +2813,11 @@ class MainActivity : AppCompatActivity() {
 
         val spanTitle = "${shortTimeFmt.format(Instant.ofEpochSecond(slice.startEpochSec))}–${shortTimeFmt.format(Instant.ofEpochSecond(slice.endEpochSec))}"
         val dialogBuilder = AlertDialog.Builder(this)
-            .setTitle("Edit Segment #${sliceIdx + 1} ($spanTitle)")
+            .setTitle(getString(R.string.dialog_segment_edit_title, sliceIdx + 1, spanTitle))
             .setView(layout)
-            .setPositiveButton("Save") { _, _ ->
-                val newLabel = labelInput.text.toString().trim().ifEmpty { "Segment" }
+            .setPositiveButton(R.string.dialog_save) { _, _ ->
+                val newLabel = labelInput.text.toString().trim()
+                    .ifEmpty { getString(R.string.dialog_segment_default_label) }
                 val newNotes = notesInput.text.toString().trim()
                 svc.metadataDb.updateSliceMetadata(
                     sliceId = slice.id,
@@ -2754,10 +2827,12 @@ class MainActivity : AppCompatActivity() {
                 )
                 refreshTripsTab()
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.dialog_cancel, null)
 
         if (nextSlice != null) {
-            dialogBuilder.setNeutralButton("Merge #${sliceIdx + 1} + #${sliceIdx + 2} ↓") { _, _ ->
+            dialogBuilder.setNeutralButton(
+                getString(R.string.dialog_segment_merge_btn, sliceIdx + 1, sliceIdx + 2)
+            ) { _, _ ->
                 svc.metadataDb.mergeAdjacentSlices(slice.id, nextSlice.id, svc.ringStore)
                 refreshTripsTab()
             }
@@ -2788,7 +2863,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val infoTv = TextView(this).apply {
-            text = "Focus on a specific subset of the 14-day high-resolution ring buffer without compressing 14 days onto one screen:"
+            text = getString(R.string.dialog_14d_window_info)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             setPadding(0, 0, 0, dp(8))
         }
@@ -2797,9 +2872,9 @@ class MainActivity : AppCompatActivity() {
         val dayLabels = (0..13).map { daysAgo ->
             val date = LocalDate.now().minusDays(daysAgo.toLong())
             when (daysAgo) {
-                0 -> "Today ($date)"
-                1 -> "Yesterday ($date)"
-                else -> "$daysAgo days ago ($date)"
+                0 -> getString(R.string.dialog_14d_day_today, date.toString())
+                1 -> getString(R.string.dialog_14d_day_yesterday, date.toString())
+                else -> getString(R.string.dialog_14d_day_days_ago, daysAgo, date.toString())
             }
         }
         val daySpinner = Spinner(this).apply {
@@ -2809,7 +2884,7 @@ class MainActivity : AppCompatActivity() {
         val hourLabels = (0..47).map { halfHourIdx ->
             val h = halfHourIdx / 2
             val m = if (halfHourIdx % 2 == 0) 0 else 30
-            String.format(Locale.US, "Start at %02d:%02d", h, m)
+            getString(R.string.dialog_14d_start_at, h, m)
         }
         val nowZdt = ZonedDateTime.now()
         val defaultHalfHourIdx = ((nowZdt.hour * 2 + (if (nowZdt.minute >= 30) 1 else 0)) - 3).coerceIn(0, 47)
@@ -2820,7 +2895,11 @@ class MainActivity : AppCompatActivity() {
 
         val durationMinutesOptions = listOf(30, 60, 90, 120, 180, 240, 360)
         val durationLabels = durationMinutesOptions.map { mins ->
-            if (mins < 60) "Duration: ${mins} mins" else "Duration: ${mins / 60.0} hours"
+            if (mins < 60) {
+                getString(R.string.dialog_14d_duration_mins, mins)
+            } else {
+                getString(R.string.dialog_14d_duration_hours, mins / 60.0)
+            }
         }
         val durationSpinner = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, durationLabels)
@@ -2832,9 +2911,9 @@ class MainActivity : AppCompatActivity() {
         layout.addView(durationSpinner)
 
         AlertDialog.Builder(this)
-            .setTitle("Select Window from 14-Day Ring Buffer")
+            .setTitle(R.string.dialog_14d_window_title)
             .setView(layout)
-            .setPositiveButton("Carve as New Trip") { _, _ ->
+            .setPositiveButton(R.string.dialog_14d_carve_btn) { _, _ ->
                 val (startSec, endSec) = computeWindowEpochRange(
                     daySpinner.selectedItemPosition,
                     startHourSpinner.selectedItemPosition,
@@ -2842,7 +2921,7 @@ class MainActivity : AppCompatActivity() {
                 )
                 carveCustomWindowAsTrip(startSec, endSec)
             }
-            .setNeutralButton("Preview Window Only") { _, _ ->
+            .setNeutralButton(R.string.dialog_14d_preview_btn) { _, _ ->
                 val (startSec, endSec) = computeWindowEpochRange(
                     daySpinner.selectedItemPosition,
                     startHourSpinner.selectedItemPosition,
@@ -2852,7 +2931,7 @@ class MainActivity : AppCompatActivity() {
                 customWindowEndEpochSec = endSec
                 refreshTripsTab()
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.dialog_cancel, null)
             .show()
     }
 
@@ -2867,7 +2946,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun carveCustomWindowAsTrip(startSec: Long, endSec: Long) {
         val svc = collectorService ?: return
-        val title = "Carved Trip (${dateShortTimeFmt.format(Instant.ofEpochSecond(startSec))})"
+        val title = getString(R.string.trips_carved_title, dateShortTimeFmt.format(Instant.ofEpochSecond(startSec)))
         val exc = svc.metadataDb.startExcursion(deviceId = 1L, startEpochSec = startSec, title = title, isManual = true)
         svc.metadataDb.updateOngoingExcursionEnd(exc.id, endSec, closeExcursion = true, ringStore = svc.ringStore)
         svc.metadataDb.setExcursionPinned(exc.id, true, svc.ringStore)
@@ -2875,7 +2954,7 @@ class MainActivity : AppCompatActivity() {
         customWindowEndEpochSec = null
         selectedExcursionId = exc.id
         refreshTripsTab()
-        Toast.makeText(this, "📌 Carved & Pinned Trip: $title", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, getString(R.string.toast_carved_pinned, title), Toast.LENGTH_SHORT).show()
     }
 
     // =========================================================================
@@ -2969,13 +3048,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun requestCompanionDeviceAssociation(preferredBleAddress: String? = null) {
         if (!CompanionDeviceHelper.isSupported(this)) {
-            Toast.makeText(this, "Companion Device Presence is not supported on this device", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, getString(R.string.toast_companion_not_supported), Toast.LENGTH_LONG).show()
             return
         }
         val cdm = CompanionDeviceHelper.getManager(this) ?: return
         if (!AqlCollectorService.hasBluetoothScanPermission(this)) {
             requestRuntimePermissionsIfNeeded(forcePrompt = true)
-            Toast.makeText(this, "Grant Bluetooth permission first, then try linking again", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, getString(R.string.toast_grant_bt_first), Toast.LENGTH_LONG).show()
             return
         }
         val targetMac = CompanionDeviceHelper.normalizeBluetoothMac(preferredBleAddress)
@@ -2996,7 +3075,7 @@ class MainActivity : AppCompatActivity() {
                             }.onFailure { err ->
                                 Toast.makeText(
                                     this@MainActivity,
-                                    "Could not open device picker: ${err.message}",
+                                    getString(R.string.toast_companion_picker_failed, err.message ?: ""),
                                     Toast.LENGTH_LONG
                                 ).show()
                             }
@@ -3012,9 +3091,10 @@ class MainActivity : AppCompatActivity() {
                     override fun onFailure(error: CharSequence?) {
                         runOnUiThread {
                             val msg = if (usedSingleDevice && targetMac != null) {
-                                "Could not reach monitor ($targetMac). Make sure it's nearby and try linking from Settings."
+                                getString(R.string.toast_companion_unreachable, targetMac)
                             } else {
-                                error?.toString()?.takeIf { it.isNotBlank() } ?: "Device linking cancelled"
+                                error?.toString()?.takeIf { it.isNotBlank() }
+                                    ?: getString(R.string.toast_companion_cancelled)
                             }
                             Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
                         }
@@ -3022,7 +3102,11 @@ class MainActivity : AppCompatActivity() {
                 }
             )
         } catch (e: Exception) {
-            Toast.makeText(this, "Could not start device linking: ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(
+                this,
+                getString(R.string.toast_companion_start_failed, e.message ?: ""),
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -3035,11 +3119,11 @@ class MainActivity : AppCompatActivity() {
         activeSettingsDialog?.refreshCompanionAssociationState()
         val label = assoc?.let {
             CompanionDeviceHelper.formatAssociationLabel(it.displayName, it.deviceMacAddress?.toString())
-        } ?: "monitor"
+        } ?: getString(R.string.companion_default_monitor_label)
         val msg = if (observing) {
-            "Linked $label for auto-resume & battery savings"
+            getString(R.string.toast_companion_linked_observing, label)
         } else {
-            "Linked $label (presence observation unavailable)"
+            getString(R.string.toast_companion_linked_no_presence, label)
         }
         Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
     }
@@ -3048,7 +3132,7 @@ class MainActivity : AppCompatActivity() {
         CompanionDeviceHelper.disassociateAll(this)
         collectorService?.refreshCompanionAssociationCache()
         activeSettingsDialog?.refreshCompanionAssociationState()
-        Toast.makeText(this, "Unlinked monitor from background auto-resume", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, getString(R.string.toast_companion_unlinked), Toast.LENGTH_SHORT).show()
     }
 
     private fun openExternalUrl(url: String) {
@@ -3056,7 +3140,7 @@ class MainActivity : AppCompatActivity() {
         runCatching {
             startActivity(intent)
         }.onFailure {
-            Toast.makeText(this, "No browser available to open $url", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, getString(R.string.toast_no_browser, url), Toast.LENGTH_LONG).show()
         }
     }
 
@@ -3068,11 +3152,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val introView = TextView(this).apply {
-            text = buildString {
-                append("AirSlice is a 100% local, cloud-free Bluetooth companion and Trip Slicer for the Qingping Air Monitor Lite (CGDN1) and compatible BTHome v2 sensors.\n\n")
-                append("• With a CGDN1 Monitor: Turn on the monitor (or hold its top touchbar ~7s until the Wi-Fi icon appears if unconfigured). AirSlice completes offline Bluetooth setup in ~5s and records continuously—no cloud or account needed.\n\n")
-                append("• No Monitor Handy? (Testing & Evaluation): Enable Demo Data Mode below to unlock a simulated live sensor stream on the Now tab and a sample multi-leg excursion on the Trips tab. You can also import shared .xlsx trip files.")
-            }
+            text = getString(R.string.help_intro)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
         }
         col.addView(introView)
@@ -3086,9 +3166,9 @@ class MainActivity : AppCompatActivity() {
             ).apply { topMargin = dp(12) }
             fun syncLabel() {
                 text = if (isDemoDataEnabled()) {
-                    "✅ Demo Data Mode Enabled (Tap to Turn Off)"
+                    getString(R.string.help_demo_enabled_btn)
                 } else {
-                    "🎭 Enable Demo Data Mode (No Hardware Needed)"
+                    getString(R.string.help_demo_disabled_btn)
                 }
             }
             syncLabel()
@@ -3099,9 +3179,9 @@ class MainActivity : AppCompatActivity() {
                 activeSettingsDialog?.refreshDemoModeState()
                 syncLabel()
                 val msg = if (nextEnabled) {
-                    "Demo Data Mode enabled! Try 'Toggle Live Demo Replay Stream' on Now or 'Load Canned Demo Trip' on Trips."
+                    getString(R.string.toast_demo_enabled)
                 } else {
-                    "Demo Data Mode disabled."
+                    getString(R.string.toast_demo_disabled)
                 }
                 Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
             }
@@ -3109,7 +3189,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(demoActionBtn)
 
         val linkHeader = TextView(this).apply {
-            text = "Documentation & Community (Opens in Browser)"
+            text = getString(R.string.help_links_header)
             setTypeface(typeface, Typeface.BOLD)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             setPadding(0, dp(14), 0, dp(4))
@@ -3117,10 +3197,10 @@ class MainActivity : AppCompatActivity() {
         col.addView(linkHeader)
 
         val links = listOf(
-            "📖 Frequently Asked Questions (FAQ)" to FAQ_DOC_URL,
-            "🗺️ How Trips, Segments, and Splits Work" to SLICING_GUIDE_URL,
-            "📡 How Your CGDN1 Monitor Works" to HARDWARE_GUIDE_URL,
-            "💬 androidaql-users Group (Google Groups)" to USERS_GROUP_URL
+            getString(R.string.help_link_faq) to FAQ_DOC_URL,
+            getString(R.string.help_link_slicing) to SLICING_GUIDE_URL,
+            getString(R.string.help_link_hardware) to HARDWARE_GUIDE_URL,
+            getString(R.string.help_link_group) to USERS_GROUP_URL
         )
         for ((label, url) in links) {
             val btn = Button(this).apply {
@@ -3135,9 +3215,9 @@ class MainActivity : AppCompatActivity() {
         scroll.addView(col)
         activeHelpDialog?.dismiss()
         activeHelpDialog = AlertDialog.Builder(this)
-            .setTitle("❓ AirSlice Help & FAQ")
+            .setTitle(R.string.help_dialog_title)
             .setView(scroll)
-            .setPositiveButton("Close", null)
+            .setPositiveButton(R.string.dialog_close, null)
             .show()
     }
 
@@ -3152,11 +3232,11 @@ class MainActivity : AppCompatActivity() {
                 switchToSplitCursorMode()
                 Toast.makeText(
                     this,
-                    "Switched to 🎯 Split Cursor — aim inside the segment and tap ✂️ Split.",
+                    getString(R.string.toast_split_switched_cursor),
                     Toast.LENGTH_SHORT
                 ).show()
             } else {
-                Toast.makeText(this, "Tap inside a segment (between dividers) on the chart to place the split cursor.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.toast_split_tap_inside), Toast.LENGTH_SHORT).show()
             }
             return
         }
@@ -3211,7 +3291,7 @@ class MainActivity : AppCompatActivity() {
             trimmed
         }
         if (!ok) {
-            Toast.makeText(this, "Cannot trim outside the current trip bounds.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.toast_trim_outside_bounds), Toast.LENGTH_SHORT).show()
             return
         }
         dualPaneSlicerView.selectedDividerIndex = -1
@@ -3235,12 +3315,17 @@ class MainActivity : AppCompatActivity() {
         val boundaryTs = if (isStart) slice.endEpochSec else slice.startEpochSec
         val boundaryTime = shortTimeFmt.format(Instant.ofEpochSecond(boundaryTs))
         AlertDialog.Builder(this)
-            .setTitle("Drop Segment #${idx + 1} (${slice.label})?")
-            .setMessage("This trims the ${if (isStart) "beginning" else "end"} of the trip to $boundaryTime.")
-            .setPositiveButton("Drop & Trim") { _, _ ->
+            .setTitle(getString(R.string.dialog_trim_title, idx + 1, slice.label))
+            .setMessage(
+                getString(
+                    if (isStart) R.string.dialog_trim_msg_start else R.string.dialog_trim_msg_end,
+                    boundaryTime
+                )
+            )
+            .setPositiveButton(R.string.dialog_trim_confirm_btn) { _, _ ->
                 applyExcursionTrim(slice.excursionId, boundaryTs, trimStart = isStart)
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.dialog_cancel, null)
             .show()
     }
 
@@ -3255,11 +3340,11 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(20), dp(14), dp(20), dp(8))
         }
         val titleLabel = TextView(this).apply {
-            text = "Trip Title:"
+            text = getString(R.string.dialog_manage_trip_title_label)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
         }
         val titleInput = EditText(this).apply {
-            hint = "e.g., Morning Walk & Coffee, Loop Errand"
+            hint = getString(R.string.dialog_manage_trip_title_hint)
             setText(exc.title)
         }
 
@@ -3275,7 +3360,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         val pinTripCheck = CheckBox(this).apply {
-            text = "📌 Retain / Pin Entire Trip Forever"
+            text = getString(R.string.dialog_manage_trip_pin_check)
             isChecked = exc.isPinned
             setTextColor(Color.parseColor("#F8FAFC"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
@@ -3300,9 +3385,9 @@ class MainActivity : AppCompatActivity() {
             pinCard.background = roundedRect("#1E293B", dp(8), strokeHex = strokeColor, strokeWidthPx = dp(2))
             pinStatusHint.setTextColor(Color.parseColor(textColor))
             pinStatusHint.text = when {
-                pinned -> "✅ Retained Forever: Full 15-second telemetry is saved in permanent storage."
-                outsideWindow -> "⚠️ Outside 14-Day Window: Unpinning this trip will permanently delete it and its saved readings."
-                else -> "⚠️ Temporary (14-Day Ring): Auto-recorded trips are not retained beyond 14 days unless pinned."
+                pinned -> getString(R.string.dialog_manage_trip_pin_forever)
+                outsideWindow -> getString(R.string.dialog_manage_trip_pin_outside)
+                else -> getString(R.string.dialog_manage_trip_pin_temporary)
             }
         }
         refreshPinCardStyle(exc.isPinned)
@@ -3331,7 +3416,7 @@ class MainActivity : AppCompatActivity() {
 
         var dialogRef: AlertDialog? = null
         val exportTripBtn = Button(this).apply {
-            text = "📤 Export Trip (.xlsx)"
+            text = getString(R.string.dialog_manage_trip_export_btn)
             isAllCaps = false
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             layoutParams = LinearLayout.LayoutParams(
@@ -3339,7 +3424,8 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(8) }
             setOnClickListener {
-                val editedTitle = titleInput.text.toString().trim().ifEmpty { "Trip" }
+                val editedTitle = titleInput.text.toString().trim()
+                    .ifEmpty { getString(R.string.dialog_manage_trip_default_title) }
                 if (editedTitle != exc.title) {
                     svc.metadataDb.renameExcursion(exc.id, editedTitle)
                     refreshTripsTab()
@@ -3353,10 +3439,11 @@ class MainActivity : AppCompatActivity() {
         layout.addView(exportTripBtn)
 
         dialogRef = AlertDialog.Builder(this)
-            .setTitle("Manage Trip")
+            .setTitle(R.string.dialog_manage_trip_title)
             .setView(layout)
-            .setPositiveButton("Save") { _, _ ->
-                val newTitle = titleInput.text.toString().trim().ifEmpty { "Trip" }
+            .setPositiveButton(R.string.dialog_save) { _, _ ->
+                val newTitle = titleInput.text.toString().trim()
+                    .ifEmpty { getString(R.string.dialog_manage_trip_default_title) }
                 svc.metadataDb.renameExcursion(exc.id, newTitle)
                 val updatedExc = exc.copy(title = newTitle)
                 if (pinTripCheck.isChecked != exc.isPinned) {
@@ -3369,10 +3456,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 refreshTripsTab()
             }
-            .setNeutralButton("🗑️ Delete Trip") { _, _ ->
+            .setNeutralButton(R.string.dialog_manage_trip_delete_btn) { _, _ ->
                 confirmDeleteTrip(exc)
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.dialog_cancel, null)
             .show()
     }
 
@@ -3380,19 +3467,19 @@ class MainActivity : AppCompatActivity() {
         val svc = collectorService ?: return
         val outsideWindow = svc.metadataDb.isExcursionOutsideRingWindow(exc, svc.ringStore)
         val dialogTitle = if (initiatedByUnpin) {
-            "Unpin & Delete Trip (${exc.title})?"
+            getString(R.string.dialog_delete_trip_title_unpin, exc.title)
         } else {
-            "Delete Trip (${exc.title})?"
+            getString(R.string.dialog_delete_trip_title, exc.title)
         }
-        val dialogMessage = if (outsideWindow) {
-            "⚠️ This trip is outside the 14-day ring buffer window. ${if (initiatedByUnpin) "Unpinning" else "Deleting"} it will permanently delete the trip, its segment labels, and its saved air-quality readings (they are no longer in the 14-day ring buffer)."
-        } else {
-            "This removes the trip and its segment labels. (Underlying 14-day ring-buffer readings remain intact and can still be carved via 🗓️ 14d Window.)"
+        val dialogMessage = when {
+            outsideWindow && initiatedByUnpin -> getString(R.string.dialog_delete_trip_msg_outside_unpin)
+            outsideWindow -> getString(R.string.dialog_delete_trip_msg_outside_delete)
+            else -> getString(R.string.dialog_delete_trip_msg_inside)
         }
         val positiveLabel = when {
-            initiatedByUnpin -> "Unpin & Delete"
-            outsideWindow -> "Delete Permanently"
-            else -> "Delete Trip"
+            initiatedByUnpin -> getString(R.string.dialog_delete_trip_btn_unpin)
+            outsideWindow -> getString(R.string.dialog_delete_trip_btn_permanent)
+            else -> getString(R.string.dialog_delete_trip_btn)
         }
         AlertDialog.Builder(this)
             .setTitle(dialogTitle)
@@ -3403,7 +3490,7 @@ class MainActivity : AppCompatActivity() {
                 selectedExcursionId = svc.metadataDb.getExcursions().firstOrNull()?.id
                 refreshTripsTab()
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.dialog_cancel, null)
             .show()
     }
 
@@ -3449,15 +3536,14 @@ class MainActivity : AppCompatActivity() {
                     wv.visibility = View.GONE
                 }
                 isLiveNowTarget && snap.isPendingWifiLossDebounce -> {
-                    wv.text =
-                        "⏳ Waiting for Wi-Fi disconnect debounce — this note will be included if the trip starts (otherwise retained for 14 days)."
+                    wv.text = getString(R.string.dialog_note_warn_debounce)
                     wv.visibility = View.VISIBLE
                 }
                 else -> {
                     wv.text = if (isLiveNowTarget) {
-                        "⏳ No trip is currently running — this note will be discarded after 14 days unless included in a pinned trip."
+                        getString(R.string.dialog_note_warn_no_live_trip)
                     } else {
-                        "⏳ No trip covers this timestamp — this note will be discarded after 14 days unless included in a pinned trip."
+                        getString(R.string.dialog_note_warn_outside_trip)
                     }
                     wv.visibility = View.VISIBLE
                 }
@@ -3465,8 +3551,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (!isFromTripsTab && alternateNowEpochSec != null && alternateNowEpochSec != capturedEpochSec) {
-            val selectedLabel = "📍 Selected (${exactTimeFmt.format(Instant.ofEpochSecond(capturedEpochSec))})"
-            val nowLabel = "🕒 Now (${exactTimeFmt.format(Instant.ofEpochSecond(alternateNowEpochSec))})"
+            val selectedLabel = getString(
+                R.string.dialog_note_target_selected,
+                exactTimeFmt.format(Instant.ofEpochSecond(capturedEpochSec))
+            )
+            val nowLabel = getString(
+                R.string.dialog_note_target_now,
+                exactTimeFmt.format(Instant.ofEpochSecond(alternateNowEpochSec))
+            )
             lateinit var selectedPill: TextView
             lateinit var nowPill: TextView
 
@@ -3487,7 +3579,9 @@ class MainActivity : AppCompatActivity() {
                 val selectedActive = (newTs == capturedEpochSec)
                 styleTargetPill(selectedPill, selectedActive)
                 styleTargetPill(nowPill, !selectedActive)
-                dialogRef?.setTitle("📝 Add Note (${exactTimeFmt.format(Instant.ofEpochSecond(newTs))})")
+                dialogRef?.setTitle(
+                    getString(R.string.dialog_note_add_title, exactTimeFmt.format(Instant.ofEpochSecond(newTs)))
+                )
                 updateRetentionWarning(newTs)
             }
 
@@ -3538,7 +3632,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val input = EditText(this).apply {
-            hint = "e.g. Boarded bus, opened window (blank = ${MetadataDatabase.DEFAULT_QUICK_NOTE_TEXT})"
+            hint = getString(R.string.dialog_note_input_hint, MetadataDatabase.DEFAULT_QUICK_NOTE_TEXT)
             setSingleLine(false)
             maxLines = 3
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
@@ -3573,20 +3667,20 @@ class MainActivity : AppCompatActivity() {
         }
 
         dialogRef = AlertDialog.Builder(this)
-            .setTitle("📝 Add Note (${exactTimeFmt.format(Instant.ofEpochSecond(targetEpochSec))})")
+            .setTitle(getString(R.string.dialog_note_add_title, exactTimeFmt.format(Instant.ofEpochSecond(targetEpochSec))))
             .setView(container)
-            .setPositiveButton("Save") { _, _ ->
+            .setPositiveButton(R.string.dialog_save) { _, _ ->
                 val text = input.text.toString().trim().ifEmpty { MetadataDatabase.DEFAULT_QUICK_NOTE_TEXT }
                 svc.metadataDb.addTimelineNote(targetEpochSec, text)
                 refreshLiveRecentGraph()
                 refreshTripsTab()
                 Toast.makeText(
                     this,
-                    "📝 Saved note at ${exactTimeFmt.format(Instant.ofEpochSecond(targetEpochSec))}",
+                    getString(R.string.toast_note_saved, exactTimeFmt.format(Instant.ofEpochSecond(targetEpochSec))),
                     Toast.LENGTH_SHORT
                 ).show()
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.dialog_cancel, null)
             .show()
     }
 
@@ -3622,7 +3716,7 @@ class MainActivity : AppCompatActivity() {
         var dialogRef: AlertDialog? = null
         if (alignedSplit != null && slice != null) {
             val promoteBtn = Button(this).apply {
-                text = "✂️ Promote to Split..."
+                text = getString(R.string.dialog_note_promote_btn)
                 isAllCaps = false
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
                 layoutParams = LinearLayout.LayoutParams(
@@ -3647,20 +3741,20 @@ class MainActivity : AppCompatActivity() {
         }
 
         dialogRef = AlertDialog.Builder(this)
-            .setTitle("📝 Note (${exactTimeFmt.format(Instant.ofEpochSecond(note.timestampEpochSec))})")
+            .setTitle(getString(R.string.dialog_note_edit_title, exactTimeFmt.format(Instant.ofEpochSecond(note.timestampEpochSec))))
             .setView(container)
-            .setPositiveButton("Save") { _, _ ->
+            .setPositiveButton(R.string.dialog_save) { _, _ ->
                 svc.metadataDb.updateTimelineNote(note.id, input.text.toString())
                 refreshLiveRecentGraph()
                 refreshTripsTab()
             }
-            .setNeutralButton("Delete") { _, _ ->
+            .setNeutralButton(R.string.dialog_delete) { _, _ ->
                 svc.metadataDb.deleteTimelineNote(note.id)
                 refreshLiveRecentGraph()
                 refreshTripsTab()
-                Toast.makeText(this, "Deleted note", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.toast_note_deleted), Toast.LENGTH_SHORT).show()
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.dialog_cancel, null)
             .show()
     }
 
@@ -3695,26 +3789,40 @@ class MainActivity : AppCompatActivity() {
                 (tabContainers.getOrNull(1) as? ScrollView)?.smoothScrollTo(0, 0)
                 Toast.makeText(
                     this,
-                    "✂️ Created draggable divider ⇔ ${sliceIdx + 1}|$newRightNum",
+                    getString(R.string.toast_promote_split_done, sliceIdx + 1, newRightNum),
                     Toast.LENGTH_SHORT
                 ).show()
             }
         }
 
         val isQuickMarker = (note.text == MetadataDatabase.DEFAULT_QUICK_NOTE_TEXT)
-        val positiveText = if (isQuickMarker) "Split & Remove Marker" else "Split & Label #$newRightNum"
-        val neutralText = if (isQuickMarker) "Split & Keep Marker" else "Split & Keep Note"
+        val positiveText = if (isQuickMarker) {
+            getString(R.string.dialog_promote_split_remove_marker)
+        } else {
+            getString(R.string.dialog_promote_split_label, newRightNum)
+        }
+        val neutralText = if (isQuickMarker) {
+            getString(R.string.dialog_promote_split_keep_marker)
+        } else {
+            getString(R.string.dialog_promote_split_keep_note)
+        }
         val rightLabel = if (isQuickMarker) null else note.text
 
+        val splitTimeStr = exactTimeFmt.format(Instant.ofEpochSecond(alignedSplit))
         AlertDialog.Builder(this)
-            .setTitle("✂️ Promote to Split (${exactTimeFmt.format(Instant.ofEpochSecond(alignedSplit))})")
+            .setTitle(getString(R.string.dialog_promote_split_title, splitTimeStr))
             .setMessage(
-                "Create a draggable split boundary inside #${sliceIdx + 1} (${slice.label}) at " +
-                    "${exactTimeFmt.format(Instant.ofEpochSecond(alignedSplit))}?\n\nNote: \"${note.text}\""
+                getString(
+                    R.string.dialog_promote_split_msg,
+                    sliceIdx + 1,
+                    slice.label,
+                    splitTimeStr,
+                    note.text
+                )
             )
             .setPositiveButton(positiveText) { _, _ -> finishSplit(newRightLabel = rightLabel, deleteNote = true) }
             .setNeutralButton(neutralText) { _, _ -> finishSplit(newRightLabel = null, deleteNote = false) }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.dialog_cancel, null)
             .show()
     }
 
@@ -3725,15 +3833,15 @@ class MainActivity : AppCompatActivity() {
         val demo = isDemoDataEnabled()
         val nowSec = System.currentTimeMillis() / 1000L
         val retentionWindowSec = svc.ringStore.getArchiveWindowSec(0)
-        val options = excursions.map { formatTripPickerLabel(it, nowSec, retentionWindowSec) }.toMutableList()
+        val options = excursions.map { formatTripPickerLabel(this, it, nowSec, retentionWindowSec) }.toMutableList()
         val importIdx = options.size
-        options.add("📥 Import Trip (.xlsx)...")
+        options.add(getString(R.string.trips_import_xlsx_btn))
         if (demo) {
-            options.add("🔄 Reload Canned Demo Trip")
-            options.add("📂 Demo Replay XLSX (Time-Shifted)...")
+            options.add(getString(R.string.trips_picker_reload_demo))
+            options.add(getString(R.string.trips_demo_replay_xlsx_btn))
         }
         AlertDialog.Builder(this)
-            .setTitle("Select Trip")
+            .setTitle(R.string.dialog_trip_picker_title)
             .setItems(options.toTypedArray()) { _, which ->
                 customWindowStartEpochSec = null
                 customWindowEndEpochSec = null
@@ -3788,14 +3896,19 @@ class MainActivity : AppCompatActivity() {
             clipData = ClipData.newRawUri(outFile.name, contentUri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        startActivity(Intent.createChooser(shareIntent, "$chooserTitle (${outFile.name})"))
+        startActivity(
+            Intent.createChooser(
+                shareIntent,
+                getString(R.string.share_chooser_with_file, chooserTitle, outFile.name)
+            )
+        )
     }
 
     private fun exportExcursionToXlsx(exc: ExcursionRecord) {
         val svc = collectorService ?: return
         val slots = svc.metadataDb.resolveSlotsForExcursion(exc.id, svc.ringStore)
         if (slots.isEmpty()) {
-            Toast.makeText(this, "No air-quality samples recorded in this trip.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.toast_export_no_trip_samples), Toast.LENGTH_SHORT).show()
             return
         }
         val slices = svc.metadataDb.getSlicesForExcursion(exc.id)
@@ -3817,8 +3930,8 @@ class MainActivity : AppCompatActivity() {
         shareXlsxBytes(
             bytes = xlsxBytes,
             fileName = "trip_${exc.id}_${slug}.xlsx",
-            subject = "Air Quality Trip XLSX: ${exc.title}",
-            chooserTitle = "Share Trip XLSX"
+            subject = getString(R.string.share_trip_xlsx_subject, exc.title),
+            chooserTitle = getString(R.string.share_trip_xlsx_chooser)
         )
     }
 
@@ -3833,7 +3946,7 @@ class MainActivity : AppCompatActivity() {
             ?: svc.metadataDb.resolveSlotsForExcursion(exc.id, svc.ringStore)
                 .filter { it.bucketEpochSec in slice.startEpochSec..slice.endEpochSec }
         if (slots.isEmpty()) {
-            Toast.makeText(this, "No air-quality samples recorded in this segment.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.toast_export_no_segment_samples), Toast.LENGTH_SHORT).show()
             return
         }
         val notes = svc.metadataDb.getTimelineNotesInRange(slice.startEpochSec, slice.endEpochSec)
@@ -3852,8 +3965,8 @@ class MainActivity : AppCompatActivity() {
         shareXlsxBytes(
             bytes = xlsxBytes,
             fileName = "trip_${exc.id}_seg_${sliceNumber}_${slug}.xlsx",
-            subject = "Air Quality Segment XLSX: #${sliceNumber} ${slice.label}",
-            chooserTitle = "Share Segment XLSX"
+            subject = getString(R.string.share_segment_xlsx_subject, sliceNumber, slice.label),
+            chooserTitle = getString(R.string.share_segment_xlsx_chooser)
         )
     }
 
@@ -3861,16 +3974,16 @@ class MainActivity : AppCompatActivity() {
         val svc = collectorService ?: return
         val logFile = svc.hwLogger.logFile
         if (!logFile.exists()) {
-            Toast.makeText(this, "No hardware trace logged yet.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, getString(R.string.toast_no_hw_trace), Toast.LENGTH_SHORT).show()
             return
         }
         val tailContent = logFile.readLines().takeLast(200).joinToString("\n")
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
             type = "application/json"
-            putExtra(Intent.EXTRA_SUBJECT, "AirSlice Hardware Bring-Up Trace (JSONL)")
+            putExtra(Intent.EXTRA_SUBJECT, getString(R.string.share_hw_trace_subject))
             putExtra(Intent.EXTRA_TEXT, tailContent)
         }
-        startActivity(Intent.createChooser(shareIntent, "Share HW Trace JSONL"))
+        startActivity(Intent.createChooser(shareIntent, getString(R.string.share_hw_trace_chooser)))
     }
 
     private fun promptAddCurrentWifiToSavedPlaces(onSaved: (() -> Unit)? = null) {
@@ -3884,23 +3997,24 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(20), dp(12), dp(20), dp(4))
         }
         val ssidLabel = TextView(this).apply {
-            text = "Wi-Fi Network Name (SSID)"
+            text = getString(R.string.dialog_wifi_ssid_label)
             setTypeface(typeface, Typeface.BOLD)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
         }
         val ssidInput = EditText(this).apply {
-            hint = "e.g. MyHomeWiFi"
+            hint = getString(R.string.dialog_wifi_ssid_hint)
             setText(snap.connectedWifiSsid ?: "")
         }
         val placeLabel = TextView(this).apply {
-            text = "Saved Place Name"
+            text = getString(R.string.dialog_wifi_place_label)
             setTypeface(typeface, Typeface.BOLD)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             setPadding(0, dp(10), 0, 0)
         }
+        val defaultPlaceName = getString(R.string.dialog_wifi_place_default)
         val placeNameInput = EditText(this).apply {
-            hint = "e.g. Home, Second Home, Office"
-            setText(if (existingPlaces.isEmpty()) "Home" else "")
+            hint = getString(R.string.dialog_wifi_place_hint)
+            setText(if (existingPlaces.isEmpty()) defaultPlaceName else "")
         }
         layout.addView(ssidLabel)
         layout.addView(ssidInput)
@@ -3909,26 +4023,26 @@ class MainActivity : AppCompatActivity() {
         scroll.addView(layout)
 
         val builder = AlertDialog.Builder(this)
-            .setTitle("Save Wi-Fi Place (Keep GPS Off)")
+            .setTitle(R.string.dialog_wifi_place_title)
             .setView(scroll)
-            .setPositiveButton("Create New Place") { _, _ ->
+            .setPositiveButton(R.string.dialog_wifi_create_btn) { _, _ ->
                 val ssid = ssidInput.text.toString().trim()
-                val label = placeNameInput.text.toString().trim().ifEmpty { "Home" }
+                val label = placeNameInput.text.toString().trim().ifEmpty { defaultPlaceName }
                 if (ssid.isNotEmpty()) {
                     val created = svc.metadataDb.createKnownPlaceWithWifi(label, ssid, snap.connectedWifiBssid)
                     svc.backfillNewlySavedKnownPlace(created.id)
                     onSaved?.invoke()
                 }
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.dialog_cancel, null)
 
         if (existingPlaces.isNotEmpty()) {
-            builder.setNeutralButton("Link to Existing Place...") { _, _ ->
+            builder.setNeutralButton(R.string.dialog_wifi_link_existing_btn) { _, _ ->
                 val ssid = ssidInput.text.toString().trim()
                 if (ssid.isNotEmpty()) {
                     val names = existingPlaces.map { it.label }.toTypedArray()
                     AlertDialog.Builder(this)
-                        .setTitle("Link '$ssid' to Existing Place")
+                        .setTitle(getString(R.string.dialog_wifi_link_existing_title, ssid))
                         .setItems(names) { _, which ->
                             val placeId = existingPlaces[which].id
                             svc.metadataDb.linkWifiToKnownPlace(placeId, ssid, snap.connectedWifiBssid)
@@ -3950,22 +4064,22 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(20), dp(12), dp(20), dp(4))
         }
         val emojiLabel = TextView(this).apply {
-            text = "Emoji Icon"
+            text = getString(R.string.dialog_preset_emoji_label)
             setTypeface(typeface, Typeface.BOLD)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
         }
         val emojiInput = EditText(this).apply {
-            hint = "e.g. ☕, 🚇, 🏢"
+            hint = getString(R.string.dialog_preset_emoji_hint)
             setText("🏷️")
         }
         val labelTitle = TextView(this).apply {
-            text = "Preset Label"
+            text = getString(R.string.dialog_preset_label_title)
             setTypeface(typeface, Typeface.BOLD)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             setPadding(0, dp(10), 0, 0)
         }
         val labelInput = EditText(this).apply {
-            hint = "e.g. Coffee Shop, Metra"
+            hint = getString(R.string.dialog_preset_label_hint)
         }
         layout.addView(emojiLabel)
         layout.addView(emojiInput)
@@ -3974,16 +4088,16 @@ class MainActivity : AppCompatActivity() {
         scroll.addView(layout)
 
         AlertDialog.Builder(this)
-            .setTitle("Add Reusable Segment Preset")
+            .setTitle(R.string.dialog_preset_title)
             .setView(scroll)
-            .setPositiveButton("Add Preset") { _, _ ->
+            .setPositiveButton(R.string.dialog_preset_add_btn) { _, _ ->
                 val lbl = labelInput.text.toString().trim()
                 if (lbl.isNotEmpty()) {
                     svc.metadataDb.addSegmentPreset(lbl, emojiInput.text.toString().trim())
                     onSaved?.invoke()
                 }
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.dialog_cancel, null)
             .show()
     }
 
@@ -4051,34 +4165,34 @@ class MainActivity : AppCompatActivity() {
         }
 
         val (co2WarnInput, co2CritInput) = addThresholdPairRow(
-            groupTitle = "CO₂ (ppm)",
-            warnLabelText = "Warning (default 1000)",
+            groupTitle = getString(R.string.dialog_thresholds_co2_group),
+            warnLabelText = getString(R.string.dialog_thresholds_co2_warn),
             warnInitial = ev.co2WarningThresholdPpm,
-            critLabelText = "Critical (default 2000)",
+            critLabelText = getString(R.string.dialog_thresholds_co2_crit),
             critInitial = ev.co2CriticalThresholdPpm,
             topPaddingDp = 0
         )
         val (pm25WarnInput, pm25CritInput) = addThresholdPairRow(
-            groupTitle = "PM2.5 (µg/m³)",
-            warnLabelText = "Warning (default 25)",
+            groupTitle = getString(R.string.dialog_thresholds_pm25_group),
+            warnLabelText = getString(R.string.dialog_thresholds_pm25_warn),
             warnInitial = ev.pm25WarningThresholdUgm3,
-            critLabelText = "Critical (default 55)",
+            critLabelText = getString(R.string.dialog_thresholds_pm25_crit),
             critInitial = ev.pm25CriticalThresholdUgm3
         )
         val (batWarnInput, batCritInput) = addThresholdPairRow(
-            groupTitle = "Monitor Low Battery (%)",
-            warnLabelText = "Warning ≤ (default 20)",
+            groupTitle = getString(R.string.dialog_thresholds_bat_group),
+            warnLabelText = getString(R.string.dialog_thresholds_bat_warn),
             warnInitial = ev.batteryWarningThresholdPct,
-            critLabelText = "Critical ≤ (default 10)",
+            critLabelText = getString(R.string.dialog_thresholds_bat_crit),
             critInitial = ev.batteryCriticalThresholdPct
         )
 
         scroll.addView(layout)
 
         AlertDialog.Builder(this)
-            .setTitle("Configure Alert Thresholds")
+            .setTitle(R.string.dialog_thresholds_title)
             .setView(scroll)
-            .setPositiveButton("Save") { _, _ ->
+            .setPositiveButton(R.string.dialog_save) { _, _ ->
                 val nextCo2Warn = (co2WarnInput.text.toString().toIntOrNull() ?: ev.co2WarningThresholdPpm)
                     .coerceAtLeast(1)
                 val nextCo2Crit = (co2CritInput.text.toString().toIntOrNull() ?: ev.co2CriticalThresholdPpm)
@@ -4101,7 +4215,7 @@ class MainActivity : AppCompatActivity() {
                 ev.batteryCriticalThresholdPct = nextBatCrit
                 onSaved?.invoke()
             }
-            .setNeutralButton("Reset Defaults") { _, _ ->
+            .setNeutralButton(R.string.dialog_thresholds_reset_btn) { _, _ ->
                 ev.co2WarningThresholdPpm = 1000
                 ev.co2CriticalThresholdPpm = 2000
                 ev.pm25WarningThresholdUgm3 = 25
@@ -4109,9 +4223,9 @@ class MainActivity : AppCompatActivity() {
                 ev.batteryWarningThresholdPct = 20
                 ev.batteryCriticalThresholdPct = 10
                 onSaved?.invoke()
-                Toast.makeText(this, "Reset alert thresholds to defaults", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.toast_thresholds_reset), Toast.LENGTH_SHORT).show()
             }
-            .setNegativeButton("Cancel", null)
+            .setNegativeButton(R.string.dialog_cancel, null)
             .show()
     }
 
@@ -4164,6 +4278,24 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        fun formatElapsedAge(context: Context, ageSec: Long): String = when {
+            ageSec < 60L -> context.getString(R.string.trips_age_seconds, ageSec)
+            ageSec < 3600L -> {
+                val m = ageSec / 60L
+                val s = ageSec % 60L
+                if (s == 0L) {
+                    context.getString(R.string.trips_age_minutes, m)
+                } else {
+                    context.getString(R.string.trips_age_minutes_seconds, m, s)
+                }
+            }
+            else -> {
+                val h = ageSec / 3600L
+                val m = (ageSec % 3600L) / 60L
+                context.getString(R.string.trips_age_hours_minutes, h, m)
+            }
+        }
+
         fun formatRemainingRetentionCompact(
             excursion: ExcursionRecord,
             nowEpochSec: Long = System.currentTimeMillis() / 1000L,
@@ -4175,6 +4307,20 @@ class MainActivity : AppCompatActivity() {
             val maxDays = (retentionWindowSec / 86_400L).coerceAtLeast(1L)
             val days = ((remainingSec + 43_200L) / 86_400L).coerceIn(1L, maxDays)
             return "${days}d"
+        }
+
+        fun formatRemainingRetentionCompact(
+            context: Context,
+            excursion: ExcursionRecord,
+            nowEpochSec: Long = System.currentTimeMillis() / 1000L,
+            retentionWindowSec: Long = DEFAULT_RETENTION_WINDOW_SEC
+        ): String {
+            val ageSec = (nowEpochSec - excursion.startEpochSec).coerceAtLeast(0L)
+            val remainingSec = (retentionWindowSec - ageSec).coerceAtLeast(0L)
+            if (remainingSec < 86_400L) return context.getString(R.string.trips_retention_less_than_1d)
+            val maxDays = (retentionWindowSec / 86_400L).coerceAtLeast(1L)
+            val days = ((remainingSec + 43_200L) / 86_400L).coerceIn(1L, maxDays)
+            return context.getString(R.string.trips_retention_days, days)
         }
 
         fun formatTripPickerLabel(
@@ -4197,6 +4343,28 @@ class MainActivity : AppCompatActivity() {
                     "⏳ ${formatRemainingRetentionCompact(excursion, nowEpochSec, retentionWindowSec)}"
                 }
                 "${excursion.title} • $duration • $badge"
+            }
+        }
+
+        fun formatTripPickerLabel(
+            context: Context,
+            excursion: ExcursionRecord,
+            nowEpochSec: Long = System.currentTimeMillis() / 1000L,
+            retentionWindowSec: Long = DEFAULT_RETENTION_WINDOW_SEC
+        ): String {
+            val endSec = excursion.endEpochSec ?: nowEpochSec
+            val duration = formatElapsedAge(context, (endSec - excursion.startEpochSec).coerceAtLeast(0L))
+            return if (excursion.endEpochSec == null) {
+                if (excursion.isPinned) {
+                    context.getString(R.string.trips_picker_live_pinned, excursion.title, duration)
+                } else {
+                    context.getString(R.string.trips_picker_live, excursion.title, duration)
+                }
+            } else if (excursion.isPinned) {
+                context.getString(R.string.trips_picker_closed_pinned, excursion.title, duration)
+            } else {
+                val rem = formatRemainingRetentionCompact(context, excursion, nowEpochSec, retentionWindowSec)
+                context.getString(R.string.trips_picker_closed_retention, excursion.title, duration, rem)
             }
         }
 

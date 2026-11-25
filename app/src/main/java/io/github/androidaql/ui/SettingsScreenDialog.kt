@@ -163,7 +163,7 @@ class SettingsScreenDialog(
         val places = service.metadataDb.getKnownPlaces()
         if (places.isEmpty()) {
             val emptyTv = TextView(context).apply {
-                text = "No saved places configured yet."
+                text = context.getString(R.string.settings_saved_places_empty)
                 setTextColor(Color.parseColor(COLOR_TEXT_SECONDARY))
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                 setPadding(0, dp(4), 0, dp(6))
@@ -196,13 +196,13 @@ class SettingsScreenDialog(
                 }
             }
             val titleTv = TextView(context).apply {
-                text = "🏠 ${place.label}"
+                text = context.getString(R.string.settings_saved_place_row_title, place.label)
                 setTextColor(Color.parseColor(COLOR_TEXT_PRIMARY))
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
                 setTypeface(typeface, Typeface.BOLD)
             }
             val ssidTv = TextView(context).apply {
-                text = ssids.ifBlank { "No Wi-Fi SSID linked" }
+                text = ssids.ifBlank { context.getString(R.string.settings_saved_place_no_ssid) }
                 setTextColor(Color.parseColor(COLOR_TEXT_SECONDARY))
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 maxLines = 2
@@ -224,7 +224,11 @@ class SettingsScreenDialog(
                     fun syncButtonState() {
                         val activeHere = service.isManualKnownPlaceOverrideActive() &&
                             service.buildSnapshot().matchedKnownPlace?.id == place.id
-                        text = if (activeHere) "Stop Sim" else "Simulate"
+                        text = if (activeHere) {
+                            context.getString(R.string.settings_sim_stop)
+                        } else {
+                            context.getString(R.string.settings_sim_start)
+                        }
                         background = roundedRect(
                             if (activeHere) COLOR_ACCENT else COLOR_IDLE_PILL_BG,
                             dp(6)
@@ -236,12 +240,16 @@ class SettingsScreenDialog(
                             service.buildSnapshot().matchedKnownPlace?.id == place.id
                         if (stopping) {
                             service.setManualKnownPlaceOverride(0)
-                            Toast.makeText(context, "Stopped simulated presence", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(
+                                context,
+                                context.getString(R.string.toast_sim_stopped),
+                                Toast.LENGTH_SHORT
+                            ).show()
                         } else {
                             service.setManualKnownPlaceOverride(place.id)
                             Toast.makeText(
                                 context,
-                                "Simulating presence at ${place.label} (GPS Off)",
+                                context.getString(R.string.toast_sim_started, place.label),
                                 Toast.LENGTH_SHORT
                             ).show()
                         }
@@ -259,7 +267,7 @@ class SettingsScreenDialog(
         val summary = presetsSummaryView ?: return
         val presets = service.metadataDb.getSegmentPresets()
         summary.text = if (presets.isEmpty()) {
-            "No reusable presets added yet."
+            context.getString(R.string.settings_presets_empty)
         } else {
             presets.joinToString("  •  ") { "${it.iconEmoji} ${it.label}" }
         }
@@ -268,11 +276,15 @@ class SettingsScreenDialog(
     fun refreshAlertsSection() {
         val summary = alertsSummaryView ?: return
         val ev = service.alertEvaluator
-        summary.text = buildString {
-            append("CO₂:  Warn ${ev.co2WarningThresholdPpm} / Crit ${ev.co2CriticalThresholdPpm} ppm\n")
-            append("PM2.5:  Warn ${ev.pm25WarningThresholdUgm3} / Crit ${ev.pm25CriticalThresholdUgm3} µg/m³\n")
-            append("Battery:  Warn ≤${ev.batteryWarningThresholdPct}% / Crit ≤${ev.batteryCriticalThresholdPct}%")
-        }
+        summary.text = context.getString(
+            R.string.settings_alerts_summary,
+            ev.co2WarningThresholdPpm,
+            ev.co2CriticalThresholdPpm,
+            ev.pm25WarningThresholdUgm3,
+            ev.pm25CriticalThresholdUgm3,
+            ev.batteryWarningThresholdPct,
+            ev.batteryCriticalThresholdPct
+        )
     }
 
     fun refreshDemoModeState() {
@@ -307,7 +319,7 @@ class SettingsScreenDialog(
         }
         val backBtn = TextView(context).apply {
             text = "←"
-            contentDescription = "Back"
+            contentDescription = context.getString(R.string.settings_back_cd)
             setTextColor(Color.parseColor(COLOR_TEXT_PRIMARY))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
             setTypeface(typeface, Typeface.BOLD)
@@ -318,7 +330,7 @@ class SettingsScreenDialog(
             setOnClickListener { dismiss() }
         }
         val titleTv = TextView(context).apply {
-            text = "Settings"
+            text = context.getString(R.string.settings_title)
             setTextColor(Color.parseColor(COLOR_TEXT_PRIMARY))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
             setTypeface(typeface, Typeface.BOLD)
@@ -331,10 +343,10 @@ class SettingsScreenDialog(
     }
 
     private fun buildDisplaySection(parent: LinearLayout) {
-        parent.addView(buildSectionHeader("DISPLAY", topMarginDp = 2))
+        parent.addView(buildSectionHeader(context.getString(R.string.settings_section_display), topMarginDp = 2))
         val card = buildCard()
 
-        card.addView(buildSettingTitle("Temperature Unit"))
+        card.addView(buildSettingTitle(context.getString(R.string.settings_temp_unit_title)))
 
         val deviceSym = TemperatureUnitFormatter.unitSymbol(TemperatureUnitFormatter.deviceUseFahrenheit(context))
         val currentPref = TemperatureUnitFormatter.getPreference(context)
@@ -352,9 +364,9 @@ class SettingsScreenDialog(
         )
         selector.addRow(
             listOf(
-                TempUnitPreference.AUTO_DEVICE to "Auto ($deviceSym)",
-                TempUnitPreference.FAHRENHEIT to "°F",
-                TempUnitPreference.CELSIUS to "°C"
+                TempUnitPreference.AUTO_DEVICE to context.getString(R.string.settings_temp_auto_option, deviceSym),
+                TempUnitPreference.FAHRENHEIT to context.getString(R.string.settings_temp_fahrenheit_option),
+                TempUnitPreference.CELSIUS to context.getString(R.string.settings_temp_celsius_option)
             )
         )
         card.addView(selector.container)
@@ -363,12 +375,12 @@ class SettingsScreenDialog(
     }
 
     private fun buildPlacesAndTripsSection(parent: LinearLayout) {
-        parent.addView(buildSectionHeader("PLACES & TRIPS"))
+        parent.addView(buildSectionHeader(context.getString(R.string.settings_section_places_trips)))
         val card = buildCard()
 
         // Saved Wi-Fi Places
-        card.addView(buildSettingTitle("Saved Wi-Fi Places"))
-        card.addView(buildSubtitleText("Pauses GPS automatically while connected.", topDp = 2, bottomDp = 8))
+        card.addView(buildSettingTitle(context.getString(R.string.settings_saved_places_title)))
+        card.addView(buildSubtitleText(context.getString(R.string.settings_saved_places_subtitle), topDp = 2, bottomDp = 8))
 
         val placesBox = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -381,7 +393,7 @@ class SettingsScreenDialog(
         card.addView(placesBox)
         refreshPlacesSection()
 
-        card.addView(buildActionButton("+ Add or Link Wi-Fi Place") {
+        card.addView(buildActionButton(context.getString(R.string.settings_add_wifi_place_btn)) {
             callbacks.onAddWifiPlaceRequested { refreshPlacesSection() }
         })
 
@@ -396,17 +408,14 @@ class SettingsScreenDialog(
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(8) }
         }
-        val debounceTitle = buildSettingTitle("Auto-Trip Delay").apply {
+        val debounceTitle = buildSettingTitle(context.getString(R.string.settings_auto_trip_delay_title)).apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        val debounceInfoBtn = buildInfoIconButton("Auto-Trip Delay details") {
+        val debounceInfoBtn = buildInfoIconButton(context.getString(R.string.settings_auto_trip_delay_info_cd)) {
             AlertDialog.Builder(context)
-                .setTitle("Auto-Trip Delay")
-                .setMessage(
-                    "Waits for the selected delay before starting an auto-trip and waking GPS when Saved Place Wi-Fi drops.\n\n" +
-                        "Untouched auto-recorded trips under 3 minutes are automatically discarded after closing. Manual trips are always kept, and all 15-second readings remain in the 14-day ring buffer."
-                )
-                .setPositiveButton("Got it", null)
+                .setTitle(R.string.settings_auto_trip_delay_title)
+                .setMessage(R.string.settings_auto_trip_delay_info_msg)
+                .setPositiveButton(R.string.dialog_got_it, null)
                 .show()
         }
         debounceHeaderRow.addView(debounceTitle)
@@ -425,7 +434,9 @@ class SettingsScreenDialog(
             }
         )
         debounceSelector.addRow(
-            MainActivity.WIFI_LOSS_DEBOUNCE_OPTIONS_SEC.map { sec -> sec to "${sec}s" }
+            MainActivity.WIFI_LOSS_DEBOUNCE_OPTIONS_SEC.map { sec ->
+                sec to context.getString(R.string.settings_option_seconds, sec)
+            }
         )
         card.addView(debounceSelector.container)
         card.addView(debounceSubtitle)
@@ -433,7 +444,7 @@ class SettingsScreenDialog(
         card.addView(buildCardDivider())
 
         // Reusable Segment Presets
-        card.addView(buildSettingTitle("Reusable Segment Presets"))
+        card.addView(buildSettingTitle(context.getString(R.string.settings_presets_title)))
         val presetsSummary = TextView(context).apply {
             setTextColor(Color.parseColor(COLOR_TEXT_BODY))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
@@ -444,7 +455,7 @@ class SettingsScreenDialog(
         card.addView(presetsSummary)
         refreshPresetsSection()
 
-        card.addView(buildActionButton("+ Add Preset") {
+        card.addView(buildActionButton(context.getString(R.string.settings_add_preset_btn)) {
             callbacks.onAddSegmentPresetRequested { refreshPresetsSection() }
         })
 
@@ -452,19 +463,19 @@ class SettingsScreenDialog(
     }
 
     private fun buildBackgroundLoggingSection(parent: LinearLayout) {
-        val header = buildSectionHeader("BACKGROUND LOGGING")
+        val header = buildSectionHeader(context.getString(R.string.settings_section_background))
         backgroundSectionHeader = header
         parent.addView(header)
 
         val card = buildCard()
         backgroundCard = card
-        card.addView(buildSettingTitle("Auto-Resume & Battery Savings"))
+        card.addView(buildSettingTitle(context.getString(R.string.settings_auto_resume_title)))
 
         val subtitle = buildSubtitleText("", topDp = 2, bottomDp = 10)
         companionStatusSubtitle = subtitle
         card.addView(subtitle)
 
-        val actionBtn = buildActionButton("Link Monitor for Auto-Resume") {
+        val actionBtn = buildActionButton(context.getString(R.string.settings_companion_link_btn)) {
             val (_, linkedSummary) = callbacks.getCompanionAssociationStatus()
             if (linkedSummary != null) {
                 callbacks.onUnlinkCompanionDeviceRequested()
@@ -493,25 +504,25 @@ class SettingsScreenDialog(
         header.visibility = View.VISIBLE
         card.visibility = View.VISIBLE
         if (linkedSummary != null) {
-            subtitle.text = "Linked to $linkedSummary. AirSlice sleeps with no persistent notification while the monitor is away and resumes automatically when nearby."
-            btn.text = "Unlink Monitor"
+            subtitle.text = context.getString(R.string.settings_companion_linked_subtitle, linkedSummary)
+            btn.text = context.getString(R.string.settings_companion_unlink_btn)
         } else {
             val activeMonitor = service.getRecentActiveLinkableMonitor()
             if (activeMonitor != null) {
-                subtitle.text = "Receiving live data from ${activeMonitor.bleAddress}. Link it once so background scanning pauses when it's away and resumes automatically after reboots or updates."
-                btn.text = "Link Active Monitor (${activeMonitor.bleAddress})"
+                subtitle.text = context.getString(R.string.settings_companion_active_subtitle, activeMonitor.bleAddress)
+                btn.text = context.getString(R.string.settings_companion_link_active_btn, activeMonitor.bleAddress)
             } else {
-                subtitle.text = "Link your monitor with Android Companion Device Presence so background scanning pauses when it's away and resumes automatically after reboots or Play Store updates."
-                btn.text = "Link Monitor for Auto-Resume"
+                subtitle.text = context.getString(R.string.settings_companion_unlinked_subtitle)
+                btn.text = context.getString(R.string.settings_companion_link_btn)
             }
         }
     }
 
     private fun buildAlertsSection(parent: LinearLayout) {
-        parent.addView(buildSectionHeader("ALERTS"))
+        parent.addView(buildSectionHeader(context.getString(R.string.settings_section_alerts)))
         val card = buildCard()
 
-        card.addView(buildSettingTitle("Threshold Alerts"))
+        card.addView(buildSettingTitle(context.getString(R.string.settings_threshold_alerts_title)))
         val alertsSummary = TextView(context).apply {
             setTextColor(Color.parseColor(COLOR_TEXT_BODY))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
@@ -522,7 +533,7 @@ class SettingsScreenDialog(
         card.addView(alertsSummary)
         refreshAlertsSection()
 
-        card.addView(buildActionButton("Edit Thresholds") {
+        card.addView(buildActionButton(context.getString(R.string.settings_edit_thresholds_btn)) {
             callbacks.onEditAlertThresholdsRequested { refreshAlertsSection() }
         })
 
@@ -530,7 +541,7 @@ class SettingsScreenDialog(
     }
 
     private fun buildAdvancedSection(parent: LinearLayout) {
-        parent.addView(buildSectionHeader("ADVANCED"))
+        parent.addView(buildSectionHeader(context.getString(R.string.settings_section_advanced)))
         val card = buildCard()
 
         val headerRow = LinearLayout(context).apply {
@@ -546,7 +557,7 @@ class SettingsScreenDialog(
                 marginEnd = dp(8)
             }
         }
-        headerTextCol.addView(buildSettingTitle("Advanced"))
+        headerTextCol.addView(buildSettingTitle(context.getString(R.string.settings_advanced_title)))
         val advSummary = TextView(context).apply {
             setTextColor(Color.parseColor(COLOR_TEXT_SECONDARY))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
@@ -586,14 +597,17 @@ class SettingsScreenDialog(
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(8) }
         }
-        val keepAliveTitle = buildSettingTitle("Monitor Keep-Alive", textSizeSp = 14.5f).apply {
+        val keepAliveTitle = buildSettingTitle(
+            context.getString(R.string.settings_keep_alive_title),
+            textSizeSp = 14.5f
+        ).apply {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        val keepAliveInfoBtn = buildInfoIconButton("Monitor Keep-Alive details") {
+        val keepAliveInfoBtn = buildInfoIconButton(context.getString(R.string.settings_keep_alive_info_cd)) {
             AlertDialog.Builder(context)
-                .setTitle("Monitor Keep-Alive")
-                .setMessage(selectedStrategy.settingsDescription)
-                .setPositiveButton("Got it", null)
+                .setTitle(R.string.settings_keep_alive_title)
+                .setMessage(selectedStrategy.getSettingsDescription(context))
+                .setPositiveButton(R.string.dialog_got_it, null)
                 .show()
         }
         keepAliveHeaderRow.addView(keepAliveTitle)
@@ -619,7 +633,7 @@ class SettingsScreenDialog(
                     }
                     Toast.makeText(
                         context,
-                        "Keep-Alive mode: ${chosen.statusBadge}",
+                        context.getString(R.string.toast_keep_alive_mode, chosen.getStatusBadge(context)),
                         Toast.LENGTH_SHORT
                     ).show()
                 }
@@ -628,14 +642,14 @@ class SettingsScreenDialog(
         )
         keepAliveSelector.addRow(
             listOf(
-                KeepAlivePayloadStrategy.AUTO_OFFLINE_SETUP to "Auto Setup",
-                KeepAlivePayloadStrategy.NONE_PASSIVE to "Passive Only"
+                KeepAlivePayloadStrategy.AUTO_OFFLINE_SETUP to context.getString(R.string.settings_keep_alive_auto_option),
+                KeepAlivePayloadStrategy.NONE_PASSIVE to context.getString(R.string.settings_keep_alive_passive_option)
             )
         )
         val devRow = keepAliveSelector.addRow(
             listOf(
-                KeepAlivePayloadStrategy.TIME_SYNC_0509_PLUS_24M_1101 to "24m Reset",
-                KeepAlivePayloadStrategy.TIME_SYNC_0509 to "05 09 Only"
+                KeepAlivePayloadStrategy.TIME_SYNC_0509_PLUS_24M_1101 to context.getString(R.string.dev_settings_keep_alive_24m_reset_option),
+                KeepAlivePayloadStrategy.TIME_SYNC_0509 to context.getString(R.string.dev_settings_keep_alive_0509_only_option)
             ),
             topMarginDp = 6
         )
@@ -646,7 +660,7 @@ class SettingsScreenDialog(
         body.addView(buildCardDivider())
 
         // Chart Gap Grace
-        body.addView(buildSettingTitle("Chart Gap Grace", textSizeSp = 14.5f).apply {
+        body.addView(buildSettingTitle(context.getString(R.string.settings_chart_gap_grace_title), textSizeSp = 14.5f).apply {
             setPadding(0, 0, 0, dp(8))
         })
         val currentGraceSec = normalizeDropoutGraceSelection(callbacks.getDropoutGracePeriodSec())
@@ -662,10 +676,10 @@ class SettingsScreenDialog(
         )
         graceSelector.addRow(
             listOf(
-                30L to "30s",
-                45L to "45s",
-                90L to "90s",
-                180L to "3m"
+                30L to context.getString(R.string.settings_option_seconds, 30L),
+                45L to context.getString(R.string.settings_option_seconds, 45L),
+                90L to context.getString(R.string.settings_option_seconds, 90L),
+                180L to context.getString(R.string.settings_option_3m)
             )
         )
         body.addView(graceSelector.container)
@@ -675,8 +689,8 @@ class SettingsScreenDialog(
 
         // Demo Data Mode switch
         val (demoRow, demoSw) = buildSwitchRow(
-            title = "Demo Data Mode",
-            subtitle = "Synthetic sensor stream, sample trip & place simulator",
+            title = context.getString(R.string.settings_demo_mode_title),
+            subtitle = context.getString(R.string.settings_demo_mode_subtitle),
             initialChecked = callbacks.isDemoDataEnabled()
         ) { checked ->
             if (updatingDemoSwitch) return@buildSwitchRow
@@ -689,8 +703,8 @@ class SettingsScreenDialog(
 
         // Developer Mode switch
         val (devRowContainer, devSw) = buildSwitchRow(
-            title = "Developer Mode",
-            subtitle = "Show HW Test tab & raw BLE logs",
+            title = context.getString(R.string.settings_dev_mode_title),
+            subtitle = context.getString(R.string.settings_dev_mode_subtitle),
             initialChecked = callbacks.isDeveloperModeEnabled()
         ) { checked ->
             if (updatingDevSwitch) return@buildSwitchRow
@@ -708,14 +722,14 @@ class SettingsScreenDialog(
             setPadding(0, dp(12), 0, 0)
         }
         val fakeLabel = TextView(context).apply {
-            text = "Anonymized Wi-Fi SSID Override (Screenshots/Video)"
+            text = context.getString(R.string.dev_settings_fake_wifi_label)
             setTextColor(Color.parseColor(COLOR_TEXT_BODY))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
             setTypeface(typeface, Typeface.BOLD)
             setPadding(0, 0, 0, dp(6))
         }
         val fakeInput = EditText(context).apply {
-            hint = "Leave blank for real SSID"
+            hint = context.getString(R.string.dev_settings_fake_wifi_hint)
             setText(service.fakeWifiSsidOverride ?: "")
             setSingleLine(true)
             setTextColor(Color.parseColor(COLOR_TEXT_PRIMARY))
@@ -748,7 +762,7 @@ class SettingsScreenDialog(
     }
 
     private fun buildHelpAndPrivacySection(parent: LinearLayout) {
-        parent.addView(buildSectionHeader("HELP & PRIVACY"))
+        parent.addView(buildSectionHeader(context.getString(R.string.settings_section_help_privacy)))
         val card = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             background = roundedRect(COLOR_CARD_BG, dp(12), COLOR_CARD_BORDER, dp(1))
@@ -758,20 +772,20 @@ class SettingsScreenDialog(
             )
         }
 
-        card.addView(buildNavigationRow("Help, FAQ & User Guides") {
+        card.addView(buildNavigationRow(context.getString(R.string.settings_help_faq_row)) {
             callbacks.onShowHelpRequested()
         })
         card.addView(buildThinSeparator(COLOR_CARD_BORDER))
-        card.addView(buildNavigationRow("Share Diagnostic Log (JSONL)") {
+        card.addView(buildNavigationRow(context.getString(R.string.settings_share_diag_log_row)) {
             callbacks.onShareDiagnosticLogRequested()
         })
         card.addView(buildThinSeparator(COLOR_CARD_BORDER))
-        card.addView(buildNavigationRow("Location, Activity & Privacy Disclosure") {
+        card.addView(buildNavigationRow(context.getString(R.string.settings_privacy_disclosure_row)) {
             callbacks.onShowPrivacyDisclosureRequested()
         })
 
         val permDivider = buildThinSeparator(COLOR_CARD_BORDER)
-        val permRow = buildNavigationRow("Enable Location & Step Tracking") {
+        val permRow = buildNavigationRow(context.getString(R.string.settings_enable_permissions_row)) {
             callbacks.onEnablePermissionsRequested()
         }
         enablePermissionsDivider = permDivider
@@ -802,16 +816,23 @@ class SettingsScreenDialog(
     private fun refreshAdvancedSummary() {
         val summary = advancedSummaryView ?: return
         val keepAliveLabel = when (service.devConfig.strategy) {
-            KeepAlivePayloadStrategy.AUTO_OFFLINE_SETUP -> "Auto"
-            KeepAlivePayloadStrategy.NONE_PASSIVE -> "Passive"
-            KeepAlivePayloadStrategy.TIME_SYNC_0509_PLUS_24M_1101 -> "24m Reset"
-            KeepAlivePayloadStrategy.TIME_SYNC_0509 -> "05 09"
+            KeepAlivePayloadStrategy.AUTO_OFFLINE_SETUP -> context.getString(R.string.settings_summary_auto)
+            KeepAlivePayloadStrategy.NONE_PASSIVE -> context.getString(R.string.settings_summary_passive)
+            KeepAlivePayloadStrategy.TIME_SYNC_0509_PLUS_24M_1101 -> context.getString(R.string.dev_settings_keep_alive_24m_reset_option)
+            KeepAlivePayloadStrategy.TIME_SYNC_0509 -> context.getString(R.string.dev_settings_summary_0509)
         }
         val graceSec = normalizeDropoutGraceSelection(callbacks.getDropoutGracePeriodSec())
-        val graceLabel = if (graceSec == 180L) "3m" else "${graceSec}s"
-        val parts = mutableListOf("Keep-Alive: $keepAliveLabel", "Chart Gap: $graceLabel")
-        if (callbacks.isDemoDataEnabled()) parts.add("Demo")
-        if (callbacks.isDeveloperModeEnabled()) parts.add("Dev")
+        val graceLabel = if (graceSec == 180L) {
+            context.getString(R.string.settings_option_3m)
+        } else {
+            context.getString(R.string.settings_option_seconds, graceSec)
+        }
+        val parts = mutableListOf(
+            context.getString(R.string.settings_summary_keep_alive, keepAliveLabel),
+            context.getString(R.string.settings_summary_chart_gap, graceLabel)
+        )
+        if (callbacks.isDemoDataEnabled()) parts.add(context.getString(R.string.settings_summary_demo))
+        if (callbacks.isDeveloperModeEnabled()) parts.add(context.getString(R.string.dev_settings_summary_badge))
         summary.text = parts.joinToString(" • ")
     }
 
@@ -1060,42 +1081,42 @@ class SettingsScreenDialog(
     }
 
     private fun tempSubtitleFor(pref: TempUnitPreference, deviceSym: String): String = when (pref) {
-        TempUnitPreference.AUTO_DEVICE -> "Following device regional settings (currently $deviceSym)."
-        TempUnitPreference.FAHRENHEIT -> "Always display temperatures in Fahrenheit (°F)."
-        TempUnitPreference.CELSIUS -> "Always display temperatures in Celsius (°C)."
+        TempUnitPreference.AUTO_DEVICE -> context.getString(R.string.settings_temp_subtitle_auto, deviceSym)
+        TempUnitPreference.FAHRENHEIT -> context.getString(R.string.settings_temp_subtitle_f)
+        TempUnitPreference.CELSIUS -> context.getString(R.string.settings_temp_subtitle_c)
     }
 
     private fun normalizeDebounceSelection(sec: Long): Long =
         if (sec in MainActivity.WIFI_LOSS_DEBOUNCE_OPTIONS_SEC) sec else 30L
 
     private fun debounceSubtitleFor(sec: Long): String = when (sec) {
-        0L -> "Start immediately on Wi-Fi drop (captures elevators & hallways)."
-        15L -> "Ignore brief 15s Wi-Fi glitches before starting a trip."
-        30L -> "Default — wait 30s before starting an auto-trip & GPS."
-        60L -> "Only start an auto-trip after 1 minute away from Wi-Fi."
-        else -> "Wait ${sec}s before starting an auto-trip."
+        0L -> context.getString(R.string.settings_debounce_0s)
+        15L -> context.getString(R.string.settings_debounce_15s)
+        30L -> context.getString(R.string.settings_debounce_30s)
+        60L -> context.getString(R.string.settings_debounce_60s)
+        else -> context.getString(R.string.settings_debounce_custom, sec)
     }
 
     private fun keepAliveSubtitleFor(strategy: KeepAlivePayloadStrategy): String = when (strategy) {
         KeepAlivePayloadStrategy.AUTO_OFFLINE_SETUP ->
-            "Runs a ~5s offline setup when needed, then listens passively."
+            context.getString(R.string.settings_keep_alive_sub_auto)
         KeepAlivePayloadStrategy.NONE_PASSIVE ->
-            "Passive listener only — never initiates GATT connections."
+            context.getString(R.string.settings_keep_alive_sub_passive)
         KeepAlivePayloadStrategy.TIME_SYNC_0509_PLUS_24M_1101 ->
-            "Dev: resets 10m & 30m BLE windows every 24m (11 01)."
+            context.getString(R.string.dev_settings_keep_alive_sub_24m_reset)
         KeepAlivePayloadStrategy.TIME_SYNC_0509 ->
-            "Dev: sends 05 09 time sync every 3.5m (<30m ceiling)."
+            context.getString(R.string.dev_settings_keep_alive_sub_0509)
     }
 
     private fun normalizeDropoutGraceSelection(sec: Long): Long =
         if (sec in listOf(30L, 45L, 90L, 180L)) sec else 45L
 
     private fun dropoutGraceSubtitleFor(sec: Long): String = when (sec) {
-        30L -> "Bridges brief dropouts up to 30s (2 missed 15s slots)."
-        45L -> "Default — bridges dropouts up to 45s (3 missed slots)."
-        90L -> "Bridges dropouts up to 90s (matches Trip Pause threshold)."
-        180L -> "Bridges dropouts up to 3 minutes (180s)."
-        else -> "Bridges dropouts up to ${sec}s."
+        30L -> context.getString(R.string.settings_grace_30s)
+        45L -> context.getString(R.string.settings_grace_45s)
+        90L -> context.getString(R.string.settings_grace_90s)
+        180L -> context.getString(R.string.settings_grace_180s)
+        else -> context.getString(R.string.settings_grace_custom, sec)
     }
 
     private fun dp(value: Int): Int =
