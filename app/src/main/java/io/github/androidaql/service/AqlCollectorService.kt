@@ -21,8 +21,10 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -39,6 +41,7 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
+import android.os.BatteryManager
 import android.os.Binder
 import android.os.Handler
 import android.os.IBinder
@@ -260,6 +263,22 @@ class AqlCollectorService : Service() {
     @Volatile private var lastLiveTelemetryDeviceName: String? = null
     @Volatile private var lastLiveTelemetryBleMs: Long = 0L
     private var lastRealBleHeardMs: Long = 0L
+    private var isExternalPowerConnected: Boolean = false
+    private var isPowerReceiverRegistered: Boolean = false
+
+    private val powerConnectionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val plugged = when (intent?.action) {
+                Intent.ACTION_POWER_CONNECTED -> true
+                Intent.ACTION_POWER_DISCONNECTED -> false
+                else -> return
+            }
+            if (isExternalPowerConnected != plugged) {
+                isExternalPowerConnected = plugged
+                syncBleScanModeIfNeeded()
+            }
+        }
+    }
 
     private var activeGatt: BluetoothGatt? = null
     private var isGattProbeInFlight: Boolean = false
@@ -458,6 +477,7 @@ class AqlCollectorService : Service() {
         }
 
         createNotificationChannels()
+        registerPowerConnectionReceiver()
         registerWifiCallback()
         restoreLastSampleFromRingBuffer()
         // Do not auto-seed synthetic demo data on startup so physical hardware ring buffers remain pure.
@@ -803,6 +823,7 @@ class AqlCollectorService : Service() {
         mainHandler.removeCallbacksAndMessages(null)
         isWatchdogScheduled = false
         lastPostedStatusNotificationKey = null
+        unregisterPowerConnectionReceiver()
         stopBleScan()
         disconnectGatt()
         stopGpsCollection()
@@ -813,6 +834,38 @@ class AqlCollectorService : Service() {
         metadataDb.close()
         if (instance === this) instance = null
         super.onDestroy()
+    }
+
+    private fun registerPowerConnectionReceiver() {
+        val batteryStatus = runCatching {
+            registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        }.getOrNull()
+        val pluggedFlags = batteryStatus?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
+        isExternalPowerConnected = pluggedFlags != 0
+
+        if (!isPowerReceiverRegistered) {
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_POWER_CONNECTED)
+                addAction(Intent.ACTION_POWER_DISCONNECTED)
+            }
+            runCatching {
+                ContextCompat.registerReceiver(
+                    this,
+                    powerConnectionReceiver,
+                    filter,
+                    ContextCompat.RECEIVER_NOT_EXPORTED
+                )
+                isPowerReceiverRegistered = true
+            }
+        }
+    }
+
+    private fun unregisterPowerConnectionReceiver() {
+        if (!isPowerReceiverRegistered) return
+        runCatching {
+            unregisterReceiver(powerConnectionReceiver)
+        }
+        isPowerReceiverRegistered = false
     }
 
     fun refreshCompanionAssociationCache() {
@@ -1135,7 +1188,8 @@ class AqlCollectorService : Service() {
             collectorState = stateMachine.currentState,
             hasActiveGattOrOta = hasActiveGattOrOta,
             needsActiveUnprovisionedGattDiscovery = needsActiveUnprovisionedGattDiscovery,
-            isRecentCompanionWake = isRecentCompanionWake
+            isRecentCompanionWake = isRecentCompanionWake,
+            isExternalPowerConnected = isExternalPowerConnected
         )
     }
 
@@ -1150,7 +1204,8 @@ class AqlCollectorService : Service() {
             mapOf(
                 "from_mode" to activeScanMode,
                 "to_mode" to desiredMode,
-                "state" to stateMachine.currentState.name
+                "state" to stateMachine.currentState.name,
+                "external_power" to isExternalPowerConnected
             )
         )
         stopBleScan()
@@ -1180,8 +1235,8 @@ class AqlCollectorService : Service() {
             // after which the app receives no results unless some other app happens to be scanning.
             // Unfiltered scans also receive nothing while the screen is off. So in normal (strict) mode we
             // always pass OR'ed hardware filters for the CGDN1's advertisement shapes, and adapt the scan
-            // duty cycle by collector state (LOW_POWER when idle, BALANCED when monitoring, LOW_LATENCY
-            // for broad discovery / active GATT).
+            // duty cycle by collector state & power source (LOW_POWER when idle, BALANCED on battery
+            // during active monitoring, LOW_LATENCY on external power / broad discovery / active GATT).
             val desiredMode = computeDesiredBleScanMode()
             val settings = ScanSettings.Builder()
                 .setScanMode(desiredMode)
@@ -1199,7 +1254,8 @@ class AqlCollectorService : Service() {
                 mapOf(
                     "strict_software_filter" to strictFdcdFilterEnabled,
                     "hardware_filter_count" to filters.size,
-                    "scan_mode" to desiredMode
+                    "scan_mode" to desiredMode,
+                    "external_power" to isExternalPowerConnected
                 )
             )
         } catch (se: SecurityException) {
@@ -3424,7 +3480,8 @@ class AqlCollectorService : Service() {
             collectorState: ExcursionStateMachine.CollectorState,
             hasActiveGattOrOta: Boolean,
             needsActiveUnprovisionedGattDiscovery: Boolean,
-            isRecentCompanionWake: Boolean
+            isRecentCompanionWake: Boolean,
+            isExternalPowerConnected: Boolean = false
         ): Int {
             if (!strictFdcdFilterEnabled || hasActiveGattOrOta || needsActiveUnprovisionedGattDiscovery) {
                 return ScanSettings.SCAN_MODE_LOW_LATENCY
@@ -3433,6 +3490,9 @@ class AqlCollectorService : Service() {
                 !isRecentCompanionWake
             ) {
                 return ScanSettings.SCAN_MODE_LOW_POWER
+            }
+            if (isExternalPowerConnected) {
+                return ScanSettings.SCAN_MODE_LOW_LATENCY
             }
             return ScanSettings.SCAN_MODE_BALANCED
         }
