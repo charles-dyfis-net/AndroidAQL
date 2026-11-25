@@ -179,7 +179,12 @@ class BackgroundResumeTest {
         for (addr in invalidAddresses) {
             assertNull("Expected null for '$addr'", CompanionDeviceHelper.normalizeBluetoothMac(addr))
             assertFalse("Expected false for '$addr'", CompanionDeviceHelper.shouldUseSingleDeviceRequest(addr))
+            assertNull("Expected null observation MAC for '$addr'", CompanionDeviceHelper.formatPresenceObservationMac(addr))
         }
+        assertEquals(
+            "C1:0B:80:1D:1F:35",
+            CompanionDeviceHelper.formatPresenceObservationMac("c1:0b:80:1d:1f:35")
+        )
     }
 
     @Test

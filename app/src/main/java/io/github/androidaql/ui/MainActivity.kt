@@ -72,6 +72,7 @@ class MainActivity : AppCompatActivity() {
 
     private var collectorService: AqlCollectorService? = null
     private var isBound = false
+    private var isBindRequested = false
     private var isExitingApp = false
     private var activeTabIndex = 0
     private var selectedExcursionId: Long? = null
@@ -243,6 +244,10 @@ class MainActivity : AppCompatActivity() {
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val b = binder as? AqlCollectorService.LocalBinder ?: return
+            if (!isBindRequested) {
+                runCatching { unbindService(this) }
+                return
+            }
             val svc = b.getService()
             collectorService = svc
             isBound = true
@@ -331,8 +336,12 @@ class MainActivity : AppCompatActivity() {
         val startIntent = pendingServiceStartIntent ?: Intent(this, AqlCollectorService::class.java)
         pendingServiceStartIntent = null
         ContextCompat.startForegroundService(this, startIntent)
-        if (!isBound) {
-            bindService(Intent(this, AqlCollectorService::class.java), serviceConnection, Context.BIND_AUTO_CREATE)
+        if (!isBindRequested) {
+            isBindRequested = bindService(
+                Intent(this, AqlCollectorService::class.java),
+                serviceConnection,
+                Context.BIND_AUTO_CREATE
+            )
         }
     }
 
@@ -380,14 +389,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onStop() {
-        if (isBound) {
+    private fun unbindCollectorService() {
+        if (isBindRequested || isBound) {
             collectorService?.removeListener(serviceListener)
             collectorService?.removeUserStopListener(serviceUserStopListener)
-            unbindService(serviceConnection)
+            runCatching { unbindService(serviceConnection) }
+            isBindRequested = false
             isBound = false
             collectorService = null
         }
+    }
+
+    override fun onStop() {
+        unbindCollectorService()
         super.onStop()
     }
 
@@ -424,13 +438,7 @@ class MainActivity : AppCompatActivity() {
         activeDisclosureDialog = null
         activeHelpDialog?.dismiss()
         activeHelpDialog = null
-        if (isBound) {
-            collectorService?.removeListener(serviceListener)
-            collectorService?.removeUserStopListener(serviceUserStopListener)
-            unbindService(serviceConnection)
-            isBound = false
-            collectorService = null
-        }
+        unbindCollectorService()
         super.onDestroy()
     }
 
@@ -444,13 +452,7 @@ class MainActivity : AppCompatActivity() {
         activeDisclosureDialog = null
         activeHelpDialog?.dismiss()
         activeHelpDialog = null
-        if (isBound) {
-            collectorService?.removeListener(serviceListener)
-            collectorService?.removeUserStopListener(serviceUserStopListener)
-            unbindService(serviceConnection)
-            isBound = false
-            collectorService = null
-        }
+        unbindCollectorService()
         finishAndRemoveTask()
     }
 

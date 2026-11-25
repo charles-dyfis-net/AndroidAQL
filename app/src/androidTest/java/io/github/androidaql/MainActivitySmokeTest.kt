@@ -196,6 +196,7 @@ class MainActivitySmokeTest {
         override fun onShareDiagnosticLogRequested() {}
         override fun onShowPrivacyDisclosureRequested() {}
         override fun onEnablePermissionsRequested() {}
+        override fun onStopServiceAndExitRequested() {}
         override fun onSettingsDismissed() {}
     }
 

@@ -39,6 +39,9 @@ object CompanionDeviceHelper {
     fun shouldUseSingleDeviceRequest(targetBleAddress: String?): Boolean =
         normalizeBluetoothMac(targetBleAddress) != null
 
+    fun formatPresenceObservationMac(rawMacAddress: String?): String? =
+        normalizeBluetoothMac(rawMacAddress)
+
     fun isSupported(context: Context): Boolean {
         if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_COMPANION_DEVICE_SETUP)) {
             return false
@@ -131,17 +134,22 @@ object CompanionDeviceHelper {
             !isDemoOrScreenshotMode &&
             normalizeBluetoothMac(liveBleAddress) != null
 
-    fun startObservingPresence(context: Context, association: AssociationInfo): Boolean {
+    fun startObservingPresence(
+        context: Context,
+        association: AssociationInfo,
+        onError: ((stage: String, error: Exception) -> Unit)? = null
+    ): Boolean {
         val cdm = getManager(context) ?: return false
-        if (Build.VERSION.SDK_INT >= 36 && startObservingPresenceApi36(cdm, association.id)) {
+        if (Build.VERSION.SDK_INT >= 36 && startObservingPresenceApi36(cdm, association.id, onError)) {
             return true
         }
-        val mac = association.deviceMacAddress?.toString() ?: return false
+        val mac = formatPresenceObservationMac(association.deviceMacAddress?.toString()) ?: return false
         return try {
             @Suppress("DEPRECATION")
             cdm.startObservingDevicePresence(mac)
             true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            onError?.invoke("legacy_mac_observe", e)
             false
         }
     }
@@ -151,7 +159,7 @@ object CompanionDeviceHelper {
         if (Build.VERSION.SDK_INT >= 36) {
             stopObservingPresenceApi36(cdm, association.id)
         }
-        val mac = association.deviceMacAddress?.toString() ?: return
+        val mac = formatPresenceObservationMac(association.deviceMacAddress?.toString()) ?: return
         try {
             @Suppress("DEPRECATION")
             cdm.stopObservingDevicePresence(mac)
@@ -162,14 +170,16 @@ object CompanionDeviceHelper {
     @SuppressLint("NewApi")
     private fun startObservingPresenceApi36(
         cdm: CompanionDeviceManager,
-        associationId: Int
+        associationId: Int,
+        onError: ((stage: String, error: Exception) -> Unit)? = null
     ): Boolean = try {
         val request = ObservingDevicePresenceRequest.Builder()
             .setAssociationId(associationId)
             .build()
         cdm.startObservingDevicePresence(request)
         true
-    } catch (_: Exception) {
+    } catch (e: Exception) {
+        onError?.invoke("api36_observe", e)
         false
     }
 
@@ -187,10 +197,13 @@ object CompanionDeviceHelper {
         }
     }
 
-    fun ensureObservingAll(context: Context): Int {
+    fun ensureObservingAll(
+        context: Context,
+        onError: ((stage: String, error: Exception) -> Unit)? = null
+    ): Int {
         var count = 0
         for (association in getAssociations(context)) {
-            if (startObservingPresence(context, association)) {
+            if (startObservingPresence(context, association, onError)) {
                 count++
             }
         }

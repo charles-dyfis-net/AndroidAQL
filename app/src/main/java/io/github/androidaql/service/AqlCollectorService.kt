@@ -476,9 +476,23 @@ class AqlCollectorService : Service() {
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
 
         hasLinkedCompanionDevice = CompanionDeviceHelper.hasAssociations(this)
-        if (hasLinkedCompanionDevice) {
-            CompanionDeviceHelper.ensureObservingAll(this)
+        val observingCount = if (hasLinkedCompanionDevice) {
+            CompanionDeviceHelper.ensureObservingAll(this) { stage, err ->
+                hwLogger.logEvent(
+                    "COMPANION_OBSERVE_ERROR",
+                    mapOf("stage" to stage, "error" to "${err.javaClass.simpleName}: ${err.message}")
+                )
+            }
+        } else {
+            0
         }
+        hwLogger.logEvent(
+            "COMPANION_INIT",
+            mapOf(
+                "has_linked_companion" to hasLinkedCompanionDevice,
+                "observing_count" to observingCount
+            )
+        )
 
         createNotificationChannels()
         registerPowerConnectionReceiver()
@@ -938,7 +952,12 @@ class AqlCollectorService : Service() {
         )
         if (!shouldSleepForAbsentCompanion(input)) return false
 
-        val observingCount = CompanionDeviceHelper.ensureObservingAll(this)
+        val observingCount = CompanionDeviceHelper.ensureObservingAll(this) { stage, err ->
+            hwLogger.logEvent(
+                "COMPANION_OBSERVE_ERROR",
+                mapOf("stage" to stage, "error" to "${err.javaClass.simpleName}: ${err.message}")
+            )
+        }
         if (observingCount <= 0) {
             hasLinkedCompanionDevice = CompanionDeviceHelper.hasAssociations(this)
             hwLogger.logEvent(
