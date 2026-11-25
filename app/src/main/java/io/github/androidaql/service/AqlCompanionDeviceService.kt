@@ -9,7 +9,8 @@ import android.os.Build
 /**
  * Bound by the system whenever an associated air quality monitor comes into BLE range.
  * Android grants a background foreground-service start exemption while bound, allowing
- * [AqlCollectorService] to resume passive logging after phone reboots or app updates.
+ * [AqlCollectorService] to resume passive logging after phone reboots, app updates, or
+ * companion idle sleep.
  */
 class AqlCompanionDeviceService : CompanionDeviceService() {
 
@@ -20,17 +21,30 @@ class AqlCompanionDeviceService : CompanionDeviceService() {
 
     @SuppressLint("NewApi")
     override fun onDevicePresenceEvent(event: DevicePresenceEvent) {
-        if (Build.VERSION.SDK_INT >= 36 && event.event == DevicePresenceEvent.EVENT_BLE_APPEARED) {
-            handleMonitorAppeared("companion_presence_event")
+        if (Build.VERSION.SDK_INT >= 36) {
+            when (event.event) {
+                DevicePresenceEvent.EVENT_BLE_APPEARED,
+                DevicePresenceEvent.EVENT_BT_CONNECTED -> {
+                    handleMonitorAppeared("companion_presence_event")
+                }
+                DevicePresenceEvent.EVENT_BLE_DISAPPEARED,
+                DevicePresenceEvent.EVENT_BT_DISCONNECTED -> {
+                    handleMonitorDisappeared("companion_presence_disappeared")
+                }
+            }
         }
     }
 
     @Suppress("OVERRIDE_DEPRECATION")
     override fun onDeviceDisappeared(associationInfo: AssociationInfo) {
-        // Keep AqlCollectorService running so existing excursion pause / out-of-range logic works normally.
+        handleMonitorDisappeared("companion_device_disappeared")
     }
 
     private fun handleMonitorAppeared(reason: String) {
-        AqlCollectorService.tryAutoStartService(this, reason)
+        AqlCollectorService.onCompanionDeviceAppeared(this, reason)
+    }
+
+    private fun handleMonitorDisappeared(reason: String) {
+        AqlCollectorService.onCompanionDeviceDisappeared(reason)
     }
 }

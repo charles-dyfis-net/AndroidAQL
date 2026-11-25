@@ -190,6 +190,37 @@ class AqlCollectorService : Service() {
         val isPendingWifiLossDebounce: Boolean = false
     )
 
+    data class ActiveLinkableMonitor(
+        val bleAddress: String,
+        val displayName: String?
+    )
+
+    data class StatusNotificationKey(
+        val title: String,
+        val body: String,
+        val hasActiveExcursion: Boolean
+    )
+
+    data class CompanionIdleSleepInput(
+        val hasLinkedCompanionDevice: Boolean,
+        val collectorState: ExcursionStateMachine.CollectorState,
+        val hasActiveExcursion: Boolean,
+        val hasPendingBlipCleanup: Boolean,
+        val hasBoundUiClients: Boolean,
+        val isDemoStreamRunning: Boolean,
+        val isOtaUpgradeInFlight: Boolean,
+        val hasActiveGattSession: Boolean,
+        val isInUnprovisionedGattKeepAliveWindow: Boolean,
+        val isManualExcursionOverride: Boolean,
+        val nowMs: Long,
+        val idleOutOfRangeSinceMs: Long?,
+        val lastUiUnbindMs: Long,
+        val serviceStartedAtMs: Long,
+        val lastCompanionAppearedMs: Long,
+        val companionDisappearedAtMs: Long?,
+        val lastLiveBleHeardMs: Long
+    )
+
     private val binder = LocalBinder()
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -209,10 +240,26 @@ class AqlCollectorService : Service() {
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var bleScanner: BluetoothLeScanner? = null
     private var isScanning = false
+    private var activeScanMode: Int = -1
     private var lastScanStartMs: Long = 0L
     @Volatile private var lastAnyScanResultMs: Long = 0L
     var strictFdcdFilterEnabled: Boolean = true
         private set
+
+    private var boundClientCount: Int = 0
+    private var lastUiUnbindMs: Long = 0L
+    private var serviceStartedAtMs: Long = 0L
+    private var idleOutOfRangeSinceMs: Long? = null
+    private var lastCompanionAppearedMs: Long = 0L
+    private var companionDisappearedAtMs: Long? = null
+    private var hasLinkedCompanionDevice: Boolean = false
+    @Volatile private var isSleepingForAbsentCompanion: Boolean = false
+    private var isWatchdogScheduled: Boolean = false
+    private var lastPostedStatusNotificationKey: StatusNotificationKey? = null
+    @Volatile private var lastLiveTelemetryBleAddress: String? = null
+    @Volatile private var lastLiveTelemetryDeviceName: String? = null
+    @Volatile private var lastLiveTelemetryBleMs: Long = 0L
+    private var lastRealBleHeardMs: Long = 0L
 
     private var activeGatt: BluetoothGatt? = null
     private var isGattProbeInFlight: Boolean = false
@@ -290,7 +337,8 @@ class AqlCollectorService : Service() {
 
     private val watchdogRunnable = object : Runnable {
         override fun run() {
-            val nowSec = System.currentTimeMillis() / 1000L
+            val nowMs = System.currentTimeMillis()
+            val nowSec = nowMs / 1000L
             val transition = stateMachine.onTimerTick(nowSec)
             applyStateTransition(transition, nowSec)
             val cleanupAt = pendingBlipCleanupAfterEpochSec
@@ -299,39 +347,54 @@ class AqlCollectorService : Service() {
                 metadataDb.coalesceMicroExcursionsAndRestoreRingPlaceIds(ringStore, nowSec)
             }
             refreshEffectiveSpeed()
+            if (maybeSleepForAbsentCompanion(nowMs)) {
+                return
+            }
+            syncBleScanModeIfNeeded()
             restartScanIfStalled()
             updateOngoingForegroundNotification()
             notifyListeners()
+            isWatchdogScheduled = true
             mainHandler.postDelayed(this, 5_000L)
         }
     }
 
+    private fun ensureWatchdogScheduled() {
+        if (!isWatchdogScheduled) {
+            isWatchdogScheduled = true
+            mainHandler.postDelayed(watchdogRunnable, 5_000L)
+        }
+    }
+
     /**
-     * Guards against the OS silently demoting or starving our scan (see note in [startBleScan]).
-     * - Any mode: if no scan result of any kind has arrived for 60s, restart (at most every 2 min,
-     *   well under Android's 5-starts-per-30s scan throttle).
-     * - Broad (unfiltered) discovery mode: proactively restart every 4 min, since the observed
-     *   unfiltered-scan demotion happened 5 min after scan start.
+     * Guards against the OS silently demoting or starving our scan (see note in [startBleScan]):
+     * - Broad (unfiltered) discovery mode: proactively restart every 4 min.
+     * - Idle out-of-range hardware-filtered mode: defer restarts to 15 min so we don't churn BLE every 2 min.
+     * - Active monitoring/excursion: if no scan result arrives for 60s, restart (at most every 2 min).
      */
     private fun restartScanIfStalled() {
-        if (!isScanning) return
         val nowMs = System.currentTimeMillis()
         val sinceStart = nowMs - lastScanStartMs
         val sinceResult = nowMs - lastAnyScanResultMs
-        val stalled = sinceResult >= 60_000L && sinceStart >= 120_000L
-        val broadRefreshDue = !strictFdcdFilterEnabled && sinceStart >= 4 * 60_000L
-        if (stalled || broadRefreshDue) {
-            hwLogger.logEvent(
-                "BLE_SCAN_RESTART",
-                mapOf(
-                    "reason" to if (stalled) "no_results" else "broad_refresh",
-                    "ms_since_start" to sinceStart,
-                    "ms_since_any_result" to sinceResult
-                )
+        val restartReason = shouldRestartBleScan(
+            isScanning = isScanning,
+            strictFdcdFilterEnabled = strictFdcdFilterEnabled,
+            collectorState = stateMachine.currentState,
+            msSinceStart = sinceStart,
+            msSinceAnyResult = sinceResult
+        ) ?: return
+
+        hwLogger.logEvent(
+            "BLE_SCAN_RESTART",
+            mapOf(
+                "reason" to restartReason,
+                "scan_mode" to activeScanMode,
+                "ms_since_start" to sinceStart,
+                "ms_since_any_result" to sinceResult
             )
-            stopBleScan()
-            startBleScan()
-        }
+        )
+        stopBleScan()
+        startBleScan()
     }
 
     /** OR'ed hardware scan filters matching CGDN1 (0xFDCD / 0xFE95) and BTHome v2 (0xFCD2) advertisements. */
@@ -361,6 +424,9 @@ class AqlCollectorService : Service() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        val nowMs = System.currentTimeMillis()
+        serviceStartedAtMs = nowMs
+        idleOutOfRangeSinceMs = nowMs
         metadataDb = MetadataDatabase(applicationContext)
         val ringFile = File(filesDir, "device_1.aqlring")
         ringStore = AqlRingBufferStore(ringFile, deviceId = 1L)
@@ -386,10 +452,16 @@ class AqlCollectorService : Service() {
         locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
 
+        hasLinkedCompanionDevice = CompanionDeviceHelper.hasAssociations(this)
+        if (hasLinkedCompanionDevice) {
+            CompanionDeviceHelper.ensureObservingAll(this)
+        }
+
         createNotificationChannels()
         registerWifiCallback()
         restoreLastSampleFromRingBuffer()
         // Do not auto-seed synthetic demo data on startup so physical hardware ring buffers remain pure.
+        isWatchdogScheduled = true
         mainHandler.post(watchdogRunnable)
     }
 
@@ -426,6 +498,19 @@ class AqlCollectorService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val startReason = intent?.getStringExtra(EXTRA_START_REASON)
             ?: if (intent == null) "sticky_restart" else "activity"
+        val nowMs = System.currentTimeMillis()
+        val wasSleeping = isSleepingForAbsentCompanion
+        isSleepingForAbsentCompanion = false
+        if (wasSleeping) {
+            serviceStartedAtMs = nowMs
+            if (stateMachine.currentState == ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE) {
+                idleOutOfRangeSinceMs = nowMs
+            }
+        }
+        if (startReason == "companion_device_appeared" || startReason == "companion_presence_event") {
+            lastCompanionAppearedMs = nowMs
+            companionDisappearedAtMs = null
+        }
         hwLogger.logEvent(
             "SERVICE_START_COMMAND",
             mapOf("reason" to startReason, "start_id" to startId)
@@ -437,6 +522,7 @@ class AqlCollectorService : Service() {
             return START_NOT_STICKY
         }
         cancelResumeRequiredNotification(this)
+        ensureWatchdogScheduled()
         startBleScan()
         if (intent?.action == ACTION_DEV_COMMAND && isDevCommandAuthorized(this)) {
             handleDevCommandIntent(intent)
@@ -680,10 +766,43 @@ class AqlCollectorService : Service() {
         }
     }
 
-    override fun onBind(intent: Intent?): IBinder = binder
+    override fun onBind(intent: Intent?): IBinder {
+        onClientBound()
+        return binder
+    }
+
+    override fun onRebind(intent: Intent?) {
+        onClientBound()
+    }
+
+    private fun onClientBound() {
+        boundClientCount++
+        val wasSleeping = isSleepingForAbsentCompanion
+        isSleepingForAbsentCompanion = false
+        if (wasSleeping) {
+            serviceStartedAtMs = System.currentTimeMillis()
+            if (stateMachine.currentState == ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE) {
+                idleOutOfRangeSinceMs = serviceStartedAtMs
+            }
+        }
+        ensureWatchdogScheduled()
+        if (hasBluetoothScanPermission(this)) {
+            startBleScan()
+        }
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        boundClientCount = (boundClientCount - 1).coerceAtLeast(0)
+        if (boundClientCount == 0) {
+            lastUiUnbindMs = System.currentTimeMillis()
+        }
+        return true
+    }
 
     override fun onDestroy() {
         mainHandler.removeCallbacksAndMessages(null)
+        isWatchdogScheduled = false
+        lastPostedStatusNotificationKey = null
         stopBleScan()
         disconnectGatt()
         stopGpsCollection()
@@ -694,6 +813,113 @@ class AqlCollectorService : Service() {
         metadataDb.close()
         if (instance === this) instance = null
         super.onDestroy()
+    }
+
+    fun refreshCompanionAssociationCache() {
+        val linked = CompanionDeviceHelper.hasAssociations(this)
+        hasLinkedCompanionDevice = linked
+        if (linked) {
+            cancelCompanionLinkSuggestionNotification(this)
+            CompanionDeviceHelper.ensureObservingAll(this)
+        }
+    }
+
+    private fun onCompanionPresenceChanged(appeared: Boolean, reason: String) {
+        val nowMs = System.currentTimeMillis()
+        hwLogger.logEvent(
+            if (appeared) "COMPANION_DEVICE_APPEARED" else "COMPANION_DEVICE_DISAPPEARED",
+            mapOf("reason" to reason, "state" to stateMachine.currentState.name)
+        )
+        if (appeared) {
+            lastCompanionAppearedMs = nowMs
+            companionDisappearedAtMs = null
+            isSleepingForAbsentCompanion = false
+            cancelResumeRequiredNotification(this)
+            ensureWatchdogScheduled()
+            if (hasBluetoothScanPermission(this)) {
+                startBleScan()
+                syncBleScanModeIfNeeded()
+            }
+        } else {
+            companionDisappearedAtMs = nowMs
+        }
+    }
+
+    private fun isInUnprovisionedGattKeepAliveWindow(nowMs: Long): Boolean {
+        if (devConfig.strategy == KeepAlivePayloadStrategy.NONE_PASSIVE) return false
+        val frame = lastSampledFrame ?: return false
+        if (frame.isProvisionedNormalMode || frame.isBtHomeV2) return false
+        val lastHeardMs = maxOf(frame.timestampMs, lastMonitorHeardMs)
+        return lastHeardMs > 0L && (nowMs - lastHeardMs) <= 11 * 60 * 1000L
+    }
+
+    private fun maybeSleepForAbsentCompanion(nowMs: Long): Boolean {
+        if (isSleepingForAbsentCompanion || !hasLinkedCompanionDevice) return false
+        val input = CompanionIdleSleepInput(
+            hasLinkedCompanionDevice = hasLinkedCompanionDevice,
+            collectorState = stateMachine.currentState,
+            hasActiveExcursion = activeExcursionId != null,
+            hasPendingBlipCleanup = pendingBlipCleanupAfterEpochSec != null,
+            hasBoundUiClients = boundClientCount > 0 || listeners.isNotEmpty(),
+            isDemoStreamRunning = isDemoStreamRunning,
+            isOtaUpgradeInFlight = isOtaUpgradeInFlight,
+            hasActiveGattSession = activeGatt != null || isGattProbeInFlight,
+            isInUnprovisionedGattKeepAliveWindow = isInUnprovisionedGattKeepAliveWindow(nowMs),
+            isManualExcursionOverride = stateMachine.isManualExcursionOverride,
+            nowMs = nowMs,
+            idleOutOfRangeSinceMs = idleOutOfRangeSinceMs,
+            lastUiUnbindMs = lastUiUnbindMs,
+            serviceStartedAtMs = serviceStartedAtMs,
+            lastCompanionAppearedMs = lastCompanionAppearedMs,
+            companionDisappearedAtMs = companionDisappearedAtMs,
+            lastLiveBleHeardMs = lastRealBleHeardMs
+        )
+        if (!shouldSleepForAbsentCompanion(input)) return false
+
+        val observingCount = CompanionDeviceHelper.ensureObservingAll(this)
+        if (observingCount <= 0) {
+            hasLinkedCompanionDevice = CompanionDeviceHelper.hasAssociations(this)
+            hwLogger.logEvent(
+                "COMPANION_IDLE_SLEEP_ABORTED",
+                mapOf(
+                    "reason" to "no_active_presence_observation",
+                    "has_linked_companion" to hasLinkedCompanionDevice
+                )
+            )
+            return false
+        }
+
+        isSleepingForAbsentCompanion = true
+        isWatchdogScheduled = false
+        hwLogger.logEvent(
+            "COMPANION_IDLE_SLEEP",
+            mapOf(
+                "observing_count" to observingCount,
+                "idle_ms" to (nowMs - (idleOutOfRangeSinceMs ?: nowMs)),
+                "since_unbind_ms" to if (lastUiUnbindMs > 0L) (nowMs - lastUiUnbindMs) else -1L,
+                "since_appeared_ms" to if (lastCompanionAppearedMs > 0L) (nowMs - lastCompanionAppearedMs) else -1L,
+                "disappeared_at_ms" to (companionDisappearedAtMs ?: -1L),
+                "last_real_ble_ms" to lastRealBleHeardMs
+            )
+        )
+        stopBleScan()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        lastPostedStatusNotificationKey = null
+        stopSelf()
+        return true
+    }
+
+    fun getRecentActiveLinkableMonitor(
+        nowMs: Long = System.currentTimeMillis(),
+        maxAgeMs: Long = ACTIVE_MONITOR_LINK_MAX_AGE_MS
+    ): ActiveLinkableMonitor? {
+        if (isDemoStreamRunning || isDemoDataEnabled(this)) return null
+        val addr = CompanionDeviceHelper.normalizeBluetoothMac(lastLiveTelemetryBleAddress) ?: return null
+        if (lastLiveTelemetryBleMs <= 0L || (nowMs - lastLiveTelemetryBleMs) > maxAgeMs) return null
+        return ActiveLinkableMonitor(
+            bleAddress = addr,
+            displayName = lastLiveTelemetryDeviceName
+        )
     }
 
     fun addListener(listener: (LiveTelemetrySnapshot) -> Unit) {
@@ -893,8 +1119,47 @@ class AqlCollectorService : Service() {
         }
     }
 
+    private fun computeDesiredBleScanMode(nowMs: Long = System.currentTimeMillis()): Int {
+        val hasActiveGattOrOta = isOtaUpgradeInFlight || isGattProbeInFlight || activeGatt != null
+        val sampled = lastSampledFrame
+        val needsActiveUnprovisionedGattDiscovery =
+            devConfig.strategy != KeepAlivePayloadStrategy.NONE_PASSIVE &&
+                sampled != null &&
+                !sampled.isProvisionedNormalMode &&
+                !sampled.isBtHomeV2 &&
+                !hasCompletedInitialGattDiscovery
+        val isRecentCompanionWake =
+            lastCompanionAppearedMs > 0L && (nowMs - lastCompanionAppearedMs) < COMPANION_WAKE_BOOST_WINDOW_MS
+        return chooseBleScanMode(
+            strictFdcdFilterEnabled = strictFdcdFilterEnabled,
+            collectorState = stateMachine.currentState,
+            hasActiveGattOrOta = hasActiveGattOrOta,
+            needsActiveUnprovisionedGattDiscovery = needsActiveUnprovisionedGattDiscovery,
+            isRecentCompanionWake = isRecentCompanionWake
+        )
+    }
+
+    private fun syncBleScanModeIfNeeded() {
+        if (!isScanning || isSleepingForAbsentCompanion) return
+        val nowMs = System.currentTimeMillis()
+        val desiredMode = computeDesiredBleScanMode(nowMs)
+        if (desiredMode == activeScanMode) return
+        if ((nowMs - lastScanStartMs) < MIN_SCAN_MODE_SWITCH_INTERVAL_MS) return
+        hwLogger.logEvent(
+            "BLE_SCAN_MODE_CHANGED",
+            mapOf(
+                "from_mode" to activeScanMode,
+                "to_mode" to desiredMode,
+                "state" to stateMachine.currentState.name
+            )
+        )
+        stopBleScan()
+        startBleScan()
+    }
+
     @SuppressLint("MissingPermission")
     fun startBleScan() {
+        if (isSleepingForAbsentCompanion) return
         if (!hasBluetoothScanPermission(this)) {
             hwLogger.logEvent("BLE_SCAN_PERMISSION_DEFERRED", emptyMap())
             return
@@ -914,31 +1179,36 @@ class AqlCollectorService : Service() {
             // ("BtScan.ScanManager: regularScanTimeout ... Moving unfiltered scan to opportunistic scan"),
             // after which the app receives no results unless some other app happens to be scanning.
             // Unfiltered scans also receive nothing while the screen is off. So in normal (strict) mode we
-            // always pass OR'ed hardware filters for the CGDN1's two advertisement shapes, and keep the
-            // software filtering in bleScanCallback as well. Broad discovery mode stays unfiltered and is
-            // kept alive by the scan watchdog's restart logic (see restartScanIfStalled).
+            // always pass OR'ed hardware filters for the CGDN1's advertisement shapes, and adapt the scan
+            // duty cycle by collector state (LOW_POWER when idle, BALANCED when monitoring, LOW_LATENCY
+            // for broad discovery / active GATT).
+            val desiredMode = computeDesiredBleScanMode()
             val settings = ScanSettings.Builder()
-                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .setScanMode(desiredMode)
                 .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
                 .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
                 .build()
             val filters = if (strictFdcdFilterEnabled) buildQingpingScanFilters() else emptyList()
             scanner.startScan(filters, settings, bleScanCallback)
             isScanning = true
+            activeScanMode = desiredMode
             lastScanStartMs = System.currentTimeMillis()
             lastAnyScanResultMs = lastScanStartMs
             hwLogger.logEvent(
                 "BLE_SCAN_STARTED",
                 mapOf(
                     "strict_software_filter" to strictFdcdFilterEnabled,
-                    "hardware_filter_count" to filters.size
+                    "hardware_filter_count" to filters.size,
+                    "scan_mode" to desiredMode
                 )
             )
         } catch (se: SecurityException) {
             isScanning = false
+            activeScanMode = -1
             hwLogger.logEvent("BLE_SCAN_SECURITY_ERROR", mapOf("error" to se.message))
         } catch (e: Exception) {
             isScanning = false
+            activeScanMode = -1
             hwLogger.logEvent("BLE_SCAN_ERROR", mapOf("error" to e.message))
         }
     }
@@ -955,17 +1225,21 @@ class AqlCollectorService : Service() {
         } catch (_: Exception) {
         } finally {
             isScanning = false
+            activeScanMode = -1
         }
     }
 
     private val bleScanCallback = object : ScanCallback() {
         override fun onScanFailed(errorCode: Int) {
             isScanning = false
+            activeScanMode = -1
             hwLogger.logEvent("BLE_SCAN_FAILED", mapOf("error_code" to errorCode))
             // SCAN_FAILED_ALREADY_STARTED = 1: unconditionally clear any stale registration before retrying
             mainHandler.postDelayed({
                 stopBleScan(force = true)
-                startBleScan()
+                if (!isSleepingForAbsentCompanion) {
+                    startBleScan()
+                }
             }, 1_500L)
         }
 
@@ -1027,6 +1301,7 @@ class AqlCollectorService : Service() {
                     lastConnectableQingpingDevice = result.device
                     lastSeenBleDevice = result.device
                     lastMonitorHeardMs = nowMs
+                    lastRealBleHeardMs = nowMs
                     val intervalMs = devConfig.intervalSec * 1000L
                     val retryMs = devConfig.retryCooldownSec * 1000L
                     val periodicDue = hasCompletedInitialGattDiscovery &&
@@ -1109,6 +1384,7 @@ class AqlCollectorService : Service() {
 
             if (!decoded.isShutdownZeroFrame) {
                 lastMonitorHeardMs = nowMs
+                lastRealBleHeardMs = nowMs
                 val gattTarget = resolveConnectableQingpingDevice()
                 val retryMs = devConfig.retryCooldownSec * 1000L
                 if (!isOtaUpgradeInFlight &&
@@ -1127,18 +1403,33 @@ class AqlCollectorService : Service() {
                 }
             }
 
+            val otaBleAddress = result.device?.address
+            val advertisedName = devName.takeIf { it.isNotBlank() }
             mainHandler.post {
-                handleDecodedFrame(decoded)
+                handleDecodedFrame(
+                    decoded = decoded,
+                    overTheAirBleAddress = otaBleAddress,
+                    advertisedDeviceName = advertisedName,
+                    isSyntheticDemo = false
+                )
             }
         }
     }
 
-    private fun handleDecodedFrame(decoded: QingpingBleParser.DecodedQingpingFrame) {
+    private fun handleDecodedFrame(
+        decoded: QingpingBleParser.DecodedQingpingFrame,
+        overTheAirBleAddress: String? = null,
+        advertisedDeviceName: String? = null,
+        isSyntheticDemo: Boolean = false
+    ) {
         val frameCtrlHex = String.format(Locale.US, "0x%02X", decoded.frameControl)
         if (decoded.isShutdownZeroFrame) {
             prevDecodedFrameCtrl = decoded.frameControl
             hasCompletedInitialGattDiscovery = false
             lastMonitorHeardMs = 0L
+            if (!isSyntheticDemo) {
+                lastRealBleHeardMs = 0L
+            }
             appendRawFrameLog(
                 "[${decoded.macAddress}] (SHUTDOWN-ZERO, frameCtrl=$frameCtrlHex) | ${decoded.rawHex}"
             )
@@ -1292,6 +1583,18 @@ class AqlCollectorService : Service() {
             }
             val alertActions = alertEvaluator.evaluateSample(nowSec, latestCo2Ppm, latestPm25Ugm3, latestBatteryPct)
             dispatchAlertNotifications(alertActions)
+
+            if (!isSyntheticDemo) {
+                val normalizedBleMac = CompanionDeviceHelper.normalizeBluetoothMac(overTheAirBleAddress)
+                if (normalizedBleMac != null) {
+                    val resolvedName = advertisedDeviceName?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: decoded.productName
+                    lastLiveTelemetryBleAddress = normalizedBleMac
+                    lastLiveTelemetryDeviceName = resolvedName
+                    lastLiveTelemetryBleMs = decoded.timestampMs
+                    maybePostCompanionLinkSuggestionNotification(normalizedBleMac, resolvedName)
+                }
+            }
         }
 
         updateOngoingForegroundNotification()
@@ -1366,7 +1669,12 @@ class AqlCollectorService : Service() {
         }
 
         if (transition.currentState == ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE) {
+            if (idleOutOfRangeSinceMs == null) {
+                idleOutOfRangeSinceMs = System.currentTimeMillis()
+            }
             dispatchAlertNotifications(alertEvaluator.onOutOfRange())
+        } else {
+            idleOutOfRangeSinceMs = null
         }
 
         // After a real signal gap (>90s since last GATT poke), re-arm initial GATT discovery so that
@@ -1380,6 +1688,7 @@ class AqlCollectorService : Service() {
         }
 
         manageGattMode(transition.effectiveBleMode)
+        syncBleScanModeIfNeeded()
     }
 
     @SuppressLint("MissingPermission")
@@ -1599,7 +1908,9 @@ class AqlCollectorService : Service() {
                             } else {
                                 gatt.close()
                             }
-                            startBleScan()
+                            if (!isSleepingForAbsentCompanion) {
+                                startBleScan()
+                            }
                         }
                         notifyListeners()
                     }
@@ -2076,7 +2387,9 @@ class AqlCollectorService : Service() {
                     }
 
                     mainHandler.post {
-                        startBleScan()
+                        if (!isSleepingForAbsentCompanion) {
+                            startBleScan()
+                        }
                         gattServicesLog.clear()
                         gattServicesLog.addAll(summary)
                         gattStatusText = if (isOtaSession) {
@@ -2481,7 +2794,8 @@ class AqlCollectorService : Service() {
     }
 
     private fun startForegroundWithCurrentType(startReason: String = "activity"): Boolean {
-        val notification = buildStatusNotification()
+        val key = buildStatusNotificationKey()
+        val notification = buildStatusNotification(key)
         // Always include FOREGROUND_SERVICE_TYPE_LOCATION when location permission is granted so
         // Android 14+ allows starting LocationManager updates later when walking out of a Saved Wi-Fi
         // Place with the phone in a pocket (background). Actual GPS hardware polling remains 0 mW
@@ -2489,6 +2803,7 @@ class AqlCollectorService : Service() {
         val fgsType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
         try {
             startForeground(NOTIFICATION_ID_FOREGROUND, notification, fgsType)
+            lastPostedStatusNotificationKey = key
             return true
         } catch (firstErr: Exception) {
             // Fallback if location permission not yet granted
@@ -2498,6 +2813,7 @@ class AqlCollectorService : Service() {
                     notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
                 )
+                lastPostedStatusNotificationKey = key
                 return true
             } catch (fallbackErr: Exception) {
                 hwLogger.logEvent(
@@ -2513,19 +2829,16 @@ class AqlCollectorService : Service() {
         }
     }
 
-    private fun updateOngoingForegroundNotification() {
+    private fun updateOngoingForegroundNotification(force: Boolean = false) {
+        if (isSleepingForAbsentCompanion) return
+        val key = buildStatusNotificationKey()
+        if (!force && key == lastPostedStatusNotificationKey) return
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(NOTIFICATION_ID_FOREGROUND, buildStatusNotification())
+        nm.notify(NOTIFICATION_ID_FOREGROUND, buildStatusNotification(key))
+        lastPostedStatusNotificationKey = key
     }
 
-    private fun buildStatusNotification(): Notification {
-        val openIntent = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
+    private fun buildStatusNotificationKey(): StatusNotificationKey {
         val matchedPlace = metadataDb.getKnownPlaces().firstOrNull { it.id == stateMachine.currentKnownPlaceId }
         val contextTitle = when (stateMachine.currentState) {
             ExcursionStateMachine.CollectorState.STATIONARY_KNOWN_AP ->
@@ -2561,15 +2874,32 @@ class AqlCollectorService : Service() {
             "Scanning for 0xFDCD advertisements..."
         }
 
+        return StatusNotificationKey(
+            title = contextTitle,
+            body = metricsBody,
+            hasActiveExcursion = activeExcursionId != null
+        )
+    }
+
+    private fun buildStatusNotification(
+        key: StatusNotificationKey = buildStatusNotificationKey()
+    ): Notification {
+        val openIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
         val builder = NotificationCompat.Builder(this, CHANNEL_STATUS)
             .setSmallIcon(R.drawable.ic_stat_aql)
-            .setContentTitle(contextTitle)
-            .setContentText(metricsBody)
+            .setContentTitle(key.title)
+            .setContentText(key.body)
             .setContentIntent(openIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
 
-        if (activeExcursionId != null) {
+        if (key.hasActiveExcursion) {
             val bookmarkIntent = PendingIntent.getBroadcast(
                 this,
                 1,
@@ -2680,6 +3010,80 @@ class AqlCollectorService : Service() {
         nm.cancel(NOTIFICATION_ID_MANUAL_TRIP_STOP_SUGGESTION)
     }
 
+    private fun maybePostCompanionLinkSuggestionNotification(bleAddress: String, monitorName: String?) {
+        if (hasLinkedCompanionDevice || CompanionDeviceHelper.isLinkSuggestionSuppressed(this)) return
+        val hasPostNotif = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!hasPostNotif) return
+        val screenshotAutomationActive = getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
+            .getBoolean("screenshot_automation_active", false)
+        val isDemoOrScreenshot = isDemoStreamRunning || isDemoDataEnabled(this) || screenshotAutomationActive
+        if (isDemoOrScreenshot) return
+
+        val isSupported = CompanionDeviceHelper.isSupported(this)
+        val hasAssociations = if (isSupported) CompanionDeviceHelper.hasAssociations(this) else false
+        if (hasAssociations) {
+            hasLinkedCompanionDevice = true
+        }
+        val shouldPost = CompanionDeviceHelper.shouldPostProactiveLinkSuggestion(
+            isCompanionSupported = isSupported,
+            hasExistingAssociations = hasAssociations,
+            isSuggestionSuppressed = false,
+            hasNotificationPermission = hasPostNotif,
+            isDemoOrScreenshotMode = isDemoOrScreenshot,
+            liveBleAddress = bleAddress
+        )
+        if (!shouldPost) return
+
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        ensureLifecycleNotificationChannel(this)
+        val (title, body) = buildCompanionLinkSuggestionCopy(monitorName, bleAddress)
+        val linkIntent = Intent(this, MainActivity::class.java).apply {
+            action = ACTION_LINK_COMPANION_MONITOR
+            putExtra(EXTRA_LINK_COMPANION_BLE_ADDRESS, bleAddress)
+            if (!monitorName.isNullOrBlank()) {
+                putExtra(EXTRA_LINK_COMPANION_MONITOR_NAME, monitorName)
+            }
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val linkPendingIntent = PendingIntent.getActivity(
+            this,
+            NOTIFICATION_ID_COMPANION_LINK_SUGGESTION,
+            linkIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val dismissPendingIntent = PendingIntent.getBroadcast(
+            this,
+            NOTIFICATION_ID_COMPANION_LINK_SUGGESTION + 1,
+            Intent(this, AlertActionReceiver::class.java).apply {
+                action = AlertActionReceiver.ACTION_DISMISS_COMPANION_LINK_SUGGESTION
+            },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val notification = NotificationCompat.Builder(this, CHANNEL_LIFECYCLE)
+            .setSmallIcon(R.drawable.ic_stat_aql)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setContentIntent(linkPendingIntent)
+            .setDeleteIntent(dismissPendingIntent)
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .addAction(android.R.drawable.ic_menu_add, "Link Monitor", linkPendingIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Don't ask again", dismissPendingIntent)
+            .build()
+        try {
+            nm.notify(NOTIFICATION_ID_COMPANION_LINK_SUGGESTION, notification)
+            CompanionDeviceHelper.markLinkSuggestionShown(this)
+            hwLogger.logEvent(
+                "COMPANION_LINK_SUGGESTION_POSTED",
+                mapOf("ble_mac" to bleAddress, "monitor_name" to monitorName)
+            )
+        } catch (_: SecurityException) {
+        }
+    }
+
     /**
      * Generates a realistic 75-minute Downtown Chicago excursion (CTA Bus -> Loop Coffee Shop
      * with urban canyon GPS multipath -> Bookshop -> Return Transit) so the user can test
@@ -2753,7 +3157,7 @@ class AqlCollectorService : Service() {
             batteryPct = if (slot.batteryPctLast in 0..100) slot.batteryPctLast else 88,
             rssiDbm = if (slot.rssiDbmLast > -128) slot.rssiDbmLast else -58
         ) ?: return
-        handleDecodedFrame(decoded)
+        handleDecodedFrame(decoded, isSyntheticDemo = true)
     }
 
     /**
@@ -2800,7 +3204,7 @@ class AqlCollectorService : Service() {
             rssiDbm = if (lastSlot.rssiDbmLast > -128) lastSlot.rssiDbmLast else -54,
             timestampMs = nowMs
         ) ?: return
-        handleDecodedFrame(decoded)
+        handleDecodedFrame(decoded, isSyntheticDemo = true)
     }
 
     /**
@@ -2909,7 +3313,11 @@ class AqlCollectorService : Service() {
         const val NOTIFICATION_ID_FOREGROUND = 1000
         const val NOTIFICATION_ID_RESUME_REQUIRED = 1004
         const val NOTIFICATION_ID_MANUAL_TRIP_STOP_SUGGESTION = 1005
+        const val NOTIFICATION_ID_COMPANION_LINK_SUGGESTION = 1006
         const val EXTRA_START_REASON = "io.github.androidaql.extra.START_REASON"
+        const val ACTION_LINK_COMPANION_MONITOR = "io.github.androidaql.ACTION_LINK_COMPANION_MONITOR"
+        const val EXTRA_LINK_COMPANION_BLE_ADDRESS = "io.github.androidaql.extra.LINK_COMPANION_BLE_ADDRESS"
+        const val EXTRA_LINK_COMPANION_MONITOR_NAME = "io.github.androidaql.extra.LINK_COMPANION_MONITOR_NAME"
         const val XIAOMI_MIBEACON_SERVICE_UUID_STRING = "0000fe95-0000-1000-8000-00805f9b34fb"
         const val QINGPING_AIR_MONITOR_LITE_NAME = "Qingping Air Monitor Lite"
         const val ACTION_DEV_COMMAND = "net.dyfis.androidaql.DEV_COMMAND"
@@ -2917,6 +3325,13 @@ class AqlCollectorService : Service() {
         const val GATT_RETRY_COOLDOWN_MS = 15_000L
         const val PREF_WIFI_LOSS_DEBOUNCE_SEC = "wifi_loss_debounce_sec"
         const val MAX_WIFI_LOSS_DEBOUNCE_SEC = 300L
+        const val ACTIVE_MONITOR_LINK_MAX_AGE_MS = 90_000L
+        const val COMPANION_IDLE_SLEEP_GRACE_MS = 180_000L
+        const val COMPANION_DISAPPEARED_SLEEP_GRACE_MS = 60_000L
+        const val COMPANION_COLD_IDLE_SLEEP_GRACE_MS = 60_000L
+        const val MIN_SCAN_MODE_SWITCH_INTERVAL_MS = 10_000L
+        const val IDLE_HARDWARE_SCAN_REFRESH_MS = 15 * 60_000L
+        const val COMPANION_WAKE_BOOST_WINDOW_MS = 30_000L
 
         @Volatile
         var instance: AqlCollectorService? = null
@@ -2932,7 +3347,8 @@ class AqlCollectorService : Service() {
             }
 
         fun tryAutoStartService(context: Context, reason: String): Boolean {
-            if (instance != null) return true
+            val current = instance
+            if (current != null && !current.isSleepingForAbsentCompanion) return true
             if (!hasBluetoothScanPermission(context)) return false
             return try {
                 ContextCompat.startForegroundService(context, buildAutoStartIntent(context, reason))
@@ -2947,6 +3363,98 @@ class AqlCollectorService : Service() {
                 postResumeRequiredNotification(context, reason)
                 false
             }
+        }
+
+        fun onCompanionDeviceAppeared(context: Context, reason: String) {
+            val active = instance
+            if (active != null && !active.isSleepingForAbsentCompanion) {
+                active.mainHandler.post {
+                    if (active.isSleepingForAbsentCompanion) {
+                        tryAutoStartService(context, reason)
+                    } else {
+                        active.onCompanionPresenceChanged(appeared = true, reason = reason)
+                    }
+                }
+                return
+            }
+            tryAutoStartService(context, reason)
+        }
+
+        fun onCompanionDeviceDisappeared(reason: String) {
+            instance?.let { svc ->
+                svc.mainHandler.post {
+                    svc.onCompanionPresenceChanged(appeared = false, reason = reason)
+                }
+            }
+        }
+
+        fun shouldSleepForAbsentCompanion(input: CompanionIdleSleepInput): Boolean {
+            if (!input.hasLinkedCompanionDevice) return false
+            if (input.collectorState != ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE) return false
+            if (input.hasActiveExcursion ||
+                input.hasPendingBlipCleanup ||
+                input.hasBoundUiClients ||
+                input.isDemoStreamRunning ||
+                input.isOtaUpgradeInFlight ||
+                input.hasActiveGattSession ||
+                input.isInUnprovisionedGattKeepAliveWindow ||
+                input.isManualExcursionOverride
+            ) {
+                return false
+            }
+            val idleSince = input.idleOutOfRangeSinceMs ?: return false
+            val effectiveStartMs = maxOf(
+                idleSince,
+                input.lastUiUnbindMs,
+                input.serviceStartedAtMs,
+                input.lastCompanionAppearedMs
+            )
+            val requiredGraceMs = when {
+                input.lastLiveBleHeardMs <= 0L -> COMPANION_COLD_IDLE_SLEEP_GRACE_MS
+                input.companionDisappearedAtMs != null &&
+                    input.companionDisappearedAtMs >= input.lastLiveBleHeardMs ->
+                    COMPANION_DISAPPEARED_SLEEP_GRACE_MS
+                else -> COMPANION_IDLE_SLEEP_GRACE_MS
+            }
+            return (input.nowMs - effectiveStartMs) >= requiredGraceMs
+        }
+
+        fun chooseBleScanMode(
+            strictFdcdFilterEnabled: Boolean,
+            collectorState: ExcursionStateMachine.CollectorState,
+            hasActiveGattOrOta: Boolean,
+            needsActiveUnprovisionedGattDiscovery: Boolean,
+            isRecentCompanionWake: Boolean
+        ): Int {
+            if (!strictFdcdFilterEnabled || hasActiveGattOrOta || needsActiveUnprovisionedGattDiscovery) {
+                return ScanSettings.SCAN_MODE_LOW_LATENCY
+            }
+            if (collectorState == ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE &&
+                !isRecentCompanionWake
+            ) {
+                return ScanSettings.SCAN_MODE_LOW_POWER
+            }
+            return ScanSettings.SCAN_MODE_BALANCED
+        }
+
+        fun shouldRestartBleScan(
+            isScanning: Boolean,
+            strictFdcdFilterEnabled: Boolean,
+            collectorState: ExcursionStateMachine.CollectorState,
+            msSinceStart: Long,
+            msSinceAnyResult: Long
+        ): String? {
+            if (!isScanning) return null
+            if (!strictFdcdFilterEnabled && msSinceStart >= 4 * 60_000L) {
+                return "broad_refresh"
+            }
+            if (strictFdcdFilterEnabled && collectorState == ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE) {
+                return if (msSinceStart >= IDLE_HARDWARE_SCAN_REFRESH_MS) "idle_refresh" else null
+            }
+            if (msSinceAnyResult >= 60_000L && msSinceStart >= 120_000L) {
+                return "no_results"
+            }
+            return null
         }
 
         fun buildResumeNotificationCopy(reason: String): Pair<String, String> = when (reason) {
@@ -2965,7 +3473,7 @@ class AqlCollectorService : Service() {
                 "Background Service Alerts",
                 NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
-                description = "Alerts when AirSlice passive logging needs to be resumed after a reboot or update"
+                description = "Background service resume and monitor linking reminders"
             }
             nm.createNotificationChannel(channel)
         }
@@ -3004,6 +3512,21 @@ class AqlCollectorService : Service() {
         fun cancelResumeRequiredNotification(context: Context) {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
             nm.cancel(NOTIFICATION_ID_RESUME_REQUIRED)
+        }
+
+        fun buildCompanionLinkSuggestionCopy(monitorName: String?, bleAddress: String): Pair<String, String> {
+            val trimmedName = monitorName?.trim()?.takeIf { it.isNotEmpty() }
+            val hasDistinctName = trimmedName != null && !trimmedName.equals(bleAddress, ignoreCase = true)
+            val displayLabel = if (hasDistinctName) "$trimmedName ($bleAddress)" else bleAddress
+            val titleTarget = if (hasDistinctName) trimmedName else bleAddress
+            val title = "Link $titleTarget for battery savings?"
+            val body = "Tap to link $displayLabel. AirSlice will sleep when it's away and auto-resume when nearby."
+            return title to body
+        }
+
+        fun cancelCompanionLinkSuggestionNotification(context: Context) {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            nm.cancel(NOTIFICATION_ID_COMPANION_LINK_SUGGESTION)
         }
 
         fun buildManualTripStopSuggestionCopy(placeLabel: String?): Pair<String, String> {

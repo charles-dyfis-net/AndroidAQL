@@ -89,6 +89,10 @@ class MainActivity : AppCompatActivity() {
     private var lastViewportCustomWindow: Pair<Long, Long>? = null
 
     private var pendingScreenshotPreset: String? = null
+    private var pendingServiceStartIntent: Intent? = null
+    private var pendingImportXlsxRequest: Pair<Uri, Boolean>? = null
+    private var pendingCompanionLinkRequested: Boolean = false
+    private var pendingCompanionLinkBleAddress: String? = null
     private var activeSegmentModalDialog: AlertDialog? = null
     private var activeDisclosureDialog: AlertDialog? = null
     private var activeHelpDialog: AlertDialog? = null
@@ -177,8 +181,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleImportedXlsxUri(uri: android.net.Uri?, timeShiftForDemo: Boolean) {
-        val svc = collectorService ?: return
         if (uri == null) return
+        val svc = collectorService ?: run {
+            pendingImportXlsxRequest = uri to timeShiftForDemo
+            return
+        }
         try {
             val result = contentResolver.openInputStream(uri)?.use { input ->
                 svc.importExcursionFromXlsx(input, timeShiftToNow = timeShiftForDemo)
@@ -234,10 +241,20 @@ class MainActivity : AppCompatActivity() {
             val svc = b.getService()
             collectorService = svc
             isBound = true
+            svc.refreshCompanionAssociationCache()
             lastObservedActiveExcursionId = svc.buildSnapshot().activeExcursionId
             svc.addListener(serviceListener)
             refreshLiveRecentGraph()
             refreshTripsTab()
+            if (activeSettingsDialog?.let { !it.isBoundTo(svc) } == true) {
+                showSettingsModal()
+            } else {
+                activeSettingsDialog?.refreshCompanionAssociationState()
+            }
+            pendingImportXlsxRequest?.let { (uri, timeShift) ->
+                pendingImportXlsxRequest = null
+                handleImportedXlsxUri(uri, timeShift)
+            }
             tryApplyPendingScreenshotPreset()
         }
 
@@ -285,6 +302,7 @@ class MainActivity : AppCompatActivity() {
             }
         } else {
             captureScreenshotPresetFromIntent(intent)
+            captureCompanionLinkRequestFromIntent(intent)
         }
 
         val rootView = buildRootLayout()
@@ -296,8 +314,17 @@ class MainActivity : AppCompatActivity() {
         requestRuntimePermissionsIfNeeded()
 
         AqlCollectorService.cancelResumeRequiredNotification(this)
-        ContextCompat.startForegroundService(this, buildServiceStartIntent(intent))
-        bindService(Intent(this, AqlCollectorService::class.java), serviceConnection, Context.BIND_AUTO_CREATE)
+        pendingServiceStartIntent = buildServiceStartIntent(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val startIntent = pendingServiceStartIntent ?: Intent(this, AqlCollectorService::class.java)
+        pendingServiceStartIntent = null
+        ContextCompat.startForegroundService(this, startIntent)
+        if (!isBound) {
+            bindService(Intent(this, AqlCollectorService::class.java), serviceConnection, Context.BIND_AUTO_CREATE)
+        }
     }
 
     override fun onResume() {
@@ -319,11 +346,18 @@ class MainActivity : AppCompatActivity() {
         activeSettingsDialog?.refreshPermissionsState()
         activeSettingsDialog?.refreshCompanionAssociationState()
         tryApplyPendingScreenshotPreset()
+        if (pendingCompanionLinkRequested) {
+            val targetAddr = pendingCompanionLinkBleAddress
+            pendingCompanionLinkRequested = false
+            pendingCompanionLinkBleAddress = null
+            requestCompanionDeviceAssociation(preferredBleAddress = targetAddr)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        captureCompanionLinkRequestFromIntent(intent)
         if (intent.action == AqlCollectorService.ACTION_DEV_COMMAND &&
             AqlCollectorService.isDevCommandAuthorized(this)
         ) {
@@ -335,6 +369,16 @@ class MainActivity : AppCompatActivity() {
                 tryApplyPendingScreenshotPreset()
             }
         }
+    }
+
+    override fun onStop() {
+        if (isBound) {
+            collectorService?.removeListener(serviceListener)
+            unbindService(serviceConnection)
+            isBound = false
+            collectorService = null
+        }
+        super.onStop()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -374,8 +418,25 @@ class MainActivity : AppCompatActivity() {
             collectorService?.removeListener(serviceListener)
             unbindService(serviceConnection)
             isBound = false
+            collectorService = null
         }
         super.onDestroy()
+    }
+
+    private fun captureCompanionLinkRequestFromIntent(sourceIntent: Intent?) {
+        if (sourceIntent?.action != AqlCollectorService.ACTION_LINK_COMPANION_MONITOR) return
+        val bleAddr = CompanionDeviceHelper.normalizeBluetoothMac(
+            sourceIntent.getStringExtra(AqlCollectorService.EXTRA_LINK_COMPANION_BLE_ADDRESS)
+        )
+        sourceIntent.action = null
+        AqlCollectorService.cancelCompanionLinkSuggestionNotification(this)
+        CompanionDeviceHelper.markLinkSuggestionDismissed(this)
+        if (CompanionDeviceHelper.hasAssociations(this)) {
+            Toast.makeText(this, "Monitor is already linked", Toast.LENGTH_SHORT).show()
+            return
+        }
+        pendingCompanionLinkRequested = true
+        pendingCompanionLinkBleAddress = bleAddr
     }
 
     private fun captureScreenshotPresetFromIntent(sourceIntent: Intent?) {
@@ -2906,7 +2967,7 @@ class MainActivity : AppCompatActivity() {
         settingsDialog.show()
     }
 
-    private fun requestCompanionDeviceAssociation() {
+    private fun requestCompanionDeviceAssociation(preferredBleAddress: String? = null) {
         if (!CompanionDeviceHelper.isSupported(this)) {
             Toast.makeText(this, "Companion Device Presence is not supported on this device", Toast.LENGTH_LONG).show()
             return
@@ -2917,7 +2978,10 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Grant Bluetooth permission first, then try linking again", Toast.LENGTH_LONG).show()
             return
         }
-        val request = CompanionDeviceHelper.buildAssociationRequest()
+        val targetMac = CompanionDeviceHelper.normalizeBluetoothMac(preferredBleAddress)
+            ?: collectorService?.getRecentActiveLinkableMonitor()?.bleAddress
+        val usedSingleDevice = CompanionDeviceHelper.shouldUseSingleDeviceRequest(targetMac)
+        val request = CompanionDeviceHelper.buildAssociationRequest(targetMac)
         try {
             cdm.associate(
                 request,
@@ -2947,7 +3011,11 @@ class MainActivity : AppCompatActivity() {
 
                     override fun onFailure(error: CharSequence?) {
                         runOnUiThread {
-                            val msg = error?.toString()?.takeIf { it.isNotBlank() } ?: "Device linking cancelled"
+                            val msg = if (usedSingleDevice && targetMac != null) {
+                                "Could not reach monitor ($targetMac). Make sure it's nearby and try linking from Settings."
+                            } else {
+                                error?.toString()?.takeIf { it.isNotBlank() } ?: "Device linking cancelled"
+                            }
                             Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
                         }
                     }
@@ -2961,12 +3029,15 @@ class MainActivity : AppCompatActivity() {
     private fun onCompanionAssociated(associationInfo: AssociationInfo?) {
         val assoc = associationInfo ?: CompanionDeviceHelper.getAssociations(this).lastOrNull()
         val observing = assoc != null && CompanionDeviceHelper.startObservingPresence(this, assoc)
+        AqlCollectorService.cancelCompanionLinkSuggestionNotification(this)
+        CompanionDeviceHelper.markLinkSuggestionDismissed(this)
+        collectorService?.refreshCompanionAssociationCache()
         activeSettingsDialog?.refreshCompanionAssociationState()
         val label = assoc?.let {
             CompanionDeviceHelper.formatAssociationLabel(it.displayName, it.deviceMacAddress?.toString())
         } ?: "monitor"
         val msg = if (observing) {
-            "Linked $label for background auto-resume"
+            "Linked $label for auto-resume & battery savings"
         } else {
             "Linked $label (presence observation unavailable)"
         }
@@ -2975,6 +3046,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun unlinkCompanionDevices() {
         CompanionDeviceHelper.disassociateAll(this)
+        collectorService?.refreshCompanionAssociationCache()
         activeSettingsDialog?.refreshCompanionAssociationState()
         Toast.makeText(this, "Unlinked monitor from background auto-resume", Toast.LENGTH_SHORT).show()
     }

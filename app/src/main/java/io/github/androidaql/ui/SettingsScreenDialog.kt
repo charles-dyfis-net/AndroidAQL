@@ -149,6 +149,8 @@ class SettingsScreenDialog(
         d.show()
     }
 
+    fun isBoundTo(targetService: AqlCollectorService): Boolean = service === targetService
+
     fun dismiss() {
         dialog?.dismiss()
         dialog = null
@@ -456,7 +458,7 @@ class SettingsScreenDialog(
 
         val card = buildCard()
         backgroundCard = card
-        card.addView(buildSettingTitle("Auto-Resume After Reboot & Updates"))
+        card.addView(buildSettingTitle("Auto-Resume & Battery Savings"))
 
         val subtitle = buildSubtitleText("", topDp = 2, bottomDp = 10)
         companionStatusSubtitle = subtitle
@@ -491,11 +493,17 @@ class SettingsScreenDialog(
         header.visibility = View.VISIBLE
         card.visibility = View.VISIBLE
         if (linkedSummary != null) {
-            subtitle.text = "Linked to $linkedSummary. Android will wake AirSlice automatically when your monitor is nearby."
+            subtitle.text = "Linked to $linkedSummary. AirSlice sleeps with no persistent notification while the monitor is away and resumes automatically when nearby."
             btn.text = "Unlink Monitor"
         } else {
-            subtitle.text = "Link your monitor with Android Companion Device Presence so passive logging resumes automatically after phone reboots or Play Store updates."
-            btn.text = "Link Monitor for Auto-Resume"
+            val activeMonitor = service.getRecentActiveLinkableMonitor()
+            if (activeMonitor != null) {
+                subtitle.text = "Receiving live data from ${activeMonitor.bleAddress}. Link it once so background scanning pauses when it's away and resumes automatically after reboots or updates."
+                btn.text = "Link Active Monitor (${activeMonitor.bleAddress})"
+            } else {
+                subtitle.text = "Link your monitor with Android Companion Device Presence so background scanning pauses when it's away and resumes automatically after reboots or Play Store updates."
+                btn.text = "Link Monitor for Auto-Resume"
+            }
         }
     }
 

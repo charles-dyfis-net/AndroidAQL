@@ -12,16 +12,32 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.ParcelUuid
 import io.github.androidaql.ble.QingpingBleParser
+import java.util.Locale
 import java.util.regex.Pattern
 
 /**
  * Encapsulates Android [CompanionDeviceManager] association and BLE device presence observation
  * so the OS wakes AirSlice when a linked Qingping / BTHome v2 monitor reappears after reboots
- * or Google Play auto-updates.
+ * or Google Play auto-updates, and allows AirSlice to sleep when the linked monitor is absent.
  */
 object CompanionDeviceHelper {
 
+    private const val UI_PREFS_NAME = "aql_ui_prefs"
+    const val PREF_COMPANION_LINK_SUGGESTION_SHOWN = "companion_link_suggestion_shown"
+    const val PREF_COMPANION_LINK_SUGGESTION_DISMISSED = "companion_link_suggestion_dismissed"
+
     private val qingpingNamePattern: Pattern = Pattern.compile("Qingping.*")
+    private val validMacRegex = Regex("^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
+
+    fun normalizeBluetoothMac(address: String?): String? {
+        val trimmed = address?.trim()?.uppercase(Locale.US) ?: return null
+        if (!validMacRegex.matches(trimmed)) return null
+        if (trimmed == "00:00:00:00:00:00" || trimmed == "02:00:00:00:00:00") return null
+        return trimmed
+    }
+
+    fun shouldUseSingleDeviceRequest(targetBleAddress: String?): Boolean =
+        normalizeBluetoothMac(targetBleAddress) != null
 
     fun isSupported(context: Context): Boolean {
         if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_COMPANION_DEVICE_SETUP)) {
@@ -33,8 +49,22 @@ object CompanionDeviceHelper {
     fun getManager(context: Context): CompanionDeviceManager? =
         context.getSystemService(CompanionDeviceManager::class.java)
 
-    fun buildAssociationRequest(): AssociationRequest {
+    fun buildAssociationRequest(targetBleAddress: String? = null): AssociationRequest {
         val builder = AssociationRequest.Builder()
+        val normalizedMac = normalizeBluetoothMac(targetBleAddress)
+        if (normalizedMac != null) {
+            val scanFilter = ScanFilter.Builder()
+                .setDeviceAddress(normalizedMac)
+                .build()
+            builder.addDeviceFilter(
+                BluetoothLeDeviceFilter.Builder()
+                    .setScanFilter(scanFilter)
+                    .build()
+            )
+            builder.setSingleDevice(true)
+            return builder.build()
+        }
+
         val serviceUuids = listOf(
             QingpingBleParser.QINGPING_SERVICE_UUID_STRING,
             QingpingBleParser.BTHOME_V2_SERVICE_UUID_STRING,
@@ -63,6 +93,43 @@ object CompanionDeviceHelper {
         val cdm = getManager(context) ?: return emptyList()
         return runCatching { cdm.myAssociations }.getOrDefault(emptyList())
     }
+
+    fun hasAssociations(context: Context): Boolean = getAssociations(context).isNotEmpty()
+
+    fun isLinkSuggestionSuppressed(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(UI_PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(PREF_COMPANION_LINK_SUGGESTION_DISMISSED, false) ||
+            prefs.getBoolean(PREF_COMPANION_LINK_SUGGESTION_SHOWN, false)
+    }
+
+    fun markLinkSuggestionShown(context: Context) {
+        context.getSharedPreferences(UI_PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(PREF_COMPANION_LINK_SUGGESTION_SHOWN, true)
+            .apply()
+    }
+
+    fun markLinkSuggestionDismissed(context: Context) {
+        context.getSharedPreferences(UI_PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(PREF_COMPANION_LINK_SUGGESTION_DISMISSED, true)
+            .apply()
+    }
+
+    fun shouldPostProactiveLinkSuggestion(
+        isCompanionSupported: Boolean,
+        hasExistingAssociations: Boolean,
+        isSuggestionSuppressed: Boolean,
+        hasNotificationPermission: Boolean,
+        isDemoOrScreenshotMode: Boolean,
+        liveBleAddress: String?
+    ): Boolean =
+        isCompanionSupported &&
+            !hasExistingAssociations &&
+            !isSuggestionSuppressed &&
+            hasNotificationPermission &&
+            !isDemoOrScreenshotMode &&
+            normalizeBluetoothMac(liveBleAddress) != null
 
     fun startObservingPresence(context: Context, association: AssociationInfo): Boolean {
         val cdm = getManager(context) ?: return false
