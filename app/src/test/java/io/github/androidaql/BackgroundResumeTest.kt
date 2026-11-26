@@ -462,6 +462,18 @@ class BackgroundResumeTest {
                     isExternalPowerConnected = true
                 )
             )
+            assertEquals(
+                ScanSettings.SCAN_MODE_LOW_LATENCY,
+                AqlCollectorService.chooseBleScanMode(
+                    strictFdcdFilterEnabled = true,
+                    collectorState = activeState,
+                    hasActiveGattOrOta = false,
+                    needsActiveUnprovisionedGattDiscovery = false,
+                    isRecentCompanionWake = false,
+                    isExternalPowerConnected = false,
+                    preferMaxSamplesOnBattery = true
+                )
+            )
         }
         assertEquals(
             ScanSettings.SCAN_MODE_LOW_POWER,
@@ -471,7 +483,8 @@ class BackgroundResumeTest {
                 hasActiveGattOrOta = false,
                 needsActiveUnprovisionedGattDiscovery = false,
                 isRecentCompanionWake = false,
-                isExternalPowerConnected = true
+                isExternalPowerConnected = true,
+                preferMaxSamplesOnBattery = true
             )
         )
         assertEquals(
@@ -483,6 +496,18 @@ class BackgroundResumeTest {
                 needsActiveUnprovisionedGattDiscovery = false,
                 isRecentCompanionWake = true,
                 isExternalPowerConnected = true
+            )
+        )
+        assertEquals(
+            ScanSettings.SCAN_MODE_LOW_LATENCY,
+            AqlCollectorService.chooseBleScanMode(
+                strictFdcdFilterEnabled = true,
+                collectorState = CollectorState.IDLE_OUT_OF_RANGE,
+                hasActiveGattOrOta = false,
+                needsActiveUnprovisionedGattDiscovery = false,
+                isRecentCompanionWake = true,
+                isExternalPowerConnected = false,
+                preferMaxSamplesOnBattery = true
             )
         )
     }

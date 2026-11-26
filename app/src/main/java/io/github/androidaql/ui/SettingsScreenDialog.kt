@@ -499,6 +499,33 @@ class SettingsScreenDialog(
         companionSectionContainer = companionContainer
         card.addView(companionContainer)
 
+        // Scanning on Battery
+        card.addView(buildSettingTitle(context.getString(R.string.settings_battery_scan_title)))
+        val currentPreferMax = service.getPreferMaxSamplesOnBattery()
+        val batteryScanSubtitle = buildSubtitleText(
+            batteryScanSubtitleFor(currentPreferMax),
+            topDp = 2,
+            bottomDp = 10
+        )
+        card.addView(batteryScanSubtitle)
+
+        val batteryScanSelector = MultiRowSegmentedSelector(
+            context = context,
+            initialSelection = currentPreferMax,
+            onSelected = { preferMax ->
+                service.setPreferMaxSamplesOnBattery(preferMax)
+                batteryScanSubtitle.text = batteryScanSubtitleFor(preferMax)
+            }
+        )
+        batteryScanSelector.addRow(
+            listOf(
+                false to context.getString(R.string.settings_battery_scan_efficient_option),
+                true to context.getString(R.string.settings_battery_scan_max_option)
+            )
+        )
+        card.addView(batteryScanSelector.container)
+        card.addView(buildCardDivider())
+
         card.addView(buildSettingTitle(context.getString(R.string.settings_stop_service_title)))
         card.addView(buildSubtitleText(context.getString(R.string.settings_stop_service_subtitle), topDp = 2, bottomDp = 10))
         val stopBtn = buildActionButton(context.getString(R.string.settings_stop_service_btn)) {
@@ -1118,6 +1145,12 @@ class SettingsScreenDialog(
         TempUnitPreference.AUTO_DEVICE -> context.getString(R.string.settings_temp_subtitle_auto, deviceSym)
         TempUnitPreference.FAHRENHEIT -> context.getString(R.string.settings_temp_subtitle_f)
         TempUnitPreference.CELSIUS -> context.getString(R.string.settings_temp_subtitle_c)
+    }
+
+    private fun batteryScanSubtitleFor(preferMaxSamples: Boolean): String = if (preferMaxSamples) {
+        context.getString(R.string.settings_battery_scan_subtitle_max)
+    } else {
+        context.getString(R.string.settings_battery_scan_subtitle_efficient)
     }
 
     private fun normalizeDebounceSelection(sec: Long): Long =

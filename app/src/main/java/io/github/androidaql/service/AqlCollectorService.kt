@@ -268,6 +268,7 @@ class AqlCollectorService : Service() {
     private var lastRealBleHeardMs: Long = 0L
     private var isExternalPowerConnected: Boolean = false
     private var isPowerReceiverRegistered: Boolean = false
+    private var preferMaxSamplesOnBattery: Boolean = false
 
     private val powerConnectionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -455,6 +456,7 @@ class AqlCollectorService : Service() {
         ringStore = AqlRingBufferStore(ringFile, deviceId = 1L)
         metadataDb.coalesceMicroExcursionsAndRestoreRingPlaceIds(ringStore)
         stateMachine.wifiLossDebounceSec = getWifiLossDebounceSec()
+        preferMaxSamplesOnBattery = getPreferMaxSamplesOnBattery()
         devConfig = loadDevKeepAliveConfig()
         fakeWifiSsidOverride = getSharedPreferences("aql_dev_keepalive", Context.MODE_PRIVATE)
             .getString("fake_wifi_ssid", null)
@@ -1123,6 +1125,20 @@ class AqlCollectorService : Service() {
         notifyListeners()
     }
 
+    fun getPreferMaxSamplesOnBattery(): Boolean =
+        getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
+            .getBoolean(PREF_PREFER_MAX_SAMPLES_ON_BATTERY, false)
+
+    fun setPreferMaxSamplesOnBattery(preferMaxSamples: Boolean) {
+        getSharedPreferences("aql_ui_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(PREF_PREFER_MAX_SAMPLES_ON_BATTERY, preferMaxSamples)
+            .apply()
+        preferMaxSamplesOnBattery = preferMaxSamples
+        syncBleScanModeIfNeeded(force = true)
+        notifyListeners()
+    }
+
     fun startManualExcursion(): Long? {
         val nowSec = System.currentTimeMillis() / 1000L
         val transition = stateMachine.onManualTripStart(nowSec)
@@ -1277,23 +1293,25 @@ class AqlCollectorService : Service() {
             hasActiveGattOrOta = hasActiveGattOrOta,
             needsActiveUnprovisionedGattDiscovery = needsActiveUnprovisionedGattDiscovery,
             isRecentCompanionWake = isRecentCompanionWake,
-            isExternalPowerConnected = isExternalPowerConnected
+            isExternalPowerConnected = isExternalPowerConnected,
+            preferMaxSamplesOnBattery = preferMaxSamplesOnBattery
         )
     }
 
-    private fun syncBleScanModeIfNeeded() {
+    private fun syncBleScanModeIfNeeded(force: Boolean = false) {
         if (!isScanning || isSleepingForAbsentCompanion) return
         val nowMs = System.currentTimeMillis()
         val desiredMode = computeDesiredBleScanMode(nowMs)
         if (desiredMode == activeScanMode) return
-        if ((nowMs - lastScanStartMs) < MIN_SCAN_MODE_SWITCH_INTERVAL_MS) return
+        if (!force && (nowMs - lastScanStartMs) < MIN_SCAN_MODE_SWITCH_INTERVAL_MS) return
         hwLogger.logEvent(
             "BLE_SCAN_MODE_CHANGED",
             mapOf(
                 "from_mode" to activeScanMode,
                 "to_mode" to desiredMode,
                 "state" to stateMachine.currentState.name,
-                "external_power" to isExternalPowerConnected
+                "external_power" to isExternalPowerConnected,
+                "prefer_max_samples_on_battery" to preferMaxSamplesOnBattery
             )
         )
         stopBleScan()
@@ -1343,7 +1361,8 @@ class AqlCollectorService : Service() {
                     "strict_software_filter" to strictFdcdFilterEnabled,
                     "hardware_filter_count" to filters.size,
                     "scan_mode" to desiredMode,
-                    "external_power" to isExternalPowerConnected
+                    "external_power" to isExternalPowerConnected,
+                    "prefer_max_samples_on_battery" to preferMaxSamplesOnBattery
                 )
             )
         } catch (se: SecurityException) {
@@ -3513,6 +3532,7 @@ class AqlCollectorService : Service() {
         const val GATT_RETRY_COOLDOWN_MS = 15_000L
         const val PREF_WIFI_LOSS_DEBOUNCE_SEC = "wifi_loss_debounce_sec"
         const val PREF_USER_STOPPED_SERVICE = "user_stopped_service"
+        const val PREF_PREFER_MAX_SAMPLES_ON_BATTERY = "prefer_max_samples_on_battery"
         const val MAX_WIFI_LOSS_DEBOUNCE_SEC = 300L
         const val ACTIVE_MONITOR_LINK_MAX_AGE_MS = 90_000L
         const val COMPANION_IDLE_SLEEP_GRACE_MS = 180_000L
@@ -3632,7 +3652,8 @@ class AqlCollectorService : Service() {
             hasActiveGattOrOta: Boolean,
             needsActiveUnprovisionedGattDiscovery: Boolean,
             isRecentCompanionWake: Boolean,
-            isExternalPowerConnected: Boolean = false
+            isExternalPowerConnected: Boolean = false,
+            preferMaxSamplesOnBattery: Boolean = false
         ): Int {
             if (!strictFdcdFilterEnabled || hasActiveGattOrOta || needsActiveUnprovisionedGattDiscovery) {
                 return ScanSettings.SCAN_MODE_LOW_LATENCY
@@ -3642,7 +3663,7 @@ class AqlCollectorService : Service() {
             ) {
                 return ScanSettings.SCAN_MODE_LOW_POWER
             }
-            if (isExternalPowerConnected) {
+            if (isExternalPowerConnected || preferMaxSamplesOnBattery) {
                 return ScanSettings.SCAN_MODE_LOW_LATENCY
             }
             return ScanSettings.SCAN_MODE_BALANCED
