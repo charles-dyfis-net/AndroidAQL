@@ -1,0 +1,542 @@
+#!/usr/bin/env python3
+"""
+Automate rebuilding all AirSlice README and Google Play Store graphics:
+- Phone README WebPs (`docs/screenshots/*.webp`, with full-height `settings.webp`)
+- 10-inch & 7-inch tablet Play Store PNGs (`docs/play_store_screenshots/tablet_10in/`, `tablet_7in/`)
+- Composite Google Play feature graphic (`docs/play_store_screenshots/feature_graphic.png`, 1024x500)
+
+Safely reuses any already-running matching AVD without disturbing it, and shuts down
+only emulators that this script boots headlessly.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+PACKAGE_ID = "net.dyfis.androidaql"
+EXTRA_BIN_DIRS = [
+    str(Path.home() / ".nix-profile" / "bin"),
+    str(Path.home() / ".local" / "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+]
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def sdk_root() -> Path:
+    return Path(
+        os.environ.get("ANDROID_HOME")
+        or os.environ.get("ANDROID_SDK_ROOT")
+        or (Path.home() / "Library" / "Android" / "sdk")
+    )
+
+
+def find_tool(name: str, extra_candidates: list[Path]) -> str:
+    env_override = os.environ.get(f"ANDROID_AQL_{name.upper()}")
+    if env_override:
+        return env_override
+    search_path = os.pathsep.join([os.environ.get("PATH", ""), *EXTRA_BIN_DIRS])
+    found = shutil.which(name, path=search_path)
+    if found:
+        return found
+    for candidate in extra_candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    raise RuntimeError(f"Required tool '{name}' not found.")
+
+
+def resolve_adb() -> str:
+    root = sdk_root()
+    return find_tool(
+        "adb",
+        [
+            root / "platform-tools" / "adb",
+            Path.home() / "Android" / "Sdk" / "platform-tools" / "adb",
+        ],
+    )
+
+
+def resolve_emulator() -> str:
+    root = sdk_root()
+    return find_tool(
+        "emulator",
+        [
+            root / "emulator" / "emulator",
+            Path.home() / "Android" / "Sdk" / "emulator" / "emulator",
+        ],
+    )
+
+
+def resolve_uv() -> str | None:
+    search_path = os.pathsep.join([os.environ.get("PATH", ""), *EXTRA_BIN_DIRS])
+    return shutil.which("uv", path=search_path)
+
+
+def run_cmd(
+    args: list[str],
+    *,
+    cwd: Path | None = None,
+    capture: bool = False,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.run(
+        args,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+        text=True,
+        check=False,
+    )
+    if check and proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+        raise RuntimeError(f"Command failed: {' '.join(args)}\n{detail}")
+    return proc
+
+
+def list_connected_devices(adb: str) -> list[str]:
+    out = run_cmd([adb, "devices"], capture=True).stdout
+    serials: list[str] = []
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
+            serials.append(parts[0])
+    return serials
+
+
+def get_avd_name(adb: str, serial: str) -> str | None:
+    res = run_cmd([adb, "-s", serial, "emu", "avd", "name"], capture=True, check=False)
+    if res.returncode != 0:
+        return None
+    for line in res.stdout.splitlines():
+        line = line.strip()
+        if line and line != "OK":
+            return line
+    return None
+
+
+def find_running_avd(adb: str, avd_name: str) -> str | None:
+    for serial in list_connected_devices(adb):
+        if get_avd_name(adb, serial) == avd_name:
+            return serial
+    return None
+
+
+def wait_for_avd_boot(adb: str, emulator_proc: subprocess.Popen[str], avd_name: str, known_serials: set[str]) -> str:
+    deadline = time.monotonic() + 180.0
+    serial: str | None = None
+    while time.monotonic() < deadline:
+        if emulator_proc.poll() is not None:
+            raise RuntimeError(f"Emulator for AVD '{avd_name}' exited prematurely with code {emulator_proc.returncode}")
+        for candidate in list_connected_devices(adb):
+            if candidate not in known_serials and get_avd_name(adb, candidate) == avd_name:
+                serial = candidate
+                break
+        if serial:
+            boot_res = run_cmd(
+                [adb, "-s", serial, "shell", "getprop", "sys.boot_completed"],
+                capture=True,
+                check=False,
+            )
+            if boot_res.returncode == 0 and boot_res.stdout.strip() == "1":
+                pm_res = run_cmd([adb, "-s", serial, "shell", "pm", "path", "android"], capture=True, check=False)
+                if pm_res.returncode == 0 and "package:" in pm_res.stdout:
+                    return serial
+        time.sleep(2.0)
+    raise RuntimeError(f"Timed out waiting for AVD '{avd_name}' to boot.")
+
+
+def prepare_device(adb: str, serial: str, apk_path: Path) -> None:
+    run_cmd([adb, "-s", serial, "install", "-r", str(apk_path)])
+    for perm in (
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+    ):
+        run_cmd([adb, "-s", serial, "shell", "pm", "grant", PACKAGE_ID, perm], check=False)
+
+
+def run_with_avd(
+    adb: str,
+    emulator_bin: str,
+    avd_name: str,
+    apk_path: Path,
+    fn,
+) -> None:
+    existing = find_running_avd(adb, avd_name)
+    if existing:
+        print(f"Reusing running AVD '{avd_name}' on {existing}")
+        prepare_device(adb, existing, apk_path)
+        fn(existing)
+        return
+
+    known_serials = set(list_connected_devices(adb))
+    print(f"Booting AVD '{avd_name}' headlessly...")
+    proc = subprocess.Popen(
+        [
+            emulator_bin,
+            "-avd",
+            avd_name,
+            "-no-window",
+            "-no-audio",
+            "-no-boot-anim",
+            "-no-snapshot-load",
+            "-no-snapshot-save",
+            "-gpu",
+            "swiftshader_indirect",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    serial: str | None = None
+    try:
+        serial = wait_for_avd_boot(adb, proc, avd_name, known_serials)
+        print(f"AVD '{avd_name}' ready on {serial}")
+        prepare_device(adb, serial, apk_path)
+        fn(serial)
+    finally:
+        if serial:
+            run_cmd([adb, "-s", serial, "emu", "kill"], capture=True, check=False)
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            proc.wait(timeout=10)
+
+
+def capture_phone(root: Path, serial: str) -> None:
+    run_cmd(
+        [
+            sys.executable,
+            str(root / "scripts" / "update-screenshots"),
+            "--serial",
+            serial,
+            "--full-settings",
+        ],
+        cwd=root,
+    )
+
+
+def capture_tablet(
+    root: Path,
+    serial: str,
+    out_dir: Path,
+    *,
+    include_now_landscape: bool,
+) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="aql_play_shots_") as td:
+        stage_dir = Path(td)
+        cmd = [
+            sys.executable,
+            str(root / "scripts" / "update-screenshots"),
+            "--serial",
+            serial,
+            "--format",
+            "png",
+            "--out-dir",
+            str(stage_dir),
+        ]
+        if include_now_landscape:
+            cmd.append("--include-now-landscape")
+        run_cmd(cmd, cwd=root)
+
+        mapping = [
+            ("now_dashboard.png", "01_now_dashboard.png"),
+            ("trips_view_mode.png", "02_trips_view_mode.png"),
+            ("trips_edit_mode.png", "03_trips_edit_mode.png"),
+            ("trips_segment_edit.png", "04_trips_segment_edit.png"),
+            ("trips_landscape.png", "05_trips_landscape.png"),
+            ("settings.png", "06_settings.png"),
+        ]
+        if include_now_landscape:
+            mapping.insert(1, ("now_dashboard_landscape.png", "01_now_dashboard_landscape.png"))
+        for src_name, dst_name in mapping:
+            shutil.copy2(stage_dir / src_name, out_dir / dst_name)
+            print(f"Updated {out_dir / dst_name}")
+
+
+def _load_font(candidates: list[str], size: int, index: int = 0):
+    from PIL import ImageFont
+
+    for path in candidates:
+        if Path(path).is_file():
+            try:
+                return ImageFont.truetype(path, size=size, index=index)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+
+def render_feature_graphic_in_process(root: Path) -> None:
+    from PIL import Image, ImageDraw, ImageFilter
+
+    width, height = 1024, 500
+    play_dir = root / "docs" / "play_store_screenshots"
+    icon_path = play_dir / "app_icon_512.webp"
+    trips_candidates = [
+        play_dir / "tablet_10in" / "05_trips_landscape.png",
+        play_dir / "tablet_7in" / "05_trips_landscape.png",
+        root / "docs" / "screenshots" / "trips_landscape.webp",
+    ]
+    trips_path = next((p for p in trips_candidates if p.is_file()), None)
+    if trips_path is None:
+        raise RuntimeError("No landscape Trips screenshot found to embed in feature_graphic.png")
+
+    # Background vertical-diagonal dark slate gradient
+    base = Image.new("RGBA", (width, height), (11, 17, 32, 255))
+    px = base.load()
+    for y in range(height):
+        ty = y / float(height - 1)
+        for x in range(width):
+            tx = x / float(width - 1)
+            t = 0.55 * tx + 0.45 * ty
+            r = int(10 + 11 * t)
+            g = int(17 + 19 * t)
+            b = int(32 + 28 * t)
+            px[x, y] = (r, g, b, 255)
+
+    # Subtle ambient sky-blue glow behind the tablet mockup
+    glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(glow)
+    glow_draw.ellipse([430, 35, 1010, 470], fill=(14, 165, 233, 34))
+    glow = glow.filter(ImageFilter.GaussianBlur(radius=48))
+    base = Image.alpha_composite(base, glow)
+
+    draw = ImageDraw.Draw(base)
+
+    bold_fonts = [
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/System/Library/Fonts/SFNS.ttf",
+        "/System/Library/Fonts/HelveticaNeue.ttc",
+    ]
+    reg_fonts = [
+        "/System/Library/Fonts/SFNS.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/HelveticaNeue.ttc",
+    ]
+    title_font = _load_font(bold_fonts, 48)
+    subtitle_font = _load_font(reg_fonts, 21)
+    pill_font = _load_font(bold_fonts, 16)
+    pill_sub_font = _load_font(bold_fonts, 11)
+
+    # App icon + title
+    if icon_path.is_file():
+        icon_img = Image.open(icon_path).convert("RGBA").resize((74, 74), Image.Resampling.LANCZOS)
+        mask = Image.new("L", (74, 74), 0)
+        ImageDraw.Draw(mask).rounded_rectangle([0, 0, 73, 73], radius=16, fill=255)
+        base.paste(icon_img, (44, 62), mask)
+
+    draw.text((134, 71), "AirSlice", font=title_font, fill=(248, 250, 252, 255))
+
+    draw.multiline_text(
+        (44, 158),
+        "Continuous air quality telemetry,\nsliced into clear trip segments.",
+        font=subtitle_font,
+        fill=(203, 213, 225, 255),
+        spacing=8,
+    )
+
+    # Sky-blue accent bar
+    draw.rounded_rectangle([44, 240, 88, 244], radius=2, fill=(56, 189, 248, 255))
+
+    # Feature pills (2x2), auto-sized to text width for symmetric padding
+    def _measure_pill(special: str | None, label: str) -> int:
+        if special == "CO2_SUB":
+            tw = draw.textlength("CO", font=pill_font) + draw.textlength("2", font=pill_sub_font) + draw.textlength(label, font=pill_font)
+        else:
+            tw = draw.textlength(label, font=pill_font)
+        return int(round(30 + tw + 18))
+
+    row1_pills = [
+        ((56, 189, 248, 255), "CO2_SUB", " & PM2.5"),
+        ((251, 146, 60, 255), None, "Temp & RH"),
+    ]
+    row2_pills = [
+        ((74, 222, 128, 255), None, "Offline 14d Ring"),
+        ((167, 139, 250, 255), None, "XLSX Export"),
+    ]
+    pills = []
+    for row_idx, row in enumerate((row1_pills, row2_pills)):
+        cx = 44
+        cy = 272 + row_idx * 52
+        for dot_color, special, label in row:
+            pw = _measure_pill(special, label)
+            pills.append(((cx, cy), pw, dot_color, special, label))
+            cx += pw + 12
+
+    for (px0, py0), pw, dot_color, special, label in pills:
+        ph = 38
+        draw.rounded_rectangle(
+            [px0, py0, px0 + pw, py0 + ph],
+            radius=10,
+            fill=(24, 35, 56, 240),
+            outline=(51, 65, 85, 255),
+            width=1,
+        )
+        draw.ellipse([px0 + 13, py0 + 15, px0 + 21, py0 + 23], fill=dot_color)
+        tx = px0 + 30
+        ty = py0 + 9
+        if special == "CO2_SUB":
+            draw.text((tx, ty), "CO", font=pill_font, fill=(226, 232, 240, 255))
+            co_w = draw.textlength("CO", font=pill_font)
+            draw.text((tx + co_w, ty + 6), "2", font=pill_sub_font, fill=(226, 232, 240, 255))
+            sub_w = draw.textlength("2", font=pill_sub_font)
+            draw.text((tx + co_w + sub_w, ty), label, font=pill_font, fill=(226, 232, 240, 255))
+        else:
+            draw.text((tx, ty), label, font=pill_font, fill=(226, 232, 240, 255))
+
+    # Right side: rounded tablet bezel framing live landscape Trips screenshot
+    src = Image.open(trips_path).convert("RGBA")
+    sw, sh = src.size
+    # Trim Android status bar (top ~4.2%) and gesture bar (bottom ~4.2%)
+    crop_top = int(sh * 0.042)
+    crop_bot = int(sh * 0.958)
+    src = src.crop((0, crop_top, sw, crop_bot))
+    cw, ch = src.size
+
+    bezel_x0 = 424
+    bezel_w = 562
+    pad = 10
+    screen_w = bezel_w - 2 * pad
+    screen_h = int(round(screen_w * ch / cw))
+    bezel_h = screen_h + 2 * pad
+    bezel_y0 = (height - bezel_h) // 2
+
+    # Drop shadow
+    shadow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).rounded_rectangle(
+        [bezel_x0 + 4, bezel_y0 + 10, bezel_x0 + bezel_w + 4, bezel_y0 + bezel_h + 10],
+        radius=22,
+        fill=(0, 0, 0, 145),
+    )
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=14))
+    base = Image.alpha_composite(base, shadow)
+
+    # Bezel frame
+    frame_draw = ImageDraw.Draw(base)
+    frame_draw.rounded_rectangle(
+        [bezel_x0, bezel_y0, bezel_x0 + bezel_w, bezel_y0 + bezel_h],
+        radius=20,
+        fill=(15, 23, 42, 255),
+        outline=(51, 65, 85, 255),
+        width=2,
+    )
+
+    # Fit screenshot cleanly inside screen area preserving aspect ratio
+    resized = src.resize((screen_w, screen_h), Image.Resampling.LANCZOS)
+    screen_mask = Image.new("L", (screen_w, screen_h), 0)
+    ImageDraw.Draw(screen_mask).rounded_rectangle([0, 0, screen_w - 1, screen_h - 1], radius=12, fill=255)
+    base.paste(resized, (bezel_x0 + pad, bezel_y0 + pad), screen_mask)
+
+    out_path = play_dir / "feature_graphic.png"
+    base.convert("RGB").save(out_path, format="PNG", optimize=True)
+    print(f"Saved {out_path} ({out_path.stat().st_size:,} bytes, {width}x{height})")
+
+
+def render_feature_graphic(root: Path) -> None:
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        uv = resolve_uv()
+        if not uv:
+            raise RuntimeError("Pillow is not installed and 'uv' was not found to run with --with pillow.")
+        run_cmd(
+            [
+                uv,
+                "run",
+                "--with",
+                "pillow",
+                "python3",
+                str(Path(__file__).resolve()),
+                "--render-feature-graphic",
+            ],
+            cwd=root,
+        )
+        return
+    render_feature_graphic_in_process(root)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Rebuild AirSlice README WebPs, Play Store tablet PNGs, and feature_graphic.png."
+    )
+    parser.add_argument("--build", action="store_true", help="Build app-debug.apk via ./gradlew assembleDebug first")
+    parser.add_argument(
+        "--only",
+        choices=("all", "phone", "tablet_10in", "tablet_7in", "feature_graphic"),
+        default="all",
+        help="Rebuild only a specific asset group (defaults to all)",
+    )
+    parser.add_argument("--phone-avd", default="Pixel_7a", help="Phone AVD name (default: Pixel_7a)")
+    parser.add_argument("--tablet10-avd", default="Tablet_10in", help="10-inch tablet AVD name (default: Tablet_10in)")
+    parser.add_argument("--tablet7-avd", default="Tablet_7in", help="7-inch tablet AVD name (default: Tablet_7in)")
+    parser.add_argument("--render-feature-graphic", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+
+    root = repo_root()
+    if args.render_feature_graphic:
+        render_feature_graphic_in_process(root)
+        return 0
+
+    apk_path = root / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
+    if args.only != "feature_graphic" and (args.build or not apk_path.is_file()):
+        print("Building debug APK...")
+        run_cmd([str(root / "gradlew"), "assembleDebug"], cwd=root)
+
+    if args.only != "feature_graphic":
+        adb = resolve_adb()
+        emulator_bin = resolve_emulator()
+
+        if args.only in ("all", "phone"):
+            run_with_avd(
+                adb,
+                emulator_bin,
+                args.phone_avd,
+                apk_path,
+                lambda serial: capture_phone(root, serial),
+            )
+        if args.only in ("all", "tablet_10in"):
+            run_with_avd(
+                adb,
+                emulator_bin,
+                args.tablet10_avd,
+                apk_path,
+                lambda serial: capture_tablet(
+                    root,
+                    serial,
+                    root / "docs" / "play_store_screenshots" / "tablet_10in",
+                    include_now_landscape=True,
+                ),
+            )
+        if args.only in ("all", "tablet_7in"):
+            run_with_avd(
+                adb,
+                emulator_bin,
+                args.tablet7_avd,
+                apk_path,
+                lambda serial: capture_tablet(
+                    root,
+                    serial,
+                    root / "docs" / "play_store_screenshots" / "tablet_7in",
+                    include_now_landscape=False,
+                ),
+            )
+
+    if args.only in ("all", "feature_graphic"):
+        render_feature_graphic(root)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

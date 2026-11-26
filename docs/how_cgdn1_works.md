@@ -55,7 +55,7 @@ However, the `CGDN1`'s stock firmware does **not** actually require a working Wi
 In its default mode, **`AirSlice`** takes advantage of that behavior transparently:
 
 1. **If Your Monitor Is Already in Normal Mode (or Running ESPHome):**
-   `AirSlice` never disturbs it. The app operates **100% passively** (`BLE: Provisioned 0x88 (Passive)` or `BLE: BTHome v2 (Passive)`), listening to live broadcasts with zero Bluetooth connections and zero OLED interruptions.
+   `AirSlice` never disturbs it. The app operates **100% passively** (showing `• Qingping` or `• BTHome` on the **Now** status banner when connected), listening to live broadcasts with zero Bluetooth connections and zero OLED interruptions.
 2. **If Your Monitor Is in Wi-Fi Setup Mode** *(either because it is brand new after a 7-second touch-bar hold, or because a previous setup was cleared)*:
    `AirSlice` automatically connects over Bluetooth for **~5 seconds**, authenticates with the monitor, syncs its real-time clock, and sends a harmless local loopback server placeholder (`127.0.0.1`) with **no Wi-Fi credentials**.
 3. **Transition Within ~3 Seconds:**
@@ -65,20 +65,24 @@ From that moment on, your `CGDN1` stays in Normal Mode across normal trips and h
 
 ---
 
-## 4. Understanding `AirSlice`'s Status Banner & Keep-Alive Settings
+## 4. Understanding `AirSlice`'s Status Banner, Background Logging & Keep-Alive Settings
 
-On the **Now** tab, the top status banner shows both your movement/privacy context and how `AirSlice` is talking to the monitor:
+On the **Now** tab, the top status banner shows both your movement/privacy context and (when receiving live broadcasts) the active monitor source (`• Qingping` or `• BTHome`):
 
 * **`🏠 At <Saved Place> • GPS Off`** — Your phone is connected to one of your configured Saved Wi-Fi networks, so GPS polling stays completely off (`0 mW`).
-* **`🚶 On a Trip • GPS Active`** — Your monitor is in range and you are away from Saved Wi-Fi Places, so `AirSlice` records GPS speed and accuracy alongside air quality.
+* **`🚶 On a Trip • GPS Active`** (or **`Steps Active • GPS Off`** / **`GPS + Steps Active`**) — Your monitor is in range and you are away from Saved Wi-Fi Places, so `AirSlice` records movement speed alongside air quality.
 * **`📡 Monitor Out of Range • GPS Off`** — The monitor hasn't been heard recently (either turned off, asleep, or left behind), so GPS turns back off.
 
-### Fallback & Diagnostic Keep-Alive Options (`⚙️ Settings`)
-Under **⚙️ Settings → Monitor Keep-Alive Mode (>30m Unplugged)**, legacy diagnostic strategies remain available if you ever intentionally want to test an **unprovisioned** monitor without completing offline setup:
+### Background Logging & Battery Settings (`⚙️ Settings → Background Logging`)
+* **Auto-Resume & Battery Savings:** Optionally link your monitor so Android lets `AirSlice` sleep with no persistent notification while the monitor is away and wakes it automatically when the monitor comes back into range or after reboots and app updates.
+* **Scanning on Battery (`Battery Saver` vs. `Max Samples`):** Defaults to **`Battery Saver`** (intermittent BLE scanning while unplugged; always full-rate when charging), or switch to **`Max Samples`** to prioritize capturing every advertisement on battery.
+* **Stop Background Service (`Stop & Exit AirSlice`):** Stops background scanning and keeps `AirSlice` stopped until you reopen it (also available as **`Stop`** on the ongoing notification when no trip is active).
 
-* **`Always Anti-Burn-In Quiet Screen (<30m Max)` (`0509_ONLY`):** Sends quiet clock-sync messages every 3.5 minutes without changing the OLED screen. This keeps an unprovisioned monitor awake past the 10-minute timeout up to the 30-minute Setup Mode ceiling.
-* **`Always Guaranteed Keep-Alive • 24m Reset` (`0509_24M_1101`):** Sends clock syncs every 3.5 minutes plus a pairing-window reset every 24 minutes so an unprovisioned monitor stays awake indefinitely (at the cost of placing the static Wi-Fi setup icon on the OLED every 24 minutes unless dismissed with a touch-bar tap).
-* **`Passive Listener Only` (`NONE_PASSIVE`):** Never initiates Bluetooth GATT connections at all.
+### Keep-Alive & Diagnostic Options (`⚙️ Settings → Advanced → Monitor Keep-Alive`)
+Under **⚙️ Settings → Advanced → Monitor Keep-Alive**, you can switch between **`Auto Setup`** (default ~5-second offline setup when needed, then passive) and **`Passive Only`** (never initiates Bluetooth connections). When **`Developer Mode`** is also enabled under **Advanced**, legacy diagnostic strategies remain available if you ever intentionally want to test an **unprovisioned** monitor without completing offline setup:
+
+* **`05 09 Only` (`TIME_SYNC_0509`):** Sends quiet clock-sync messages every 3.5 minutes without changing the OLED screen. This keeps an unprovisioned monitor awake past the 10-minute timeout up to the 30-minute Setup Mode ceiling.
+* **`24m Reset` (`TIME_SYNC_0509_PLUS_24M_1101`):** Sends clock syncs every 3.5 minutes plus a pairing-window reset every 24 minutes so an unprovisioned monitor stays awake indefinitely (at the cost of placing the static Wi-Fi setup icon on the OLED every 24 minutes unless dismissed with a touch-bar tap).
 
 With a monitor that has completed `AirSlice`'s 5-second offline setup (or runs ESPHome), `AirSlice` stays automatically in passive listening mode even if a fallback keep-alive mode was previously selected.
 
@@ -87,7 +91,7 @@ With a monitor that has completed `AirSlice`'s 5-second offline setup (or runs E
 ## 5. Configuring Wi-Fi Without the First-Party App (`--wifi-ssid`) & Custom Firmware (`ESPHome` / `BTHome v2`)
 
 ### Out-of-the-Box Passive Support for Custom Firmware (`BTHome v2`)
-If your monitor runs custom firmware such as **ESPHome** broadcasting **BTHome v2**, `AirSlice` automatically detects and decodes Temperature, Humidity, CO₂, PM2.5, PM10, Pressure, Illuminance, and Battery % passively (`BLE: BTHome v2 (Passive)`).
+If your monitor runs custom firmware such as **ESPHome** broadcasting **BTHome v2**, `AirSlice` automatically detects and decodes Temperature, Humidity, CO₂, PM2.5, PM10, Pressure, Illuminance, and Battery % passively (`• BTHome`).
 
 **Important for ESPHome configs (`esp32_ble_tracker` / `bluetooth_proxy`):** ESPHome's built-in `esp32_ble_tracker` and `bluetooth_proxy` components only configure the ESP32 as a BLE **scanner/client**—they do **not** broadcast the monitor's own onboard sensors over BLE by default. Without adding passive BLE advertising, `AirSlice` will stop receiving new readings as soon as the `CGDN1` boots into ESPHome.
 

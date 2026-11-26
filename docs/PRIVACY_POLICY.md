@@ -1,6 +1,6 @@
 # Privacy Policy for AirSlice: Portable Air Log (`net.dyfis.androidaql`)
 
-**Effective Date:** November 13, 2026  
+**Effective Date:** November 25, 2026
 **Developer:** Charles Duffy (`charles-dyfis-net` / `dyfis.net`)
 
 ## 1. Overview — 100% Local On-Device Operation
@@ -15,7 +15,7 @@
 ## 2. Permissions & Data Processed On-Device
 
 ### A. Bluetooth (`BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`)
-- **Purpose:** Used to scan for Bluetooth Low Energy (`0xFDCD` and `0xFE95`) advertisements from your physical Qingping Air Monitor Lite (`CGDN1`) and to perform periodic local GATT keep-alive handshakes so the monitor continues broadcasting while in range.
+- **Purpose:** Used to passively scan for Bluetooth Low Energy (`0xFDCD`, `0xFE95`, and `BTHome v2` `0xFCD2`) advertisements from your physical Qingping Air Monitor Lite (`CGDN1`) or compatible BTHome v2 monitor, and (when an unconfigured `CGDN1` is in Wi-Fi setup mode) to perform a one-shot offline local setup handshake so the monitor broadcasts continuously without cloud configuration.
 - **Storage:** Environmental readings (CO₂, PM2.5, PM10, temperature, humidity, battery percentage, and BLE RSSI) are stored locally in a fixed-size, 14-day circular ring buffer (`device_1.aqlring`) inside the app's private internal storage directory. When optional **`🛠️ Developer Mode`** is explicitly enabled in **Settings** (off by default), AirSlice also writes nearby BLE advertisement metadata (`BLE_ADV_NON_FDCD` MAC addresses, device names, RSSI, service UUIDs, and raw payloads) and raw monitor frames to the local `hw_bringup_trace.jsonl` diagnostic log for hardware debugging.
 
 ### B. Location & Connected Wi-Fi (`ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION`, `ACCESS_BACKGROUND_LOCATION`, `FOREGROUND_SERVICE_LOCATION`, `ACCESS_WIFI_STATE`)
@@ -31,6 +31,10 @@
 ### D. Notifications (`POST_NOTIFICATIONS`)
 - **Purpose:** Used to display the ongoing foreground collector status notification (showing live CO₂ and PM2.5 levels) and optional user-configurable high-CO₂, high-PM2.5, or low-battery alerts.
 
+### E. Companion Device Presence & Auto-Resume (`REQUEST_OBSERVE_COMPANION_DEVICE_PRESENCE`, `REQUEST_COMPANION_START_FOREGROUND_SERVICES_FROM_BACKGROUND`, `RECEIVE_BOOT_COMPLETED`)
+- **Purpose:** Strictly optional and initiated only when you choose to link your monitor under **Settings → Background Logging → Auto-Resume & Battery Savings**. Allows Android to wake `AirSlice` when your linked monitor re-enters Bluetooth range (so `AirSlice` can sleep without a persistent notification while the monitor is away) and to resume background monitoring after device reboots or app updates unless you have explicitly stopped the service.
+- **Storage & Privacy:** Association metadata is managed locally by Android's `CompanionDeviceManager` on-device and can be removed at any time by tapping **Unlink Monitor** in Settings. No device identifiers or presence events are sent off-device.
+
 ---
 
 ## 3. Data Retention, Sharing, and Deletion
@@ -41,5 +45,5 @@
 ---
 
 ## 4. Contact
-If you have questions about this Privacy Policy or AirSlice's privacy practices, please open an issue at:  
+If you have questions about this Privacy Policy or AirSlice's privacy practices, please open an issue at:
 https://github.com/charles-dyfis-net/AndroidAQL

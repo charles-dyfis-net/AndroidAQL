@@ -26,8 +26,8 @@ Yes, in three ways:
 You can turn on Demo Data Mode either directly from **`❓ Help`** in the top bar (tap **`🎭 Enable Demo Data Mode`**) or manually in Settings:
 
 1. Tap **`⚙️ Settings`** in the top-right corner of the app.
-2. Scroll to the bottom under **Diagnostics & Support** and check **`🎭 Demo Data Mode (Synthetic BLE Stream, Sample Trip & Place Sim)`**.
-3. Tap **`Done`**.
+2. Scroll to **Advanced**, expand it, and switch on **`Demo Data Mode`**.
+3. Tap the top-left **Back** arrow (`←`) to return to the dashboard.
 4. Back on the **Now** tab, tap **`🎭 Toggle Live Demo Replay Stream (No Hardware Needed)`** to start a simulated live sensor stream.
 5. On the **Trips** tab, tap **`🎭 Load Canned Demo Trip`** (from the empty state or the trip selector) to explore the 3-pane Trip Slicer, or use **`📂 Demo Replay XLSX (Time-Shifted)...`** to replay an exported `.xlsx` file shifted to the current time.
 
@@ -67,7 +67,7 @@ See **[How Your Monitor Works with `AirSlice`](how_cgdn1_works.md)** for a fulle
 
 ### Why does `AirSlice` request Location and Physical Activity permissions?
 
-Both are optional for basic live BLE reading (`Not Now (BLE Only)` works for CO₂/PM/Temp/RH without them), and both are processed **strictly on-device**:
+Both are optional for basic live BLE reading (`Not Now (Bluetooth Only)` works for CO₂/PM/Temp/RH without them), and both are processed **strictly on-device**:
 
 * **Movement speed on the Trip timeline:** Location (GPS) and Physical Activity (hardware step cadence) are converted in memory into **scalar speed (`m/s`)** and **horizontal GPS accuracy (`m`)** alongside your air-quality readings. Seeing speed changes makes it easy to spot trip transitions—when you got into or out of a cab, walked between rooms, or stepped indoors/outdoors—so you can slice a trip into clean, labeled segments and export metrics per segment.
 * **Why steps are included alongside GPS:** Much of air-quality monitoring happens indoors where GPS is unavailable or noisy; step-cadence estimation keeps walking movement visible when GPS drops out.
@@ -75,6 +75,24 @@ Both are optional for basic live BLE reading (`Not Now (BLE Only)` works for CO�
 * **No coordinates or step counts saved:** Raw latitude/longitude coordinates, unmatched Wi-Fi names, and cumulative step counts are immediately discarded and never saved to disk or sent anywhere.
 
 See the **[Privacy Policy](PRIVACY_POLICY.md)** for full details.
+
+---
+
+## Background Logging, Battery Life & Monitor Linking
+
+### How do Auto-Resume & Battery Savings and "Scanning on Battery" work?
+
+Under **⚙️ Settings → Background Logging**:
+
+* **Auto-Resume & Battery Savings:** Linking your monitor via Android's Companion Device manager allows `AirSlice` to sleep with no persistent notification while your monitor is out of range, and wake automatically when the monitor returns—or after phone reboots and Play Store updates.
+* **Switching to a different monitor:** Settings links one monitor at a time; if you switch monitors, tap **`Unlink Monitor`** and then **`Link Active Monitor (<MAC>)`**.
+* **Scanning on Battery (`Battery Saver` vs. `Max Samples`):** While unplugged on battery, **`Battery Saver`** (the default) scans intermittently to conserve phone battery while still rolling up multiple readings per 15-second slot, whereas **`Max Samples`** scans at full rate even on battery. Whenever your phone is plugged into external power, full-rate scanning is always used automatically.
+
+---
+
+### How do I completely stop `AirSlice` from scanning in the background?
+
+Tap **`Stop`** on the ongoing status notification (available whenever no trip is actively recording), or open **⚙️ Settings → Background Logging** and tap **`Stop & Exit AirSlice`**. `AirSlice` stays stopped—even across companion presence events—until you reopen the app.
 
 ---
 
@@ -98,7 +116,7 @@ Stock `CGDN1` firmware exposes a BLE provisioning command that gives the monitor
 
 ### Can I install open-source firmware on my `CGDN1` without ever running the official app?
 
-Yes. Stock firmware exposes BLE commands both to configure 2.4 GHz Wi-Fi credentials and to trigger an HTTP firmware update URL. When **`🛠️ Developer Mode`** is enabled in `AirSlice` (with `adb` `DEV_COMMAND` intents via [`scripts/analyze-hw-trace`](../scripts/analyze-hw-trace)), you can configure Wi-Fi and flash an initial `.crc.bin` ESPHome image over Bluetooth + local HTTP without installing the vendor app. See **[README — BLE & Hardware Diagnostic Testbench](../README.md#3-ble--hardware-diagnostic-testbench--provisioning-cli)** and **[Physical Hardware Observations](hardware_observations.md)**.
+Yes. Stock firmware exposes BLE commands both to configure 2.4 GHz Wi-Fi credentials and to trigger an HTTP firmware update URL. When **`Developer Mode`** is enabled in `AirSlice` (**⚙️ Settings → Advanced → Developer Mode**, with `adb` `DEV_COMMAND` intents via [`scripts/analyze-hw-trace`](../scripts/analyze-hw-trace)), you can configure Wi-Fi and flash an initial `.crc.bin` ESPHome image over Bluetooth + local HTTP without installing the vendor app. See **[How Your Monitor Works with `AirSlice`](how_cgdn1_works.md)** and **[Physical Hardware Observations (§6.0)](hardware_observations.md#60-developer-mode-and-security--privacy-surface)**.
 
 ---
 

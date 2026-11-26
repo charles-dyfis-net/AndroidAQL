@@ -6,7 +6,10 @@ import android.app.Dialog
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
@@ -31,6 +34,8 @@ import io.github.androidaql.service.AqlCollectorService.KeepAlivePayloadStrategy
 import io.github.androidaql.storage.BleCollectionMode
 import io.github.androidaql.util.TempUnitPreference
 import io.github.androidaql.util.TemperatureUnitFormatter
+import java.io.File
+import java.io.FileOutputStream
 
 class SettingsScreenDialog(
     private val context: Context,
@@ -59,6 +64,9 @@ class SettingsScreenDialog(
     }
 
     private var dialog: Dialog? = null
+    private var topBarView: View? = null
+    private var topSeparatorView: View? = null
+    private var contentView: LinearLayout? = null
     private var placesListContainer: LinearLayout? = null
     private var presetsSummaryView: TextView? = null
     private var alertsSummaryView: TextView? = null
@@ -102,8 +110,12 @@ class SettingsScreenDialog(
             }
         }
 
-        root.addView(buildTopBar())
-        root.addView(buildThinSeparator(COLOR_CARD_BORDER))
+        val topBar = buildTopBar()
+        val topSeparator = buildThinSeparator(COLOR_CARD_BORDER)
+        topBarView = topBar
+        topSeparatorView = topSeparator
+        root.addView(topBar)
+        root.addView(topSeparator)
 
         val scroll = ScrollView(context).apply {
             setBackgroundColor(Color.parseColor(COLOR_SCREEN_BG))
@@ -119,6 +131,7 @@ class SettingsScreenDialog(
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(12), dp(16), dp(28))
         }
+        contentView = content
 
         buildDisplaySection(content)
         buildPlacesAndTripsSection(content)
@@ -145,17 +158,78 @@ class SettingsScreenDialog(
         d.setOnDismissListener {
             commitFakeWifiOverrideIfChanged()
             dialog = null
+            topBarView = null
+            topSeparatorView = null
+            contentView = null
             callbacks.onSettingsDismissed()
         }
         dialog = d
         d.show()
     }
 
+    fun captureFullHeightPng(outputFile: File): Boolean = runCatching {
+        val topBar = topBarView ?: return false
+        val sep = topSeparatorView ?: return false
+        val content = contentView ?: return false
+
+        val width = content.width.takeIf { it > 0 }
+            ?: topBar.width.takeIf { it > 0 }
+            ?: context.resources.displayMetrics.widthPixels
+        if (topBar.width != width || topBar.height <= 0 || sep.height <= 0 || content.height <= 0) {
+            val widthSpec = View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY)
+            val unspecHeight = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+            topBar.measure(widthSpec, unspecHeight)
+            sep.measure(widthSpec, unspecHeight)
+            content.measure(widthSpec, unspecHeight)
+            topBar.layout(0, 0, width, topBar.measuredHeight.coerceAtLeast(1))
+            sep.layout(0, 0, width, sep.measuredHeight.coerceAtLeast(1))
+            content.layout(0, 0, width, content.measuredHeight.coerceAtLeast(1))
+        }
+
+        val topBarH = topBar.height.coerceAtLeast(1)
+        val sepH = sep.height.coerceAtLeast(1)
+        val contentH = content.height.coerceAtLeast(1)
+        val totalHeight = topBarH + sepH + contentH
+        val bitmap = Bitmap.createBitmap(width, totalHeight, Bitmap.Config.ARGB_8888)
+        try {
+            val canvas = Canvas(bitmap)
+            val bgPaint = Paint()
+            bgPaint.color = Color.parseColor(COLOR_BAR_BG)
+            canvas.drawRect(0f, 0f, width.toFloat(), topBarH.toFloat(), bgPaint)
+
+            bgPaint.color = Color.parseColor(COLOR_SCREEN_BG)
+            canvas.drawRect(0f, topBarH.toFloat(), width.toFloat(), totalHeight.toFloat(), bgPaint)
+
+            topBar.draw(canvas)
+
+            canvas.save()
+            canvas.translate(0f, topBarH.toFloat())
+            sep.draw(canvas)
+            canvas.restore()
+
+            canvas.save()
+            canvas.translate(0f, (topBarH + sepH).toFloat())
+            content.draw(canvas)
+            canvas.restore()
+
+            outputFile.parentFile?.mkdirs()
+            FileOutputStream(outputFile).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+            }
+        } finally {
+            bitmap.recycle()
+        }
+        true
+    }.getOrElse { false }
+
     fun isBoundTo(targetService: AqlCollectorService): Boolean = service === targetService
 
     fun dismiss() {
         dialog?.dismiss()
         dialog = null
+        topBarView = null
+        topSeparatorView = null
+        contentView = null
     }
 
     fun refreshPlacesSection() {

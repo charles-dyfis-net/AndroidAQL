@@ -615,6 +615,19 @@ class MainActivity : AppCompatActivity() {
                 }
                 (tabContainers.getOrNull(0) as? ScrollView)?.apply { post { scrollTo(0, 0) } }
             }
+            "demo_settings" -> {
+                setDeveloperModeEnabled(false)
+                setDemoDataEnabled(false)
+                TemperatureUnitFormatter.setPreference(this, TempUnitPreference.FAHRENHEIT)
+                svc.seedDemoNowDashboard()
+                switchTab(0)
+                showSettingsModal()
+                window.decorView.postDelayed({
+                    activeSettingsDialog?.captureFullHeightPng(
+                        File(filesDir, "screenshot_settings_full.png")
+                    )
+                }, 300L)
+            }
         }
     }
 

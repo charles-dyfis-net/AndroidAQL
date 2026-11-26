@@ -255,17 +255,15 @@ def send_screenshot_preset(adb: str, serial: str, preset: str, wait_sec: float) 
     time.sleep(wait_sec)
 
 
-def capture_image(
-    adb: str,
-    serial: str,
+def write_image_from_png(
+    png_bytes: bytes,
     ffmpeg: str | None,
     tmp_dir: Path,
     out_path: Path,
     fmt: str,
 ) -> None:
-    png_bytes = run_cmd([*adb_base(adb, serial), "exec-out", "screencap", "-p"]).stdout
     if not png_bytes.startswith(b"\x89PNG"):
-        raise RuntimeError(f"screencap did not return valid PNG data for {out_path.name}")
+        raise RuntimeError(f"Invalid PNG data for {out_path.name}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if fmt == "png":
         out_path.write_bytes(png_bytes)
@@ -293,6 +291,32 @@ def capture_image(
             ]
         )
     print(f"Saved {out_path} ({out_path.stat().st_size:,} bytes)")
+
+
+def capture_image(
+    adb: str,
+    serial: str,
+    ffmpeg: str | None,
+    tmp_dir: Path,
+    out_path: Path,
+    fmt: str,
+) -> None:
+    png_bytes = run_cmd([*adb_base(adb, serial), "exec-out", "screencap", "-p"]).stdout
+    write_image_from_png(png_bytes, ffmpeg, tmp_dir, out_path, fmt)
+
+
+def capture_full_settings(
+    adb: str,
+    serial: str,
+    ffmpeg: str | None,
+    tmp_dir: Path,
+    out_path: Path,
+    fmt: str,
+) -> None:
+    png_bytes = run_cmd(
+        [*adb_base(adb, serial), "exec-out", "run-as", PACKAGE_ID, "cat", "files/screenshot_settings_full.png"]
+    ).stdout
+    write_image_from_png(png_bytes, ffmpeg, tmp_dir, out_path, fmt)
 
 
 def verify_dimensions(paths: list[Path]) -> None:
@@ -329,6 +353,11 @@ def main() -> int:
         "--include-now-landscape",
         action="store_true",
         help="Also capture now_dashboard_landscape.<ext> in landscape orientation",
+    )
+    parser.add_argument(
+        "--full-settings",
+        action="store_true",
+        help="Capture Settings at full scrollable height instead of viewport-clipped screencap",
     )
     args = parser.parse_args()
 
@@ -383,6 +412,14 @@ def main() -> int:
                 run_cmd([*adb_base(adb, serial), "shell", "am", "force-stop", PACKAGE_ID])
                 set_rotation(adb, serial, "0", portrait_rot)
                 time.sleep(1.0)
+
+            send_screenshot_preset(adb, serial, "demo_settings", wait_sec=2.5)
+            p_settings = screenshots_dir / f"settings.{ext}"
+            if args.full_settings:
+                capture_full_settings(adb, serial, ffmpeg, tmp_dir, p_settings, ext)
+            else:
+                capture_image(adb, serial, ffmpeg, tmp_dir, p_settings, ext)
+            captured_paths.append(p_settings)
 
             clear_demo_databases_and_files(adb, serial)
 

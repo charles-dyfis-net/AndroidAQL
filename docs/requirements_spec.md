@@ -15,18 +15,18 @@ Location and movement collection is **strictly gated on active BLE presence** of
 ```mermaid
 stateDiagram-v2
     [*] --> Idle_OutOfRange
-    
+
     Idle_OutOfRange --> Stationary_KnownAP : BLE Advertisement Received\n+ Known Wi-Fi AP Connected/Visible
     Idle_OutOfRange --> Field_Excursion_Active : BLE Advertisement Received\n+ NO Known Wi-Fi AP
-    
+
     Stationary_KnownAP --> Field_Excursion_Active : Known Wi-Fi AP Lost\n(BLE Seen < 90s)
     Field_Excursion_Active --> Stationary_KnownAP : Known Wi-Fi AP Re-acquired\n(Closes Excursion)
-    
+
     Field_Excursion_Active --> Field_Excursion_SignalPaused : No BLE Packet for > T_gps_pause (90s)\n(Pause GPS, Keep Excursion Open)
     Field_Excursion_SignalPaused --> Field_Excursion_Active : BLE Advertisement Received\n(Resume GPS in Same Excursion)
     Field_Excursion_SignalPaused --> Stationary_KnownAP : Known Wi-Fi AP Re-acquired\n(Closes Excursion)
     Field_Excursion_SignalPaused --> Idle_OutOfRange : No BLE Packet for > T_excursion_close (45m)\n(Closes Excursion)
-    
+
     Stationary_KnownAP --> Idle_OutOfRange : No BLE Packet for > 90s
 ```
 
@@ -85,7 +85,7 @@ erDiagram
     EXCURSION ||--o{ SESSION_SLICE : "contains"
     SESSION_SLICE }o--|| SEGMENT_PRESET : "optional quick-tag"
     EXCURSION ||--o{ PINNED_SLICE_DATA : "freezes raw data for pinned trip"
-    
+
     MONITOR_DEVICE {
         long id PK
         string mac_address UK "BLE MAC / Identifier"
