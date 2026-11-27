@@ -126,7 +126,7 @@ Both release keystore passwords and Google Play service-account credentials can 
   rm -P keystore.properties   # or srm/shred
   ```
 
-  Supported properties inside `keystore.properties.gpg` (mapped to `ANDROID_KEYSTORE_FILE`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEYSTORE_ALIAS`, `ANDROID_KEY_PASSWORD` in memory):
+  Supported properties inside `keystore.properties.gpg` (mapped to `ANDROID_KEYSTORE_FILE`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` in memory):
 
   ```properties
   storeFile=release-upload.jks
@@ -147,7 +147,7 @@ Both release keystore passwords and Google Play service-account credentials can 
   * By default, Fastlane decrypts `play-service-account.json.gpg` in memory via `gpg` and passes `json_key_data` directly to `supply` (falling back to plaintext `play-service-account.json` or `PLAY_JSON_KEY_FILE` if no `.gpg` file is present).
   * For release builds (`build_release` / `deploy`), Fastlane decrypts `keystore.properties.gpg` into child-process environment variables and passes `--no-configuration-cache` to Gradle.
   * [`app/build.gradle.kts`](../app/build.gradle.kts) reads `ANDROID_KEYSTORE_*` (falling back to `keystore.properties` if present) **only** when a release/bundle task is requested, and marks release/bundle tasks `notCompatibleWithConfigurationCache` so decrypted passwords are never written under `.gradle/configuration-cache/`. Debug builds and unit tests keep the configuration cache active.
-  * Override encrypted file paths or values anytime with `KEYSTORE_PROPERTIES_GPG`, `PLAY_JSON_KEY_GPG`, `PLAY_JSON_KEY_FILE`, `PLAY_JSON_KEY_DATA`, or `ANDROID_KEYSTORE_{FILE,PASSWORD,ALIAS}` / `ANDROID_KEY_PASSWORD`.
+  * Override encrypted file paths or values anytime with `KEYSTORE_PROPERTIES_GPG`, `PLAY_JSON_KEY_GPG`, `PLAY_JSON_KEY_FILE`, `PLAY_JSON_KEY_DATA`, or `ANDROID_KEYSTORE_FILE`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`.
 
 * **Versioning:**
   * `versionCode` for release/bundle tasks (`ReleaseVersionCodeSource`) uses 20-second committer-epoch buckets shifted left 1 bit plus bit 0 as an exact-tag flag (`((commit_epoch_sec / 20) * 2) + exact_tag_bit`) when the tracked working tree is clean:

@@ -2,6 +2,7 @@ import java.io.ByteArrayOutputStream
 import java.io.FileInputStream
 import java.util.Properties
 import javax.inject.Inject
+import org.gradle.api.GradleException
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.provider.ValueSource
 import org.gradle.api.provider.ValueSourceParameters
@@ -98,23 +99,46 @@ val keystoreProperties = Properties().apply {
     }
 }
 
-fun resolveReleaseSigningProp(envName: String, propName: String): String? =
+fun resolveReleaseSigningProp(propName: String, vararg envNames: String): String? =
     if (!isReleaseTaskRequested) {
         null
     } else {
-        System.getenv(envName)?.takeIf { it.isNotBlank() }
-            ?: keystoreProperties.getProperty(propName)?.takeIf { it.isNotBlank() }
+        envNames.firstNotNullOfOrNull { System.getenv(it)?.takeIf(String::isNotBlank) }
+            ?: keystoreProperties.getProperty(propName)?.takeIf(String::isNotBlank)
     }
 
-val releaseStoreFile = resolveReleaseSigningProp("ANDROID_KEYSTORE_FILE", "storeFile")
-val releaseStorePassword = resolveReleaseSigningProp("ANDROID_KEYSTORE_PASSWORD", "storePassword")
-val releaseKeyAlias = resolveReleaseSigningProp("ANDROID_KEY_ALIAS", "keyAlias")
-val releaseKeyPassword = resolveReleaseSigningProp("ANDROID_KEY_PASSWORD", "keyPassword")
-val hasReleaseSigning = isReleaseTaskRequested &&
-    releaseStoreFile != null &&
-    releaseStorePassword != null &&
-    releaseKeyAlias != null &&
-    releaseKeyPassword != null
+val releaseStoreFileRaw = resolveReleaseSigningProp("storeFile", "ANDROID_KEYSTORE_FILE")
+val releaseStorePassword = resolveReleaseSigningProp("storePassword", "ANDROID_KEYSTORE_PASSWORD")
+val releaseKeyAlias = resolveReleaseSigningProp("keyAlias", "ANDROID_KEY_ALIAS", "ANDROID_KEYSTORE_ALIAS")
+val releaseKeyPassword = resolveReleaseSigningProp("keyPassword", "ANDROID_KEY_PASSWORD")
+
+val resolvedReleaseStoreFile = releaseStoreFileRaw?.let { raw ->
+    val expanded = if (raw.startsWith("~/")) {
+        System.getProperty("user.home") + raw.removePrefix("~")
+    } else {
+        raw
+    }
+    rootProject.file(expanded)
+}
+
+val signingEntries = listOf(
+    "storeFile / ANDROID_KEYSTORE_FILE" to resolvedReleaseStoreFile,
+    "storePassword / ANDROID_KEYSTORE_PASSWORD" to releaseStorePassword,
+    "keyAlias / ANDROID_KEY_ALIAS" to releaseKeyAlias,
+    "keyPassword / ANDROID_KEY_PASSWORD" to releaseKeyPassword
+)
+val anyReleaseSigningSet = isReleaseTaskRequested && signingEntries.any { it.second != null }
+val missingReleaseSigning = signingEntries.filter { it.second == null }.map { it.first }
+if (anyReleaseSigningSet && missingReleaseSigning.isNotEmpty()) {
+    throw GradleException(
+        "Incomplete release signing configuration; missing: ${missingReleaseSigning.joinToString(", ")}"
+    )
+}
+
+val hasReleaseSigning = isReleaseTaskRequested && missingReleaseSigning.isEmpty()
+if (hasReleaseSigning && !resolvedReleaseStoreFile!!.isFile) {
+    throw GradleException("Release keystore file not found: ${resolvedReleaseStoreFile.absolutePath}")
+}
 
 val computedVersionCode = if (isReleaseTaskRequested) {
     providers.of(ReleaseVersionCodeSource::class) {
@@ -168,7 +192,7 @@ android {
     signingConfigs {
         if (hasReleaseSigning) {
             create("release") {
-                storeFile = rootProject.file(releaseStoreFile!!)
+                storeFile = resolvedReleaseStoreFile
                 storePassword = releaseStorePassword
                 keyAlias = releaseKeyAlias
                 keyPassword = releaseKeyPassword

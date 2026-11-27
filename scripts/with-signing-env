@@ -20,7 +20,7 @@ from pathlib import Path
 PROP_TO_ENV = {
     "storeFile": "ANDROID_KEYSTORE_FILE",
     "storePassword": "ANDROID_KEYSTORE_PASSWORD",
-    "keyAlias": "ANDROID_KEYSTORE_ALIAS",
+    "keyAlias": "ANDROID_KEY_ALIAS",
     "keyPassword": "ANDROID_KEY_PASSWORD",
 }
 

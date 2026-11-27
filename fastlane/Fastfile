@@ -10,7 +10,7 @@ REPO_ROOT = File.expand_path("..", __dir__)
 SIGNING_PROP_TO_ENV = {
   "storeFile" => "ANDROID_KEYSTORE_FILE",
   "storePassword" => "ANDROID_KEYSTORE_PASSWORD",
-  "keyAlias" => "ANDROID_KEYSTORE_ALIAS",
+  "keyAlias" => "ANDROID_KEY_ALIAS",
   "keyPassword" => "ANDROID_KEY_PASSWORD"
 }.freeze
 
@@ -94,19 +94,34 @@ def with_signing_env
   end
 
   gpg_path = File.expand_path(ENV["KEYSTORE_PROPERTIES_GPG"] || "keystore.properties.gpg", REPO_ROOT)
+  plain_path = File.expand_path("keystore.properties", REPO_ROOT)
+
   unless File.exist?(gpg_path)
-    return yield
+    return yield if File.exist?(plain_path)
+
+    UI.user_error!(
+      "Release signing credentials missing: neither #{gpg_path} nor #{plain_path} exists " \
+      "and #{SIGNING_PROP_TO_ENV.values.join(', ')} are not all set."
+    )
   end
 
   props = parse_java_properties(gpg_decrypt(gpg_path))
   saved = {}
+  missing = []
   SIGNING_PROP_TO_ENV.each do |prop_key, env_key|
     next unless ENV[env_key].to_s.empty?
+
     val = props[prop_key]
-    next if val.to_s.empty?
+    if val.to_s.empty?
+      missing << "#{prop_key} (#{env_key})"
+      next
+    end
 
     saved[env_key] = ENV[env_key]
     ENV[env_key] = val
+  end
+  unless missing.empty? || File.exist?(plain_path)
+    UI.user_error!("Missing release signing properties in #{gpg_path}: #{missing.join(', ')}")
   end
   yield
 ensure
