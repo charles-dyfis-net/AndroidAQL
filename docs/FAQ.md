@@ -1,6 +1,6 @@
 # AirSlice Frequently Asked Questions (FAQ)
 
-Questions and answers about **`AirSlice: Portable Air Log`** (`net.dyfis.androidaql`)—covering how to evaluate the app with or without hardware, why it works the way it does, privacy/permissions, and custom ESPHome firmware.
+Questions and answers about **`AirSlice: CO2 & PM2.5 Air Log`** (`net.dyfis.androidaql`)—covering how to evaluate the app with or without hardware, why it works the way it does, privacy/permissions, and custom ESPHome firmware.
 
 > **More documentation:** See the **[README](../README.md)**, **[How Trips, Segments, and Splits Work](trip_slicing_guide.md)**, **[How Your Monitor Works with `AirSlice`](how_cgdn1_works.md)**, and the **[Privacy Policy](PRIVACY_POLICY.md)**. You can also ask questions or follow updates on the **[`androidaql-users` Google Group](https://groups.google.com/g/androidaql-users)** or open an issue on **[GitHub](https://github.com/charles-dyfis-net/AndroidAQL)**.
 

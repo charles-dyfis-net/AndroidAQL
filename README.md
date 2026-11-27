@@ -1,6 +1,6 @@
-# AirSlice: Portable Air Log — Portable Qingping Air Monitor Lite (`CGDN1`) Companion
+# AirSlice: CO2 & PM2.5 Air Log — Portable Qingping Air Monitor Lite (`CGDN1`) Companion
 
-**`AirSlice: Portable Air Log`** (**`AirSlice`**) is an Android application (**Android 13+ / API 33+**) that turns a **Qingping Air Monitor Lite (`CGDN1`)** into a cloud-free, field-portable environmental recorder and retrospective trip slicer for **CO₂, PM2.5, PM10, Temperature, and Relative Humidity**.
+**`AirSlice: CO2 & PM2.5 Air Log`** (**`AirSlice`**) is an Android application (**Android 13+ / API 33+**) that turns a **Qingping Air Monitor Lite (`CGDN1`)** into a cloud-free, field-portable environmental recorder and retrospective trip slicer for **CO₂, PM2.5, PM10, Temperature, and Relative Humidity**.
 
 | Live **Now** Dashboard | **Trips** — 3-Pane Synchronized Telemetry Timeline |
 | :---: | :---: |
@@ -93,6 +93,7 @@ The **Qingping Air Monitor Lite (`CGDN1`)** packs research-grade environmental s
 * **[Physical Hardware Observations (`CGDN1`)](docs/hardware_observations.md)** — Empirical and firmware-verified wire-protocol reference for `CGDN1` (`Firmware 4.8.5`, Product ID `0x24`), including ESP32-WROVER-B internals, dual-MAC radio behavior (`:BA` vs. `:BC`), the `7.2 s` touch-slider reset, Bluetooth timers, SHT4x self-heating, Developer Mode security surface, and the full GATT characteristic/command map.
 * **[Binary Ring-Buffer Format (`.aqlring`)](docs/binary_storage_format.md)** — Byte-level specification of the constant-size (`2.58 MB`) 14-day circular time-series store (`AQLRING1`) and pinned trip blobs (`AQLP`).
 * **[XLSX Export & Import Schema](docs/xlsx_export_schema.md)** — Self-contained 4-sheet OOXML `.xlsx` contract (`Trip`, `Segments`, `Notes`, `Samples`) for whole-trip backups/restores and PDF/advocacy report generators.
+* **[Release & Play Store Publishing Guide](docs/RELEASE.md)** — Maintainer guide for the Nix devShell, Play Store asset generation, release signing, and Fastlane uploads.
 * **[Upstream ESPHome Firmware (`nemethhh/esphome-qingping-cgdn1`, `main` ≥ `26642dcb`)](https://github.com/nemethhh/esphome-qingping-cgdn1)** — Compile `main` (commit [`26642dcb3d324e5619563279f77eef4a0f239d46`](https://github.com/nemethhh/esphome-qingping-cgdn1/commit/26642dcb3d324e5619563279f77eef4a0f239d46) / 2026-11-17 or newer) with `-s bthome true` (and optionally `-s portable true`) for passive BTHome v2 (`0xFCD2`) BLE broadcasts tuned for portable `AirSlice` use.
 
 ---
@@ -117,10 +118,4 @@ Debug-only screenshot capture automation (requires `adb`, `ffmpeg`, and a connec
 
 ```bash
 ./scripts/update-screenshots --full-settings
-```
-
-To rebuild all README WebP screenshots (with full-height Settings), 7-inch and 10-inch Play Store tablet screenshots, and `feature_graphic.png` across AVDs automatically:
-
-```bash
-./scripts/update-play-store-screenshots --build
 ```

@@ -1,0 +1,1 @@
+Log CO2 & PM2.5 via Bluetooth with Qingping Air Monitor Lite (CGDN1), no cloud

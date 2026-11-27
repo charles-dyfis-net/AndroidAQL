@@ -1,0 +1,446 @@
+require "open3"
+require "time"
+
+opt_out_usage
+
+default_platform(:android)
+
+REPO_ROOT = File.expand_path("..", __dir__)
+
+SIGNING_PROP_TO_ENV = {
+  "storeFile" => "ANDROID_KEYSTORE_FILE",
+  "storePassword" => "ANDROID_KEYSTORE_PASSWORD",
+  "keyAlias" => "ANDROID_KEYSTORE_ALIAS",
+  "keyPassword" => "ANDROID_KEY_PASSWORD"
+}.freeze
+
+def gpg_decrypt(path)
+  UI.user_error!("Encrypted file not found: #{path}") unless File.exist?(path)
+  env = {}
+  if ENV["GPG_TTY"].to_s.empty? && $stdin.tty?
+    tty_out, _tty_err, tty_st = Open3.capture3("tty")
+    env["GPG_TTY"] = tty_out.strip if tty_st.success? && !tty_out.strip.empty?
+  end
+  stdout, stderr, status = Open3.capture3(env, "gpg", "--quiet", "--decrypt", path)
+  unless status.success?
+    detail = stderr.to_s.strip
+    detail = "gpg exited with code #{status.exitstatus}" if detail.empty?
+    UI.user_error!("Failed to decrypt #{path}: #{detail}")
+  end
+  stdout
+end
+
+def unescape_java_prop(text)
+  out = +""
+  i = 0
+  while i < text.length
+    ch = text[i]
+    if ch == "\\" && i + 1 < text.length
+      nxt = text[i + 1]
+      out << case nxt
+             when "n" then "\n"
+             when "r" then "\r"
+             when "t" then "\t"
+             else nxt
+             end
+      i += 2
+    else
+      out << ch
+      i += 1
+    end
+  end
+  out
+end
+
+def parse_java_properties(text)
+  props = {}
+  text.each_line do |raw_line|
+    stripped = raw_line.lstrip
+    next if stripped.empty? || stripped.start_with?("#", "!")
+
+    sep_idx = nil
+    escaped = false
+    stripped.each_char.with_index do |ch, idx|
+      if escaped
+        escaped = false
+        next
+      end
+      if ch == "\\"
+        escaped = true
+        next
+      end
+      if ch == "=" || ch == ":"
+        sep_idx = idx
+        break
+      end
+    end
+
+    if sep_idx.nil?
+      key = unescape_java_prop(stripped.strip)
+      val = ""
+    else
+      key = unescape_java_prop(stripped[0...sep_idx].strip)
+      val = unescape_java_prop(stripped[(sep_idx + 1)..].lstrip.sub(/\r?\n\z/, ""))
+    end
+    props[key] = val unless key.empty?
+  end
+  props
+end
+
+def with_signing_env
+  all_present = SIGNING_PROP_TO_ENV.values.all? { |env_key| !ENV[env_key].to_s.empty? }
+  if all_present
+    return yield
+  end
+
+  gpg_path = File.expand_path(ENV["KEYSTORE_PROPERTIES_GPG"] || "keystore.properties.gpg", REPO_ROOT)
+  unless File.exist?(gpg_path)
+    return yield
+  end
+
+  props = parse_java_properties(gpg_decrypt(gpg_path))
+  saved = {}
+  SIGNING_PROP_TO_ENV.each do |prop_key, env_key|
+    next unless ENV[env_key].to_s.empty?
+    val = props[prop_key]
+    next if val.to_s.empty?
+
+    saved[env_key] = ENV[env_key]
+    ENV[env_key] = val
+  end
+  yield
+ensure
+  saved&.each do |env_key, prev|
+    if prev.nil?
+      ENV.delete(env_key)
+    else
+      ENV[env_key] = prev
+    end
+  end
+end
+
+def play_auth_opts
+  unless ENV["PLAY_JSON_KEY_DATA"].to_s.empty?
+    return { json_key_data: ENV["PLAY_JSON_KEY_DATA"] }
+  end
+
+  gpg_path = File.expand_path(ENV["PLAY_JSON_KEY_GPG"] || "play-service-account.json.gpg", REPO_ROOT)
+  if File.exist?(gpg_path)
+    return { json_key_data: gpg_decrypt(gpg_path) }
+  end
+
+  file_path = File.expand_path(ENV["PLAY_JSON_KEY_FILE"] || "play-service-account.json", REPO_ROOT)
+  if File.exist?(file_path)
+    return { json_key: file_path }
+  end
+
+  {}
+end
+
+METADATA_TRACK_PROBE_ORDER = %w[production beta alpha internal].freeze
+
+def resolve_track_and_version_code(auth, explicit_track:, explicit_version_code:)
+  explicit_vc = explicit_version_code.to_s.strip.empty? ? nil : explicit_version_code.to_i
+
+  if !explicit_track.to_s.strip.empty?
+    codes = google_play_track_version_codes({ track: explicit_track }.merge(auth))
+    if codes.nil? || codes.empty?
+      UI.user_error!("No releases found on Play track '#{explicit_track}'.")
+    end
+    return [explicit_track, explicit_vc || codes.max]
+  end
+
+  METADATA_TRACK_PROBE_ORDER.each do |candidate|
+    codes = begin
+      google_play_track_version_codes({ track: candidate }.merge(auth))
+    rescue StandardError
+      []
+    end
+    next if codes.nil? || codes.empty?
+
+    return [candidate, explicit_vc || codes.max]
+  end
+
+  UI.user_error!(
+    "No releases found on any Play track (#{METADATA_TRACK_PROBE_ORDER.join(', ')}). " \
+    "Upload a build first or pass track:<name>."
+  )
+end
+
+def metadata_supply_opts(options, validate_only:)
+  auth = play_auth_opts
+  explicit_track = options[:track] || ENV["PLAY_TRACK"]
+  explicit_vc = options[:version_code] || ENV["PLAY_VERSION_CODE"]
+  track, vc = resolve_track_and_version_code(
+    auth,
+    explicit_track: explicit_track,
+    explicit_version_code: explicit_vc
+  )
+  opts = {
+    validate_only: validate_only,
+    track: track,
+    skip_upload_apk: true,
+    skip_upload_aab: true,
+    skip_upload_changelogs: true
+  }
+  opts[:version_code] = vc unless vc.nil?
+  opts.merge(auth)
+end
+
+TAG_REQUIRED_TRACKS = %w[alpha beta production].freeze
+
+def ensure_clean_exact_tag!(track, repo_root: REPO_ROOT)
+  return unless TAG_REQUIRED_TRACKS.include?(track.to_s)
+
+  status_out, status_err, status_res = Open3.capture3("git", "status", "--porcelain", chdir: repo_root)
+  unless status_res.success?
+    UI.user_error!("Failed to inspect git status in #{repo_root}: #{status_err.strip}")
+  end
+  unless status_out.strip.empty?
+    UI.user_error!(
+      "Working tree is not clean; commit or stash changes before deploying to '#{track}' (or use track:internal)."
+    )
+  end
+
+  tag_out, _tag_err, tag_res = Open3.capture3("git", "describe", "--exact-match", "--tags", "HEAD", chdir: repo_root)
+  unless tag_res.success?
+    UI.user_error!(
+      "HEAD is not on an exact git tag; deploying to '#{track}' requires an exact tag " \
+      "(use track:internal for tag+<commits> builds, or tag HEAD first)."
+    )
+  end
+
+  UI.message("Verified clean working tree on exact tag '#{tag_out.strip}' for track '#{track}'")
+end
+
+def latest_tag_commit_time(repo_root: REPO_ROOT)
+  tag_out, _tag_err, tag_res = Open3.capture3("git", "describe", "--tags", "--abbrev=0", chdir: repo_root)
+  return [nil, nil] unless tag_res.success?
+
+  tag = tag_out.strip
+  return [nil, nil] if tag.empty?
+
+  ct_out, _ct_err, ct_res = Open3.capture3("git", "show", "-s", "--format=%ct", tag, chdir: repo_root)
+  return [tag, nil] unless ct_res.success?
+
+  epoch = ct_out.strip.to_i
+  return [tag, nil] if epoch <= 0
+
+  [tag, Time.at(epoch)]
+end
+
+def play_assets_stale_reason(repo_root: REPO_ROOT)
+  images_dir = File.join(repo_root, "fastlane", "metadata", "android", "en-US", "images")
+  icon_path = File.join(images_dir, "icon.png")
+  fg_path = File.join(images_dir, "featureGraphic.png")
+  return "icon.png is missing" unless File.file?(icon_path)
+  return "featureGraphic.png is missing" unless File.file?(fg_path)
+
+  phone_outs = Dir.glob(File.join(images_dir, "phoneScreenshots", "*.png"))
+  return "phoneScreenshots are missing" if phone_outs.empty?
+
+  outputs = [icon_path, fg_path] + phone_outs
+  raw_tablet_inputs = []
+
+  {
+    "tablet_7in" => "sevenInchScreenshots",
+    "tablet_10in" => "tenInchScreenshots"
+  }.each do |raw_bucket, out_bucket|
+    raw_dir = File.join(repo_root, "docs", "play_store_screenshots", raw_bucket)
+    raw_pngs = Dir.glob(File.join(raw_dir, "*.png"))
+    next if raw_pngs.empty?
+
+    raw_tablet_inputs.concat(raw_pngs)
+    bucket_outs = Dir.glob(File.join(images_dir, out_bucket, "*.png"))
+    return "#{out_bucket} are missing" if bucket_outs.empty?
+
+    outputs.concat(bucket_outs)
+  end
+
+  oldest_output_mtime = outputs.map { |p| File.mtime(p) }.min
+
+  inputs = [
+    File.join(repo_root, "scripts", "update-play-store-screenshots"),
+    File.join(repo_root, "app", "src", "main", "res", "drawable", "ic_launcher_background.xml"),
+    File.join(repo_root, "app", "src", "main", "res", "drawable", "ic_launcher_foreground.xml")
+  ] + Dir.glob(File.join(repo_root, "docs", "screenshots", "*.webp")) + raw_tablet_inputs
+
+  if inputs.any? { |p| File.file?(p) && File.mtime(p) > oldest_output_mtime }
+    return "source inputs are newer than generated Play assets"
+  end
+
+  tag, tag_time = latest_tag_commit_time(repo_root: repo_root)
+  if tag_time && oldest_output_mtime < tag_time
+    return "generated Play assets predate latest tag '#{tag}' (#{tag_time.utc.iso8601})"
+  end
+
+  nil
+end
+
+def warn_if_raw_captures_stale(repo_root: REPO_ROOT)
+  missing_tablets = %w[tablet_7in tablet_10in].select do |bucket|
+    Dir.glob(File.join(repo_root, "docs", "play_store_screenshots", bucket, "*.png")).empty?
+  end
+  unless missing_tablets.empty?
+    UI.important(
+      "Missing raw tablet captures (#{missing_tablets.join(', ')}); tablet screenshots are omitted. " \
+      "Run `fastlane android rebuild_screenshots` to capture all form factors."
+    )
+  end
+
+  tag, tag_time = latest_tag_commit_time(repo_root: repo_root)
+  return unless tag_time
+
+  raw_files = Dir.glob(File.join(repo_root, "docs", "screenshots", "*.webp")) +
+              Dir.glob(File.join(repo_root, "docs", "play_store_screenshots", "tablet_*", "*.png"))
+  return if raw_files.empty?
+
+  oldest_raw = raw_files.map { |p| File.mtime(p) }.min
+  if oldest_raw < tag_time
+    UI.important(
+      "Raw UI screenshots predate latest tag '#{tag}' (#{tag_time.utc.iso8601}). " \
+      "Run `fastlane android rebuild_screenshots` if UI changed."
+    )
+  end
+end
+
+def run_play_assets_script!(*args, repo_root: REPO_ROOT)
+  script = File.join(repo_root, "scripts", "update-play-store-screenshots")
+  ok = system(script, *args, chdir: repo_root)
+  UI.user_error!("#{script} #{args.join(' ')} failed") unless ok
+end
+
+def ensure_play_assets_fresh!(options = {}, repo_root: REPO_ROOT)
+  skip = options[:skip_asset_refresh] == true || options[:skip_asset_refresh].to_s == "true"
+  return if skip
+
+  force = options[:force_assets] == true || options[:force_assets].to_s == "true"
+  if force
+    UI.message("Refreshing Play Store assets (force_assets:true)...")
+    run_play_assets_script!("--only", "play_assets", repo_root: repo_root)
+  else
+    reason = play_assets_stale_reason(repo_root: repo_root)
+    if reason
+      UI.message("Refreshing Play Store assets (#{reason})...")
+      run_play_assets_script!("--only", "play_assets", repo_root: repo_root)
+    end
+  end
+
+  warn_if_raw_captures_stale(repo_root: repo_root)
+end
+
+platform :android do
+  desc "Render and compress Play Store icon, feature graphic, and captioned screenshots from existing captures"
+  lane :prepare_assets do
+    run_play_assets_script!("--only", "play_assets")
+    warn_if_raw_captures_stale
+  end
+
+  desc "Build debug APK, capture phone & tablet screenshots across AVDs, and render Play Store assets"
+  lane :rebuild_screenshots do
+    run_play_assets_script!("--build")
+  end
+
+  desc "Validate Play Store metadata and screenshots without publishing"
+  lane :validate_metadata do |options|
+    ensure_play_assets_fresh!(options)
+    supply(metadata_supply_opts(options, validate_only: true))
+  end
+
+  desc "Upload Play Store listing metadata, graphics, and screenshots"
+  lane :upload_metadata do |options|
+    ensure_play_assets_fresh!(options)
+    supply(metadata_supply_opts(options, validate_only: false))
+  end
+
+  desc "Build signed release Android App Bundle (.aab)"
+  lane :build_release do
+    with_signing_env do
+      gradle(
+        task: "bundle",
+        build_type: "Release",
+        flags: "--no-configuration-cache"
+      )
+    end
+  end
+
+  desc "Build (unless aab: is provided) and upload release AAB to a Play track (default: internal)"
+  lane :deploy do |options|
+    track = options[:track] || "internal"
+    skip_tag_check = options[:skip_tag_check] == true || options[:skip_tag_check].to_s == "true"
+    ensure_clean_exact_tag!(track) unless skip_tag_check
+
+    upload_meta = options[:upload_metadata] == true || options[:upload_metadata].to_s == "true"
+    ensure_play_assets_fresh!(options) if upload_meta
+
+    aab_path = options[:aab]
+    if aab_path.nil? || aab_path.to_s.strip.empty?
+      with_signing_env do
+        gradle(
+          task: "bundle",
+          build_type: "Release",
+          flags: "--no-configuration-cache"
+        )
+      end
+      aab_path = Actions.lane_context[SharedValues::GRADLE_AAB_OUTPUT_PATH]
+    else
+      aab_path = File.expand_path(aab_path, REPO_ROOT)
+    end
+
+    mapping_path = File.expand_path("app/build/outputs/mapping/release/mapping.txt", REPO_ROOT)
+
+    supply_opts = {
+      track: track,
+      aab: aab_path,
+      skip_upload_apk: true,
+      skip_upload_metadata: !upload_meta,
+      skip_upload_images: !upload_meta,
+      skip_upload_screenshots: !upload_meta
+    }.merge(play_auth_opts)
+    supply_opts[:mapping] = mapping_path if File.exist?(mapping_path)
+
+    supply(supply_opts)
+  end
+
+  desc "Promote an existing uploaded release between Play tracks (e.g. from:internal to:alpha)"
+  lane :promote do |options|
+    from = options[:from] || "internal"
+    to = options[:to]
+    if to.nil? || to.to_s.strip.empty?
+      UI.user_error!("Specify destination track, e.g. fastlane android promote from:internal to:alpha")
+    end
+
+    skip_tag_check = options[:skip_tag_check] == true || options[:skip_tag_check].to_s == "true"
+    upload_meta = options[:upload_metadata] == true || options[:upload_metadata].to_s == "true"
+    ensure_play_assets_fresh!(options) if upload_meta
+
+    auth = play_auth_opts
+    _track, vc = resolve_track_and_version_code(
+      auth,
+      explicit_track: from,
+      explicit_version_code: options[:version_code]
+    )
+
+    if TAG_REQUIRED_TRACKS.include?(to.to_s) && !skip_tag_check && vc.even?
+      UI.user_error!(
+        "Refusing to promote untagged/dirty versionCode #{vc} (even low bit) from '#{from}' to '#{to}'. " \
+        "Tag HEAD and build an exact-tag release (odd versionCode), or pass skip_tag_check:true for legacy pre-tag-bit builds."
+      )
+    end
+
+    supply_opts = {
+      track: from,
+      track_promote_to: to,
+      version_code: vc,
+      skip_upload_apk: true,
+      skip_upload_aab: true,
+      skip_upload_changelogs: true,
+      skip_upload_metadata: !upload_meta,
+      skip_upload_images: !upload_meta,
+      skip_upload_screenshots: !upload_meta
+    }.merge(auth)
+    supply_opts[:rollout] = options[:rollout].to_s unless options[:rollout].to_s.strip.empty?
+
+    supply(supply_opts)
+  end
+end

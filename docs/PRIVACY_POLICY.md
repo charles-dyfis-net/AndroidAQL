@@ -1,10 +1,10 @@
-# Privacy Policy for AirSlice: Portable Air Log (`net.dyfis.androidaql`)
+# Privacy Policy for AirSlice: CO2 & PM2.5 Air Log (`net.dyfis.androidaql`)
 
 **Effective Date:** November 25, 2026
 **Developer:** Charles Duffy (`charles-dyfis-net` / `dyfis.net`)
 
 ## 1. Overview — 100% Local On-Device Operation
-**AirSlice: Portable Air Log** (**AirSlice**) is an open-source, local-first Android application for recording, visualizing, slicing, and exporting environmental air quality telemetry (CO₂, PM2.5, PM10, temperature, and relative humidity) from a user-owned **Qingping Air Monitor Lite (`CGDN1`)** over Bluetooth Low Energy (BLE) strictly on-device.
+**AirSlice: CO2 & PM2.5 Air Log** (**AirSlice**) is an open-source, local-first Android application for recording, visualizing, slicing, and exporting environmental air quality telemetry (CO₂, PM2.5, PM10, temperature, and relative humidity) from a user-owned **Qingping Air Monitor Lite (`CGDN1`)** over Bluetooth Low Energy (BLE) strictly on-device.
 
 - **No Cloud Backend & No Data "Collected" Off-Device:** Under Google Play's Data Safety definition, no user data is "collected" or shared off-device—all sensor, Wi-Fi, location, and step processing and storage occur strictly locally on your phone, and AirSlice does not connect to any cloud server, Qingping Cloud, Xiaomi Home, or remote API.
 - **No Analytics, Telemetry, or Ads:** AirSlice contains zero analytics SDKs, crash-reporting trackers, advertising identifiers, or third-party data trackers.

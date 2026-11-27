@@ -1,0 +1,27 @@
+Record CO2, PM2.5, PM10, temperature, and humidity directly from your Qingping Air Monitor Lite (CGDN1) over Bluetooth—anywhere you carry it, with no Wi-Fi, cloud account, or MQTT server.
+
+Most tools for the Qingping Air Monitor Lite assume it sits at home on Wi-Fi. AirSlice turns it into a portable indoor air quality (IAQ) logger for commutes, offices, classrooms, clinics, cafes, and travel. Log continuous 15-second readings on your phone, slice trips into labeled segments, check ventilation (CO2) and filtration (PM2.5), and export or import Excel (.xlsx) workbooks.
+
+KEY FEATURES
+• Live Air Quality Dashboard: View real-time CO2 (ppm), PM2.5 and PM10 (µg/m³), temperature (°F/°C), humidity (%), and monitor battery (when supported), with a scrubbable 15-minute chart and live timestamped notes.
+• 3-Pane Trip Slicer: Inspect CO2 & PM2.5, temperature & humidity, and movement speed on one synchronized, zoomable timeline with an overview minimap and zero-scroll landscape mode.
+• Segments, Notes & Stats: Split trips into labeled legs (bus, train, coffee shop, clinic), trim start/end times, promote notes into splits, and view median (P50), P95, max, and average metrics per segment.
+• 14-Day Rolling History & Pinning: Continuous readings stay in a local 14-day buffer so you can carve a trip even if you forgot to start one—and pin trips to keep them permanently.
+• Excel (.xlsx) Export & Import: Share 4-sheet .xlsx workbooks (Trip, Segments, Notes, and 15-second Samples) for a full trip or any single segment, or import shared AirSlice .xlsx trips back into the app.
+• Custom Threshold Alerts: Optional notifications for high CO2, high PM2.5, and low monitor battery.
+• Battery-Friendly Auto-Resume: Link your monitor via Android Companion Device support so AirSlice sleeps without a persistent notification while the monitor is away and wakes automatically when it returns.
+
+TRIPS & BACKGROUND LOCATION
+AirSlice automatically records a trip when your monitor is nearby and you leave a Wi-Fi network saved as a Saved Place (such as Home or Office), or when you tap Start Trip manually. During a trip, AirSlice uses GPS and your phone's step sensor in the background—even when the app is closed or the screen is off—to log movement speed next to your air readings so you can separate transit legs from indoor stops. Tracking pauses automatically at Saved Places or when the monitor is out of range. Only movement speed and GPS accuracy are kept; raw coordinates and step counts are immediately discarded and never saved. Location is optional—you can decline it and still log air quality over Bluetooth.
+
+HARDWARE SUPPORT & DEMO MODE
+• Works passively out of the box with already-configured Qingping Air Monitor Lite (CGDN1) monitors without changing Wi-Fi or MQTT settings.
+• Finishes setup offline over Bluetooth in ~5 seconds on a new or reset CGDN1, restoring the normal CO2 screen for continuous broadcasts without Wi-Fi or a vendor app.
+• Also reads unencrypted BTHome v2 broadcasts from compatible sensors and custom firmware (such as ESPHome on CGDN1, including battery level).
+• No monitor yet? Enable built-in Demo Data Mode in Help or Settings to try live charts and a sample trip without hardware, or import a shared .xlsx trip.
+
+PRIVACY & OPEN SOURCE
+Everything stays on your phone—no accounts, cloud sync, analytics, or ads. Unpinned 14-day data ages out automatically, and nothing leaves your device unless you share an .xlsx export or diagnostic log yourself.
+
+Open source: github.com/charles-dyfis-net/AndroidAQL
+Not affiliated with or endorsed by Qingping; the name is used only to identify compatible hardware.

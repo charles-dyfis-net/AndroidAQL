@@ -265,6 +265,54 @@ def capture_tablet(
             print(f"Updated {out_dir / dst_name}")
 
 
+def _font_candidates(bold: bool) -> list[str]:
+    nix_font_dir = os.environ.get("AIRSLICE_FONT_DIR", "")
+    candidates: list[str] = []
+    if bold:
+        candidates.extend(
+            [
+                "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+                "/System/Library/Fonts/SFNS.ttf",
+                "/System/Library/Fonts/HelveticaNeue.ttc",
+            ]
+        )
+        if nix_font_dir:
+            candidates.extend(
+                [
+                    str(Path(nix_font_dir) / "DejaVuSans-Bold.ttf"),
+                    str(Path(nix_font_dir) / "dejavu" / "DejaVuSans-Bold.ttf"),
+                ]
+            )
+        candidates.extend(
+            [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+            ]
+        )
+    else:
+        candidates.extend(
+            [
+                "/System/Library/Fonts/SFNS.ttf",
+                "/System/Library/Fonts/Supplemental/Arial.ttf",
+                "/System/Library/Fonts/HelveticaNeue.ttc",
+            ]
+        )
+        if nix_font_dir:
+            candidates.extend(
+                [
+                    str(Path(nix_font_dir) / "DejaVuSans.ttf"),
+                    str(Path(nix_font_dir) / "dejavu" / "DejaVuSans.ttf"),
+                ]
+            )
+        candidates.extend(
+            [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            ]
+        )
+    return candidates
+
+
 def _load_font(candidates: list[str], size: int, index: int = 0):
     from PIL import ImageFont
 
@@ -277,12 +325,265 @@ def _load_font(candidates: list[str], size: int, index: int = 0):
     return ImageFont.load_default()
 
 
+def _measure_rich_text(draw, text: str, font, sub_font) -> float:
+    parts = text.split("CO₂")
+    total = 0.0
+    for idx, part in enumerate(parts):
+        if part:
+            total += draw.textlength(part, font=font)
+        if idx < len(parts) - 1:
+            total += draw.textlength("CO", font=font) + draw.textlength("2", font=sub_font)
+    return total
+
+
+def _draw_rich_text(draw, xy: tuple[float, float], text: str, font, sub_font, fill, sub_offset_y: int) -> None:
+    cx, cy = xy
+    parts = text.split("CO₂")
+    for idx, part in enumerate(parts):
+        if part:
+            draw.text((cx, cy), part, font=font, fill=fill)
+            cx += draw.textlength(part, font=font)
+        if idx < len(parts) - 1:
+            draw.text((cx, cy), "CO", font=font, fill=fill)
+            cx += draw.textlength("CO", font=font)
+            draw.text((cx, cy + sub_offset_y), "2", font=sub_font, fill=fill)
+            cx += draw.textlength("2", font=sub_font)
+
+
+_WARNED_MISSING_OPTIMIZERS = False
+
+
+def _find_optional_tool(name: str) -> str | None:
+    env_override = os.environ.get(f"ANDROID_AQL_{name.upper()}")
+    if env_override:
+        return env_override
+    search_path = os.pathsep.join([os.environ.get("PATH", ""), *EXTRA_BIN_DIRS])
+    return shutil.which(name, path=search_path)
+
+
+def _optimize_png(path: Path, *, lossy: bool) -> None:
+    global _WARNED_MISSING_OPTIMIZERS
+    pngquant = _find_optional_tool("pngquant") if lossy else None
+    oxipng = _find_optional_tool("oxipng")
+
+    if (lossy and not pngquant) or not oxipng:
+        if not _WARNED_MISSING_OPTIMIZERS:
+            missing = []
+            if lossy and not pngquant:
+                missing.append("pngquant")
+            if not oxipng:
+                missing.append("oxipng")
+            print(
+                f"Note: {', '.join(missing)} not found; keeping Pillow PNG compression "
+                "(run inside 'nix develop' for optimal compression).",
+                file=sys.stderr,
+            )
+            _WARNED_MISSING_OPTIMIZERS = True
+
+    if lossy and pngquant:
+        tmp_out = path.with_name(f".{path.stem}.pq.png")
+        try:
+            proc = subprocess.run(
+                [
+                    pngquant,
+                    "--quality=80-95",
+                    "--speed",
+                    "1",
+                    "--strip",
+                    "--force",
+                    "--output",
+                    str(tmp_out),
+                    "--",
+                    str(path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if proc.returncode == 0 and tmp_out.is_file():
+                if tmp_out.stat().st_size < path.stat().st_size:
+                    tmp_out.replace(path)
+                else:
+                    tmp_out.unlink(missing_ok=True)
+            elif proc.returncode not in (98, 99):
+                detail = (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip()
+                print(f"Warning: pngquant failed on {path.name}: {detail}", file=sys.stderr)
+        finally:
+            tmp_out.unlink(missing_ok=True)
+
+    if oxipng:
+        run_cmd([oxipng, "-o", "4", "--strip", "safe", "--quiet", str(path)], capture=True)
+
+
+def _fastlane_images_dir(root: Path) -> Path:
+    return root / "fastlane" / "metadata" / "android" / "en-US" / "images"
+
+
+def _android_color_to_svg(color_str: str) -> tuple[str, float | None]:
+    raw = color_str.strip()
+    if not raw.startswith("#"):
+        return (raw, None)
+    hex_part = raw[1:]
+    if len(hex_part) == 6:
+        return (f"#{hex_part}", None)
+    if len(hex_part) == 8:
+        alpha = int(hex_part[0:2], 16)
+        if alpha == 0:
+            return ("none", None)
+        rgb = f"#{hex_part[2:8]}"
+        return (rgb, None if alpha == 255 else round(alpha / 255.0, 4))
+    return (raw, None)
+
+
+def _vector_drawable_to_svg_parts(xml_path: Path, grad_prefix: str) -> tuple[list[str], list[str]]:
+    import xml.etree.ElementTree as ET
+    from xml.sax.saxutils import escape
+
+    ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
+    AAPT_NS = "{http://schemas.android.com/aapt}"
+
+    tree = ET.parse(xml_path)
+    root_el = tree.getroot()
+    defs: list[str] = []
+    elements: list[str] = []
+    grad_counter = 0
+
+    for child in root_el:
+        if child.tag != "path":
+            continue
+        path_data = child.attrib.get(f"{ANDROID_NS}pathData")
+        if not path_data:
+            continue
+
+        attrs = [f'd="{escape(path_data)}"']
+        fill_attr = child.attrib.get(f"{ANDROID_NS}fillColor")
+        if fill_attr:
+            fill_rgb, fill_op = _android_color_to_svg(fill_attr)
+            attrs.append(f'fill="{escape(fill_rgb)}"')
+            if fill_op is not None:
+                attrs.append(f'fill-opacity="{fill_op}"')
+        else:
+            # Check for <aapt:attr name="android:fillColor"><gradient ...>
+            grad_id = None
+            for sub in child:
+                if sub.tag == f"{AAPT_NS}attr" and sub.attrib.get("name") == "android:fillColor":
+                    grad = sub.find("gradient")
+                    if grad is not None and grad.attrib.get(f"{ANDROID_NS}type", "linear") == "linear":
+                        grad_id = f"{grad_prefix}_grad_{grad_counter}"
+                        grad_counter += 1
+                        x1 = grad.attrib.get(f"{ANDROID_NS}startX", "0")
+                        y1 = grad.attrib.get(f"{ANDROID_NS}startY", "0")
+                        x2 = grad.attrib.get(f"{ANDROID_NS}endX", "108")
+                        y2 = grad.attrib.get(f"{ANDROID_NS}endY", "108")
+                        stops = []
+                        for item in grad.findall("item"):
+                            col, op = _android_color_to_svg(item.attrib.get(f"{ANDROID_NS}color", "#000000"))
+                            off = item.attrib.get(f"{ANDROID_NS}offset", "0")
+                            stop_attrs = [f'offset="{escape(off)}"', f'stop-color="{escape(col)}"']
+                            if op is not None:
+                                stop_attrs.append(f'stop-opacity="{op}"')
+                            stops.append(f'      <stop {" ".join(stop_attrs)} />')
+                        defs.append(
+                            f'    <linearGradient id="{grad_id}" gradientUnits="userSpaceOnUse" '
+                            f'x1="{escape(x1)}" y1="{escape(y1)}" x2="{escape(x2)}" y2="{escape(y2)}">\n'
+                            + "\n".join(stops)
+                            + "\n    </linearGradient>"
+                        )
+            if grad_id:
+                attrs.append(f'fill="url(#{grad_id})"')
+
+        stroke_attr = child.attrib.get(f"{ANDROID_NS}strokeColor")
+        if stroke_attr:
+            stroke_rgb, stroke_op = _android_color_to_svg(stroke_attr)
+            attrs.append(f'stroke="{escape(stroke_rgb)}"')
+            if stroke_op is not None:
+                attrs.append(f'stroke-opacity="{stroke_op}"')
+        for android_key, svg_key in (
+            ("strokeWidth", "stroke-width"),
+            ("strokeLineCap", "stroke-linecap"),
+            ("strokeLineJoin", "stroke-linejoin"),
+        ):
+            val = child.attrib.get(f"{ANDROID_NS}{android_key}")
+            if val:
+                attrs.append(f'{svg_key}="{escape(val)}"')
+
+        elements.append(f'  <path {" ".join(attrs)} />')
+
+    return defs, elements
+
+
+def _render_icon_png(root: Path, out_path: Path) -> Path:
+    from PIL import Image
+
+    resvg = _find_optional_tool("resvg")
+    bg_xml = root / "app" / "src" / "main" / "res" / "drawable" / "ic_launcher_background.xml"
+    fg_xml = root / "app" / "src" / "main" / "res" / "drawable" / "ic_launcher_foreground.xml"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if resvg and bg_xml.is_file() and fg_xml.is_file():
+        bg_defs, bg_elems = _vector_drawable_to_svg_parts(bg_xml, "bg")
+        fg_defs, fg_elems = _vector_drawable_to_svg_parts(fg_xml, "fg")
+        all_defs = bg_defs + fg_defs
+        svg_lines = [
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="18 18 72 72" width="512" height="512">',
+        ]
+        if all_defs:
+            svg_lines.append("  <defs>")
+            svg_lines.extend(all_defs)
+            svg_lines.append("  </defs>")
+        svg_lines.extend(bg_elems)
+        svg_lines.extend(fg_elems)
+        svg_lines.append("</svg>\n")
+
+        with tempfile.TemporaryDirectory(prefix="aql_icon_") as td:
+            svg_path = Path(td) / "ic_launcher.svg"
+            svg_path.write_text("\n".join(svg_lines), encoding="utf-8")
+            run_cmd([resvg, str(svg_path), str(out_path)], capture=True)
+        _optimize_png(out_path, lossy=False)
+        return out_path
+
+    fallback = root / "docs" / "play_store_screenshots" / "app_icon_512.webp"
+    if fallback.is_file():
+        Image.open(fallback).convert("RGBA").resize((512, 512), Image.Resampling.LANCZOS).save(
+            out_path, format="PNG", optimize=True
+        )
+        _optimize_png(out_path, lossy=False)
+        return out_path
+
+    raise RuntimeError(
+        "Cannot render icon.png: 'resvg' was not found (run inside 'nix develop') "
+        f"and fallback {fallback} does not exist."
+    )
+
+
+def _make_slate_gradient(width: int, height: int):
+    from PIL import Image
+
+    gw, gh = 128, 128
+    small = Image.new("RGBA", (gw, gh), (11, 17, 32, 255))
+    px = small.load()
+    for y in range(gh):
+        ty = y / float(gh - 1)
+        for x in range(gw):
+            tx = x / float(gw - 1)
+            t = 0.55 * tx + 0.45 * ty
+            r = int(10 + 11 * t)
+            g = int(17 + 19 * t)
+            b = int(32 + 28 * t)
+            px[x, y] = (r, g, b, 255)
+    return small.resize((width, height), Image.Resampling.BILINEAR)
+
+
 def render_feature_graphic_in_process(root: Path) -> None:
     from PIL import Image, ImageDraw, ImageFilter
 
     width, height = 1024, 500
     play_dir = root / "docs" / "play_store_screenshots"
-    icon_path = play_dir / "app_icon_512.webp"
+    fastlane_images = _fastlane_images_dir(root)
+    icon_path = fastlane_images / "icon.png"
+    if not icon_path.is_file():
+        _render_icon_png(root, icon_path)
     trips_candidates = [
         play_dir / "tablet_10in" / "05_trips_landscape.png",
         play_dir / "tablet_7in" / "05_trips_landscape.png",
@@ -293,17 +594,7 @@ def render_feature_graphic_in_process(root: Path) -> None:
         raise RuntimeError("No landscape Trips screenshot found to embed in feature_graphic.png")
 
     # Background vertical-diagonal dark slate gradient
-    base = Image.new("RGBA", (width, height), (11, 17, 32, 255))
-    px = base.load()
-    for y in range(height):
-        ty = y / float(height - 1)
-        for x in range(width):
-            tx = x / float(width - 1)
-            t = 0.55 * tx + 0.45 * ty
-            r = int(10 + 11 * t)
-            g = int(17 + 19 * t)
-            b = int(32 + 28 * t)
-            px[x, y] = (r, g, b, 255)
+    base = _make_slate_gradient(width, height)
 
     # Subtle ambient sky-blue glow behind the tablet mockup
     glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -314,16 +605,8 @@ def render_feature_graphic_in_process(root: Path) -> None:
 
     draw = ImageDraw.Draw(base)
 
-    bold_fonts = [
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        "/System/Library/Fonts/SFNS.ttf",
-        "/System/Library/Fonts/HelveticaNeue.ttc",
-    ]
-    reg_fonts = [
-        "/System/Library/Fonts/SFNS.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/HelveticaNeue.ttc",
-    ]
+    bold_fonts = _font_candidates(bold=True)
+    reg_fonts = _font_candidates(bold=False)
     title_font = _load_font(bold_fonts, 48)
     subtitle_font = _load_font(reg_fonts, 21)
     pill_font = _load_font(bold_fonts, 16)
@@ -350,31 +633,28 @@ def render_feature_graphic_in_process(root: Path) -> None:
     draw.rounded_rectangle([44, 240, 88, 244], radius=2, fill=(56, 189, 248, 255))
 
     # Feature pills (2x2), auto-sized to text width for symmetric padding
-    def _measure_pill(special: str | None, label: str) -> int:
-        if special == "CO2_SUB":
-            tw = draw.textlength("CO", font=pill_font) + draw.textlength("2", font=pill_sub_font) + draw.textlength(label, font=pill_font)
-        else:
-            tw = draw.textlength(label, font=pill_font)
+    def _measure_pill(label: str) -> int:
+        tw = _measure_rich_text(draw, label, pill_font, pill_sub_font)
         return int(round(30 + tw + 18))
 
     row1_pills = [
-        ((56, 189, 248, 255), "CO2_SUB", " & PM2.5"),
-        ((251, 146, 60, 255), None, "Temp & RH"),
+        ((56, 189, 248, 255), "CO₂ & PM2.5"),
+        ((251, 146, 60, 255), "Temp & RH"),
     ]
     row2_pills = [
-        ((74, 222, 128, 255), None, "Offline 14d Ring"),
-        ((167, 139, 250, 255), None, "XLSX Export"),
+        ((74, 222, 128, 255), "Offline • No Cloud"),
+        ((167, 139, 250, 255), "XLSX Export"),
     ]
     pills = []
     for row_idx, row in enumerate((row1_pills, row2_pills)):
         cx = 44
         cy = 272 + row_idx * 52
-        for dot_color, special, label in row:
-            pw = _measure_pill(special, label)
-            pills.append(((cx, cy), pw, dot_color, special, label))
+        for dot_color, label in row:
+            pw = _measure_pill(label)
+            pills.append(((cx, cy), pw, dot_color, label))
             cx += pw + 12
 
-    for (px0, py0), pw, dot_color, special, label in pills:
+    for (px0, py0), pw, dot_color, label in pills:
         ph = 38
         draw.rounded_rectangle(
             [px0, py0, px0 + pw, py0 + ph],
@@ -384,16 +664,7 @@ def render_feature_graphic_in_process(root: Path) -> None:
             width=1,
         )
         draw.ellipse([px0 + 13, py0 + 15, px0 + 21, py0 + 23], fill=dot_color)
-        tx = px0 + 30
-        ty = py0 + 9
-        if special == "CO2_SUB":
-            draw.text((tx, ty), "CO", font=pill_font, fill=(226, 232, 240, 255))
-            co_w = draw.textlength("CO", font=pill_font)
-            draw.text((tx + co_w, ty + 6), "2", font=pill_sub_font, fill=(226, 232, 240, 255))
-            sub_w = draw.textlength("2", font=pill_sub_font)
-            draw.text((tx + co_w + sub_w, ty), label, font=pill_font, fill=(226, 232, 240, 255))
-        else:
-            draw.text((tx, ty), label, font=pill_font, fill=(226, 232, 240, 255))
+        _draw_rich_text(draw, (px0 + 30, py0 + 9), label, pill_font, pill_sub_font, (226, 232, 240, 255), 6)
 
     # Right side: rounded tablet bezel framing live landscape Trips screenshot
     src = Image.open(trips_path).convert("RGBA")
@@ -438,12 +709,327 @@ def render_feature_graphic_in_process(root: Path) -> None:
     ImageDraw.Draw(screen_mask).rounded_rectangle([0, 0, screen_w - 1, screen_h - 1], radius=12, fill=255)
     base.paste(resized, (bezel_x0 + pad, bezel_y0 + pad), screen_mask)
 
+    rgb = base.convert("RGB")
     out_path = play_dir / "feature_graphic.png"
-    base.convert("RGB").save(out_path, format="PNG", optimize=True)
+    rgb.save(out_path, format="PNG", optimize=True)
+    _optimize_png(out_path, lossy=True)
     print(f"Saved {out_path} ({out_path.stat().st_size:,} bytes, {width}x{height})")
 
+    fastlane_images.mkdir(parents=True, exist_ok=True)
+    fastlane_fg = fastlane_images / "featureGraphic.png"
+    shutil.copy2(out_path, fastlane_fg)
+    print(f"Saved {fastlane_fg} ({fastlane_fg.stat().st_size:,} bytes, {width}x{height})")
 
-def render_feature_graphic(root: Path) -> None:
+
+def _find_settings_crop_y(im) -> int:
+    """Find the dark background gap separating the Places & Trips card from Background Logging."""
+    rgb = im.convert("RGB")
+    w, h = rgb.size
+    px = rgb.load()
+    search_start = min(h - 1, 1750)
+    search_end = min(h, 2150)
+    best_band: tuple[int, int] | None = None
+    in_band = False
+    band_start = 0
+    for y in range(search_start, search_end):
+        is_bg = all(
+            abs(r - 11) <= 6 and abs(g - 17) <= 6 and abs(b - 32) <= 6
+            for r, g, b in (px[x, y] for x in range(40, w - 40, 10))
+        )
+        if is_bg:
+            if not in_band:
+                in_band = True
+                band_start = y
+        elif in_band:
+            in_band = False
+            if best_band is None or (y - band_start) > (best_band[1] - best_band[0]):
+                best_band = (band_start, y)
+    if best_band is not None and (best_band[1] - best_band[0]) >= 16:
+        return (best_band[0] + best_band[1]) // 2
+    return min(h, 1858)
+
+
+def _render_single_captioned_screenshot(
+    src_path: Path,
+    out_path: Path,
+    *,
+    canvas_w: int,
+    canvas_h: int,
+    headline: str,
+    subtitle: str,
+    kind: str,
+    is_phone: bool,
+    scale: float,
+) -> None:
+    from PIL import Image, ImageDraw, ImageFilter
+
+    src = Image.open(src_path).convert("RGBA")
+    sw, sh = src.size
+    is_landscape = canvas_w > canvas_h
+    if kind == "settings" and is_phone:
+        crop_y = _find_settings_crop_y(src)
+        src = src.crop((0, 0, sw, crop_y))
+    elif is_phone and is_landscape:
+        # Phone landscape (2400x1080): status bar ends ~y=54, gesture pill starts ~y=1044
+        crop_top = min(sh // 4, max(0, int(round(sh * 0.063))))
+        crop_bot = max(crop_top + 1, min(sh, int(round(sh * 0.954))))
+        src = src.crop((0, crop_top, sw, crop_bot))
+    elif is_phone:
+        # Phone portrait (1080x2400): status bar ends ~y=77, gesture pill starts ~y=2364
+        crop_top = min(sh // 4, max(0, int(round(sh * 0.042))))
+        crop_bot = max(crop_top + 1, min(sh, int(round(sh * 0.975))))
+        src = src.crop((0, crop_top, sw, crop_bot))
+    else:
+        # Tablet portrait/landscape: status bar ends ~y=37, gesture pill starts ~36px from bottom
+        crop_top = min(sh // 4, 48)
+        crop_bot = max(crop_top + 1, sh - 48)
+        src = src.crop((0, crop_top, sw, crop_bot))
+    cw, ch = src.size
+
+    base = _make_slate_gradient(canvas_w, canvas_h)
+    glow = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(glow)
+    glow_draw.ellipse(
+        [
+            int(canvas_w * 0.08),
+            int(canvas_h * 0.16),
+            int(canvas_w * 0.92),
+            int(canvas_h * 0.95),
+        ],
+        fill=(14, 165, 233, 30),
+    )
+    glow = glow.filter(ImageFilter.GaussianBlur(radius=int(round(64 * scale))))
+    base = Image.alpha_composite(base, glow)
+
+    draw = ImageDraw.Draw(base)
+    bold_fonts = _font_candidates(bold=True)
+    reg_fonts = _font_candidates(bold=False)
+
+    is_landscape = canvas_w > canvas_h
+    title_size = int(round((50 if is_landscape else 54) * scale))
+    sub_size = int(round((28 if is_landscape else 30) * scale))
+    title_font = _load_font(bold_fonts, title_size)
+    title_sub_font = _load_font(bold_fonts, max(12, int(round(title_size * 0.68))))
+    sub_font = _load_font(reg_fonts, sub_size)
+    sub_sub_font = _load_font(reg_fonts, max(10, int(round(sub_size * 0.68))))
+
+    title_y = int(round((40 if is_landscape else 60) * scale))
+    sub_y = int(round((106 if is_landscape else 132) * scale))
+    bar_y = int(round((152 if is_landscape else 184) * scale))
+    bezel_top = int(round((184 if is_landscape else 224) * scale))
+    bottom_margin = int(round(44 * scale))
+    side_margin = int(round((72 if is_landscape else 64) * scale))
+
+    title_w = _measure_rich_text(draw, headline, title_font, title_sub_font)
+    _draw_rich_text(
+        draw,
+        ((canvas_w - title_w) / 2.0, title_y),
+        headline,
+        title_font,
+        title_sub_font,
+        (248, 250, 252, 255),
+        int(round(title_size * 0.34)),
+    )
+
+    sub_w = _measure_rich_text(draw, subtitle, sub_font, sub_sub_font)
+    _draw_rich_text(
+        draw,
+        ((canvas_w - sub_w) / 2.0, sub_y),
+        subtitle,
+        sub_font,
+        sub_sub_font,
+        (203, 213, 225, 255),
+        int(round(sub_size * 0.34)),
+    )
+
+    bar_w = int(round(64 * scale))
+    bar_h = max(3, int(round(5 * scale)))
+    draw.rounded_rectangle(
+        [(canvas_w - bar_w) // 2, bar_y, (canvas_w + bar_w) // 2, bar_y + bar_h],
+        radius=max(2, bar_h // 2),
+        fill=(56, 189, 248, 255),
+    )
+
+    pad = int(round(12 * scale))
+    max_screen_w = canvas_w - 2 * side_margin - 2 * pad
+    if kind == "settings" and is_phone:
+        max_screen_w = min(max_screen_w, int(round(820 * scale)))
+    max_screen_h = canvas_h - bezel_top - bottom_margin - 2 * pad
+
+    fit_scale = min(max_screen_w / cw, max_screen_h / ch)
+    screen_w = int(round(cw * fit_scale))
+    screen_h = int(round(ch * fit_scale))
+    bezel_w = screen_w + 2 * pad
+    bezel_h = screen_h + 2 * pad
+    bezel_x0 = (canvas_w - bezel_w) // 2
+    bezel_y0 = bezel_top + ((canvas_h - bezel_top - bottom_margin) - bezel_h) // 2
+
+    bezel_radius = int(round((24 if is_landscape else 34) * scale))
+    screen_radius = int(round((16 if is_landscape else 24) * scale))
+
+    shadow = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    shadow_dx = int(round(4 * scale))
+    shadow_dy = int(round(12 * scale))
+    ImageDraw.Draw(shadow).rounded_rectangle(
+        [
+            bezel_x0 + shadow_dx,
+            bezel_y0 + shadow_dy,
+            bezel_x0 + bezel_w + shadow_dx,
+            bezel_y0 + bezel_h + shadow_dy,
+        ],
+        radius=bezel_radius + 2,
+        fill=(0, 0, 0, 145),
+    )
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=int(round(16 * scale))))
+    base = Image.alpha_composite(base, shadow)
+
+    frame_draw = ImageDraw.Draw(base)
+    frame_draw.rounded_rectangle(
+        [bezel_x0, bezel_y0, bezel_x0 + bezel_w, bezel_y0 + bezel_h],
+        radius=bezel_radius,
+        fill=(15, 23, 42, 255),
+        outline=(51, 65, 85, 255),
+        width=max(2, int(round(2 * scale))),
+    )
+
+    resized = src.resize((screen_w, screen_h), Image.Resampling.LANCZOS)
+    screen_mask = Image.new("L", (screen_w, screen_h), 0)
+    ImageDraw.Draw(screen_mask).rounded_rectangle(
+        [0, 0, screen_w - 1, screen_h - 1],
+        radius=screen_radius,
+        fill=255,
+    )
+    base.paste(resized, (bezel_x0 + pad, bezel_y0 + pad), screen_mask)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    base.convert("RGB").save(out_path, format="PNG", optimize=True)
+    _optimize_png(out_path, lossy=True)
+    print(f"Saved {out_path} ({out_path.stat().st_size:,} bytes, {canvas_w}x{canvas_h})")
+
+
+def render_play_assets_in_process(root: Path) -> None:
+    play_dir = root / "docs" / "play_store_screenshots"
+    fastlane_images = _fastlane_images_dir(root)
+    fastlane_images.mkdir(parents=True, exist_ok=True)
+
+    # 1. App icon (512x512 lossless PNG rendered from Android adaptive vector drawables)
+    icon_out = fastlane_images / "icon.png"
+    _render_icon_png(root, icon_out)
+    print(f"Saved {icon_out} ({icon_out.stat().st_size:,} bytes, 512x512)")
+
+    # 2. Feature graphic (saved to both docs/play_store_screenshots/ and fastlane/)
+    render_feature_graphic_in_process(root)
+
+    # 3. Captioned screenshots across phone, 7-inch tablet, and 10-inch tablet
+    specs = [
+        (
+            "01_now_dashboard.png",
+            "now_dashboard.webp",
+            "01_now_dashboard.png",
+            "Live CO₂ & PM2.5 Over Bluetooth",
+            "No Wi-Fi, cloud account, or MQTT server required",
+            "portrait",
+        ),
+        (
+            "02_trips_view_mode.png",
+            "trips_view_mode.webp",
+            "02_trips_view_mode.png",
+            "3-Pane Trip Timeline & Stats",
+            "Track CO₂, PM2.5, temp, humidity, and movement speed",
+            "portrait",
+        ),
+        (
+            "03_trips_edit_mode.png",
+            "trips_edit_mode.webp",
+            "03_trips_edit_mode.png",
+            "Slice Trips Into Labeled Legs",
+            "Drag dividers, nudge ±15s, and drop timeline notes",
+            "portrait",
+        ),
+        (
+            "04_trips_segment_edit.png",
+            "trips_segment_edit.webp",
+            "04_trips_segment_edit.png",
+            "Label Segments & Export Excel",
+            "Quick presets, notes, pinning, and 4-sheet .xlsx files",
+            "portrait",
+        ),
+        (
+            "05_trips_landscape.png",
+            "trips_landscape.webp",
+            "05_trips_landscape.png",
+            "Zero-Scroll Landscape Slicer",
+            "Full trip overview minimap with fine boundary control",
+            "landscape",
+        ),
+        (
+            "06_settings.png",
+            "settings.webp",
+            "06_settings.png",
+            "100% Local & Battery-Friendly",
+            "Saved Wi-Fi places, auto-resume, and custom alerts",
+            "settings",
+        ),
+    ]
+
+    buckets = [
+        (
+            "phoneScreenshots",
+            root / "docs" / "screenshots",
+            True,
+            (1080, 1920),
+            (1920, 1080),
+            1.0,
+        ),
+        (
+            "sevenInchScreenshots",
+            play_dir / "tablet_7in",
+            False,
+            (1200, 1920),
+            (1920, 1200),
+            1.04,
+        ),
+        (
+            "tenInchScreenshots",
+            play_dir / "tablet_10in",
+            False,
+            (1600, 2560),
+            (2560, 1600),
+            1.38,
+        ),
+    ]
+
+    for bucket_name, src_dir, is_phone, port_size, land_size, scale in buckets:
+        if not src_dir.is_dir():
+            print(
+                f"Skipping {bucket_name}: no raw captures in {src_dir} "
+                "(run --only tablet_7in / tablet_10in to capture).",
+                file=sys.stderr,
+            )
+            continue
+        out_dir = fastlane_images / bucket_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for stale in out_dir.glob("*.png"):
+            stale.unlink()
+        for out_name, phone_src, tablet_src, headline, subtitle, kind in specs:
+            src_path = src_dir / (phone_src if is_phone else tablet_src)
+            if not src_path.is_file():
+                raise RuntimeError(f"Source screenshot not found: {src_path}")
+            canvas_w, canvas_h = land_size if kind == "landscape" else port_size
+            _render_single_captioned_screenshot(
+                src_path,
+                out_dir / out_name,
+                canvas_w=canvas_w,
+                canvas_h=canvas_h,
+                headline=headline,
+                subtitle=subtitle,
+                kind=kind,
+                is_phone=is_phone,
+                scale=scale,
+            )
+
+
+def _run_pillow_subcommand(root: Path, flag: str, in_process_fn) -> None:
     try:
         import PIL  # noqa: F401
     except ImportError:
@@ -458,22 +1044,30 @@ def render_feature_graphic(root: Path) -> None:
                 "pillow",
                 "python3",
                 str(Path(__file__).resolve()),
-                "--render-feature-graphic",
+                flag,
             ],
             cwd=root,
         )
         return
-    render_feature_graphic_in_process(root)
+    in_process_fn(root)
+
+
+def render_feature_graphic(root: Path) -> None:
+    _run_pillow_subcommand(root, "--render-feature-graphic", render_feature_graphic_in_process)
+
+
+def render_play_assets(root: Path) -> None:
+    _run_pillow_subcommand(root, "--render-play-assets", render_play_assets_in_process)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Rebuild AirSlice README WebPs, Play Store tablet PNGs, and feature_graphic.png."
+        description="Rebuild AirSlice README WebPs, Play Store tablet PNGs, feature graphic, and Fastlane assets."
     )
     parser.add_argument("--build", action="store_true", help="Build app-debug.apk via ./gradlew assembleDebug first")
     parser.add_argument(
         "--only",
-        choices=("all", "phone", "tablet_10in", "tablet_7in", "feature_graphic"),
+        choices=("all", "phone", "tablet_10in", "tablet_7in", "feature_graphic", "play_assets"),
         default="all",
         help="Rebuild only a specific asset group (defaults to all)",
     )
@@ -481,19 +1075,24 @@ def main() -> int:
     parser.add_argument("--tablet10-avd", default="Tablet_10in", help="10-inch tablet AVD name (default: Tablet_10in)")
     parser.add_argument("--tablet7-avd", default="Tablet_7in", help="7-inch tablet AVD name (default: Tablet_7in)")
     parser.add_argument("--render-feature-graphic", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--render-play-assets", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     root = repo_root()
     if args.render_feature_graphic:
         render_feature_graphic_in_process(root)
         return 0
+    if args.render_play_assets:
+        render_play_assets_in_process(root)
+        return 0
 
+    no_avd_only = args.only in ("feature_graphic", "play_assets")
     apk_path = root / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
-    if args.only != "feature_graphic" and (args.build or not apk_path.is_file()):
+    if not no_avd_only and (args.build or not apk_path.is_file()):
         print("Building debug APK...")
         run_cmd([str(root / "gradlew"), "assembleDebug"], cwd=root)
 
-    if args.only != "feature_graphic":
+    if not no_avd_only:
         adb = resolve_adb()
         emulator_bin = resolve_emulator()
 
@@ -532,7 +1131,9 @@ def main() -> int:
                 ),
             )
 
-    if args.only in ("all", "feature_graphic"):
+    if args.only in ("all", "play_assets"):
+        render_play_assets(root)
+    elif args.only == "feature_graphic":
         render_feature_graphic(root)
 
     return 0

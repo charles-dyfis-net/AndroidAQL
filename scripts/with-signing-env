@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""
+Decrypt a GPG-encrypted `keystore.properties.gpg` in memory via `gpg-agent`
+(supporting YubiKey-backed keys) and exec a command with `ANDROID_KEYSTORE_*`
+environment variables populated—without writing plaintext secrets to disk.
+
+Usage:
+    ./scripts/with-signing-env [--file <path>] [--] <command...>
+Example:
+    ./scripts/with-signing-env ./gradlew bundleRelease --no-configuration-cache
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+PROP_TO_ENV = {
+    "storeFile": "ANDROID_KEYSTORE_FILE",
+    "storePassword": "ANDROID_KEYSTORE_PASSWORD",
+    "keyAlias": "ANDROID_KEYSTORE_ALIAS",
+    "keyPassword": "ANDROID_KEY_PASSWORD",
+}
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _unescape_prop(text: str) -> str:
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text):
+            nxt = text[i + 1]
+            if nxt == "n":
+                out.append("\n")
+            elif nxt == "r":
+                out.append("\r")
+            elif nxt == "t":
+                out.append("\t")
+            else:
+                out.append(nxt)
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def parse_java_properties(text: str) -> dict[str, str]:
+    """Parse Java .properties lines cleanly, preserving '=' or ':' inside passwords."""
+    props: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        stripped = raw_line.lstrip()
+        if not stripped or stripped[0] in ("#", "!"):
+            continue
+        sep_idx = -1
+        escaped = False
+        for idx, ch in enumerate(stripped):
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch in ("=", ":"):
+                sep_idx = idx
+                break
+        if sep_idx == -1:
+            key = _unescape_prop(stripped.strip())
+            val = ""
+        else:
+            key = _unescape_prop(stripped[:sep_idx].strip())
+            val = _unescape_prop(stripped[sep_idx + 1 :].lstrip())
+        if key:
+            props[key] = val
+    return props
+
+
+def gpg_decrypt(path: Path) -> str:
+    if not path.is_file():
+        raise SystemExit(f"Encrypted properties file not found: {path}")
+    env = os.environ.copy()
+    if not env.get("GPG_TTY") and sys.stdin.isatty():
+        try:
+            env["GPG_TTY"] = os.ttyname(0)
+        except OSError:
+            pass
+    proc = subprocess.run(
+        ["gpg", "--quiet", "--decrypt", str(path)],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or f"gpg exited with code {proc.returncode}"
+        raise SystemExit(f"Failed to decrypt {path}: {detail}")
+    return proc.stdout
+
+
+def main(argv: list[str]) -> int:
+    gpg_file_arg: str | None = None
+    idx = 0
+    while idx < len(argv):
+        arg = argv[idx]
+        if arg == "--":
+            idx += 1
+            break
+        if arg == "--file":
+            if idx + 1 >= len(argv):
+                raise SystemExit("--file requires a path argument")
+            gpg_file_arg = argv[idx + 1]
+            idx += 2
+            continue
+        if arg.startswith("--file="):
+            gpg_file_arg = arg.split("=", 1)[1]
+            idx += 1
+            continue
+        if arg in ("-h", "--help"):
+            print(__doc__.strip())
+            return 0
+        break
+
+    cmd = argv[idx:]
+    if not cmd:
+        raise SystemExit("Usage: ./scripts/with-signing-env [--file <path>] [--] <command...>")
+
+    gpg_path = Path(
+        gpg_file_arg
+        or os.environ.get("KEYSTORE_PROPERTIES_GPG")
+        or (repo_root() / "keystore.properties.gpg")
+    )
+    props = parse_java_properties(gpg_decrypt(gpg_path))
+    env = os.environ.copy()
+    for prop_key, env_key in PROP_TO_ENV.items():
+        if prop_key in props and props[prop_key]:
+            env.setdefault(env_key, props[prop_key])
+
+    os.execvpe(cmd[0], cmd, env)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
