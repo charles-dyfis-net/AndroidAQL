@@ -220,6 +220,15 @@
     <string name="dialog_delete">Delete</string>
     <string name="dialog_got_it">Got it</string>
 
+    <string name="dialog_exit_title">Exit AirSlice?</string>
+    <string name="dialog_exit_msg_idle_can_stop">No monitor is currently in range or linked for auto-sleep. Leave AirSlice scanning in the background, or stop the background service until you reopen the app.</string>
+    <string name="dialog_exit_msg_active_trip">Your trip will continue recording in the background.</string>
+    <string name="dialog_exit_msg_monitor_in_range">AirSlice will continue monitoring your air quality in the background.</string>
+    <string name="dialog_exit_msg_companion_linked">AirSlice will stay ready in the background and automatically sleep while your linked monitor is away.</string>
+    <string name="dialog_exit_stop_service_btn">Stop &amp; Exit</string>
+    <string name="dialog_exit_keep_running_btn">Run in Background</string>
+    <string name="dialog_exit_confirm_btn">Exit</string>
+
     <string name="disclosure_title">📍 Location, Activity &amp; Privacy Disclosure</string>
     <string name="disclosure_message">AirSlice accesses location, Wi-Fi, and physical activity step data on-device for Trip Mode and Saved Places (including in the background or with the screen off), and immediately discards almost all of it—keeping only movement speed (m/s) and GPS accuracy (m):\n\n• Saved Wi-Fi Places: Checks whether your connected Wi-Fi matches a Saved Place (Location permission required) so GPS and step sensing stay off at saved locations like your home or office, where movement tracking isn\'t needed.\n\n• Trip Movement (GPS + Steps): Outside Saved Places while your monitor is nearby, converts GPS and step sensor data into movement speed (m/s) and accuracy (m) in memory, immediately discarding raw coordinates and step counts.\n\n• 100% Local &amp; Private: Raw GPS coordinates, unconfigured Wi-Fi names, and step counts are never saved to disk or sent to any server; recorded summaries leave your phone only when you explicitly share an XLSX workbook or diagnostic log.</string>
     <string name="disclosure_continue_btn">Continue</string>

@@ -6,6 +6,8 @@ import io.github.androidaql.engine.ExcursionStateMachine.CollectorState
 import io.github.androidaql.service.AqlAutoStartReceiver
 import io.github.androidaql.service.AqlCollectorService
 import io.github.androidaql.service.CompanionDeviceHelper
+import io.github.androidaql.ui.MainActivity
+import io.github.androidaql.ui.MainActivity.Companion.ExitConfirmationMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -595,6 +597,76 @@ class BackgroundResumeTest {
             "Link 58:2D:34:12:AB:BC for battery savings?" to
                 "Tap to link 58:2D:34:12:AB:BC. AirSlice will sleep when it's away and auto-resume when nearby.",
             AqlCollectorService.buildCompanionLinkSuggestionCopy("58:2d:34:12:ab:bc", "58:2D:34:12:AB:BC")
+        )
+    }
+
+    @Test
+    fun resolveExitConfirmationModeExposesStopOptionOnlyWhenIdleUnlinkedAndNoTrip() {
+        assertEquals(
+            ExitConfirmationMode.IDLE_CAN_STOP_SERVICE,
+            MainActivity.resolveExitConfirmationMode(
+                collectorState = CollectorState.IDLE_OUT_OF_RANGE,
+                hasActiveExcursion = false,
+                hasLinkedCompanionDevice = false,
+                isDemoStreamRunning = false
+            )
+        )
+
+        assertEquals(
+            ExitConfirmationMode.ACTIVE_TRIP,
+            MainActivity.resolveExitConfirmationMode(
+                collectorState = CollectorState.IDLE_OUT_OF_RANGE,
+                hasActiveExcursion = true,
+                hasLinkedCompanionDevice = false,
+                isDemoStreamRunning = false
+            )
+        )
+        assertEquals(
+            ExitConfirmationMode.ACTIVE_TRIP,
+            MainActivity.resolveExitConfirmationMode(
+                collectorState = CollectorState.FIELD_EXCURSION_SIGNAL_PAUSED,
+                hasActiveExcursion = true,
+                hasLinkedCompanionDevice = true,
+                isDemoStreamRunning = true
+            )
+        )
+
+        assertEquals(
+            ExitConfirmationMode.MONITOR_IN_RANGE,
+            MainActivity.resolveExitConfirmationMode(
+                collectorState = CollectorState.STATIONARY_KNOWN_AP,
+                hasActiveExcursion = false,
+                hasLinkedCompanionDevice = false,
+                isDemoStreamRunning = false
+            )
+        )
+        assertEquals(
+            ExitConfirmationMode.MONITOR_IN_RANGE,
+            MainActivity.resolveExitConfirmationMode(
+                collectorState = CollectorState.FIELD_EXCURSION_ACTIVE,
+                hasActiveExcursion = false,
+                hasLinkedCompanionDevice = false,
+                isDemoStreamRunning = false
+            )
+        )
+        assertEquals(
+            ExitConfirmationMode.MONITOR_IN_RANGE,
+            MainActivity.resolveExitConfirmationMode(
+                collectorState = CollectorState.IDLE_OUT_OF_RANGE,
+                hasActiveExcursion = false,
+                hasLinkedCompanionDevice = false,
+                isDemoStreamRunning = true
+            )
+        )
+
+        assertEquals(
+            ExitConfirmationMode.COMPANION_LINKED_IDLE,
+            MainActivity.resolveExitConfirmationMode(
+                collectorState = CollectorState.IDLE_OUT_OF_RANGE,
+                hasActiveExcursion = false,
+                hasLinkedCompanionDevice = true,
+                isDemoStreamRunning = false
+            )
         )
     }
 }

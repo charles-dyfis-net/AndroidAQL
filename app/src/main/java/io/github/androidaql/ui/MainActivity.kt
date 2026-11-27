@@ -37,6 +37,7 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -98,6 +99,7 @@ class MainActivity : AppCompatActivity() {
     private var activeSegmentModalDialog: AlertDialog? = null
     private var activeDisclosureDialog: AlertDialog? = null
     private var activeHelpDialog: AlertDialog? = null
+    private var activeExitConfirmDialog: AlertDialog? = null
     private var activeSettingsDialog: SettingsScreenDialog? = null
 
     private lateinit var topHeaderBar: LinearLayout
@@ -327,6 +329,13 @@ class MainActivity : AppCompatActivity() {
 
         AqlCollectorService.cancelResumeRequiredNotification(this)
         pendingServiceStartIntent = buildServiceStartIntent(intent)
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (isExitingApp || isFinishing) return
+                showExitConfirmationDialog()
+            }
+        })
     }
 
     override fun onStart() {
@@ -438,8 +447,89 @@ class MainActivity : AppCompatActivity() {
         activeDisclosureDialog = null
         activeHelpDialog?.dismiss()
         activeHelpDialog = null
+        activeExitConfirmDialog?.dismiss()
+        activeExitConfirmDialog = null
         unbindCollectorService()
         super.onDestroy()
+    }
+
+    private fun stopServiceAndExitApp(
+        svc: AqlCollectorService?,
+        reason: String,
+        allowDuringActiveExcursion: Boolean
+    ) {
+        activeSettingsDialog?.dismiss()
+        activeSettingsDialog = null
+        activeExitConfirmDialog?.dismiss()
+        activeExitConfirmDialog = null
+        if (svc != null) {
+            svc.removeUserStopListener(serviceUserStopListener)
+            val stopped = svc.requestUserStop(
+                reason = reason,
+                allowDuringActiveExcursion = allowDuringActiveExcursion
+            )
+            if (!stopped) {
+                svc.addUserStopListener(serviceUserStopListener)
+                finish()
+                return
+            }
+        }
+        completeAppExit()
+    }
+
+    private fun showExitConfirmationDialog() {
+        if (activeExitConfirmDialog?.isShowing == true) return
+        val svc = collectorService ?: AqlCollectorService.instance
+        val snap = svc?.buildSnapshot()
+        val collectorState = snap?.collectorState ?: ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE
+        val hasActiveExcursion = snap?.activeExcursionId != null
+        val hasLinkedCompanion = CompanionDeviceHelper.hasAssociations(this)
+        val isDemoStreamRunning = svc?.isDemoStreamRunning == true
+        val mode = resolveExitConfirmationMode(
+            collectorState = collectorState,
+            hasActiveExcursion = hasActiveExcursion,
+            hasLinkedCompanionDevice = hasLinkedCompanion,
+            isDemoStreamRunning = isDemoStreamRunning
+        )
+
+        val builder = AlertDialog.Builder(this)
+            .setTitle(R.string.dialog_exit_title)
+
+        if (mode == ExitConfirmationMode.IDLE_CAN_STOP_SERVICE) {
+            builder.setMessage(R.string.dialog_exit_msg_idle_can_stop)
+                .setPositiveButton(R.string.dialog_exit_stop_service_btn) { _, _ ->
+                    stopServiceAndExitApp(
+                        svc = collectorService ?: AqlCollectorService.instance,
+                        reason = "exit_dialog",
+                        allowDuringActiveExcursion = false
+                    )
+                }
+                .setNeutralButton(R.string.dialog_exit_keep_running_btn) { _, _ ->
+                    finish()
+                }
+                .setNegativeButton(R.string.dialog_cancel, null)
+        } else {
+            val messageRes = when (mode) {
+                ExitConfirmationMode.ACTIVE_TRIP -> R.string.dialog_exit_msg_active_trip
+                ExitConfirmationMode.MONITOR_IN_RANGE -> R.string.dialog_exit_msg_monitor_in_range
+                ExitConfirmationMode.COMPANION_LINKED_IDLE -> R.string.dialog_exit_msg_companion_linked
+                ExitConfirmationMode.IDLE_CAN_STOP_SERVICE -> R.string.dialog_exit_msg_idle_can_stop
+            }
+            builder.setMessage(messageRes)
+                .setPositiveButton(R.string.dialog_exit_confirm_btn) { _, _ ->
+                    finish()
+                }
+                .setNegativeButton(R.string.dialog_cancel, null)
+        }
+
+        val dialog = builder.create()
+        activeExitConfirmDialog = dialog
+        dialog.setOnDismissListener {
+            if (activeExitConfirmDialog === dialog) {
+                activeExitConfirmDialog = null
+            }
+        }
+        dialog.show()
     }
 
     private fun completeAppExit() {
@@ -452,6 +542,8 @@ class MainActivity : AppCompatActivity() {
         activeDisclosureDialog = null
         activeHelpDialog?.dismiss()
         activeHelpDialog = null
+        activeExitConfirmDialog?.dismiss()
+        activeExitConfirmDialog = null
         unbindCollectorService()
         finishAndRemoveTask()
     }
@@ -504,6 +596,8 @@ class MainActivity : AppCompatActivity() {
         activeDisclosureDialog = null
         activeHelpDialog?.dismiss()
         activeHelpDialog = null
+        activeExitConfirmDialog?.dismiss()
+        activeExitConfirmDialog = null
 
         fun prepareDemoExcursion(reseed: Boolean): Long {
             if (svc.metadataDb.getKnownPlaces().isEmpty()) {
@@ -3088,16 +3182,11 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun onStopServiceAndExitRequested() {
-                    val currentSvc = collectorService ?: svc
-                    isExitingApp = true
-                    activeSettingsDialog?.dismiss()
-                    activeSettingsDialog = null
-                    currentSvc.removeUserStopListener(serviceUserStopListener)
-                    currentSvc.requestUserStop(
+                    stopServiceAndExitApp(
+                        svc = collectorService ?: svc,
                         reason = "settings_exit",
                         allowDuringActiveExcursion = true
                     )
-                    completeAppExit()
                 }
 
                 override fun onSettingsDismissed() {
@@ -4445,6 +4534,26 @@ class MainActivity : AppCompatActivity() {
             return (screenHeightDp * PORTRAIT_SLICER_HEIGHT_FRACTION)
                 .toInt()
                 .coerceIn(MIN_PORTRAIT_SLICER_HEIGHT_DP, MAX_PORTRAIT_SLICER_HEIGHT_DP)
+        }
+
+        enum class ExitConfirmationMode {
+            ACTIVE_TRIP,
+            MONITOR_IN_RANGE,
+            COMPANION_LINKED_IDLE,
+            IDLE_CAN_STOP_SERVICE
+        }
+
+        fun resolveExitConfirmationMode(
+            collectorState: ExcursionStateMachine.CollectorState,
+            hasActiveExcursion: Boolean,
+            hasLinkedCompanionDevice: Boolean,
+            isDemoStreamRunning: Boolean = false
+        ): ExitConfirmationMode = when {
+            hasActiveExcursion -> ExitConfirmationMode.ACTIVE_TRIP
+            collectorState != ExcursionStateMachine.CollectorState.IDLE_OUT_OF_RANGE || isDemoStreamRunning ->
+                ExitConfirmationMode.MONITOR_IN_RANGE
+            hasLinkedCompanionDevice -> ExitConfirmationMode.COMPANION_LINKED_IDLE
+            else -> ExitConfirmationMode.IDLE_CAN_STOP_SERVICE
         }
     }
 }
